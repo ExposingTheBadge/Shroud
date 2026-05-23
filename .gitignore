@@ -1,12 +1,16 @@
+# Build artifacts
 *.exe
 *.obj
 *.dll
 *.db
 *.pyc
+*.sha256
+*.md5sum
 __pycache__/
 *.keystore
 *.apk
 *.aab
+*.dex
 /build/
 /files/
 /downloads/
@@ -16,12 +20,37 @@ __pycache__/
 *.suo
 *.user
 *.zip
+*.tar.gz
 sdk/
 jdk/
 *.log
+*.tmp
+
+# Training
 tokenized_dataset/
 model-output/
 tb_logs/
-tb_logs/
-.env
+data/
+
+# Server state
+server/ghostlink.db
+server/ghostlink.db-shm
+server/ghostlink.db-wal
+server/files/
+
+# Android build
+clients/android/app/build/
+clients/android/.gradle/
+clients/android/build/
+clients/android/local.properties
+clients/android/sdk/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Temp
 *.tmp
+temp/
+tmp/

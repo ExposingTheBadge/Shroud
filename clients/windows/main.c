@@ -9,6 +9,7 @@
 #include <richedit.h>
 #include <commdlg.h>
 #include <uxtheme.h>
+#include <shellapi.h>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "uxtheme.lib")
@@ -263,6 +264,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR lpCmdLine, int nC
     ShowWindow(hMainWnd, nCmdShow);
     UpdateWindow(hMainWnd);
 
+    /* Menu bar */
+    {
+        HMENU hMenuBar = CreateMenu();
+        HMENU hFileMenu = CreatePopupMenu();
+        AppendMenuW(hFileMenu, MF_STRING, 3001, L"Check for &Updates");
+        AppendMenuW(hFileMenu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hFileMenu, MF_STRING, 3002, L"E&xit");
+        AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hFileMenu, L"&File");
+
+        HMENU hSettingsMenu = CreatePopupMenu();
+        AppendMenuW(hSettingsMenu, MF_STRING, ID_SETTINGS, L"&Settings...");
+        AppendMenuW(hSettingsMenu, MF_STRING, ID_THEME_TOGGLE, gDarkMode ? L"Switch to &Light Mode" : L"Switch to &Dark Mode");
+        AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hSettingsMenu, L"&Settings");
+
+        HMENU hHelpMenu = CreatePopupMenu();
+        AppendMenuW(hHelpMenu, MF_STRING, 3003, L"&About GHOSTLINK");
+        AppendMenuW(hHelpMenu, MF_STRING, 3004, L"&Documentation");
+        AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hHelpMenu, L"&Help");
+
+        SetMenu(hMainWnd, hMenuBar);
+    }
+
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
@@ -348,10 +371,53 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             else if (LOWORD(wp) == ID_THEME_TOGGLE) {
                 Theme_Toggle();
+                /* Update menu item text */
+                HMENU hSettingsMenu = GetSubMenu(GetMenu(hMainWnd), 1);
+                if (hSettingsMenu) ModifyMenuW(hSettingsMenu, ID_THEME_TOGGLE, MF_BYCOMMAND | MF_STRING,
+                    ID_THEME_TOGGLE, gDarkMode ? L"Switch to &Light Mode" : L"Switch to &Dark Mode");
                 return 0;
             }
             else if (LOWORD(wp) == ID_SETTINGS) {
                 OnSettings();
+                return 0;
+            }
+            else if (LOWORD(wp) == 3001) {
+                /* Check for Updates */
+                HttpResponse *ver = network_get("/api/v1/version");
+                if (ver && ver->len > 10) {
+                    char *latest = json_get_string(ver->data, "version");
+                    char msg[256];
+                    if (latest) {
+                        wsprintfA(msg, "Latest: v%s\nCurrent: v%s\n\nVisit the GitHub releases page to download.", latest, CLIENT_VERSION);
+                        free(latest);
+                    } else {
+                        wsprintfA(msg, "You are running GHOSTLINK v%s.\nCould not determine latest version.", CLIENT_VERSION);
+                    }
+                    MessageBoxA(hMainWnd, msg, "GHOSTLINK Updates", MB_ICONINFORMATION);
+                } else {
+                    MessageBoxA(hMainWnd, "Could not reach update server.", "GHOSTLINK Updates", MB_ICONWARNING);
+                }
+                if (ver) network_free_response(ver);
+                return 0;
+            }
+            else if (LOWORD(wp) == 3002) {
+                DestroyWindow(hMainWnd);
+                return 0;
+            }
+            else if (LOWORD(wp) == 3003) {
+                MessageBoxA(hMainWnd,
+                    "GHOSTLINK Secure Messenger v" CLIENT_VERSION "\n\n"
+                    "FIPS 140-2 Compliant E2E Encrypted Messaging\n"
+                    "AES-256-GCM | ECDH P-384 | ML-KEM-1024 (PQ)\n"
+                    "TPM 2.0 | Self-Destructing Messages | One-Time Files\n\n"
+                    "Messages destroyed on delivery. Files self-destruct after download.\n"
+                    "Server is a blind relay -- never sees plaintext, never retains data.\n\n"
+                    "No personal data. No metadata. No history. No trace.",
+                    "About GHOSTLINK", MB_ICONINFORMATION);
+                return 0;
+            }
+            else if (LOWORD(wp) == 3004) {
+                ShellExecuteA(NULL, "open", "https://github.com/GHOSTLINK/releases", NULL, NULL, SW_SHOW);
                 return 0;
             }
             else if (LOWORD(wp) == ID_SIDE_BTN) {
@@ -515,13 +581,7 @@ void CreateMessagesPanel(HWND parent) {
     /* Theme toggle */
     CreateWindowW(L"BUTTON", gDarkMode ? L"Light Mode" : L"Dark Mode",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-        4, 500, 104, 24, parent, (HMENU)ID_THEME_TOGGLE, hInst, NULL);
-    SendMessage(hSideBtn, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
-
-    /* Settings button */
-    CreateWindowW(L"BUTTON", L"Settings",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-        112, 500, 104, 24, parent, (HMENU)ID_SETTINGS, hInst, NULL);
+        4, 500, 212, 24, parent, (HMENU)ID_THEME_TOGGLE, hInst, NULL);
     SendMessage(hSideBtn, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
 
     /* -- Chat area --------------------------------------------------- */
@@ -989,13 +1049,11 @@ void RepositionChatControls(int cx, int cy) {
     /* Sidebar: list stretches, buttons pinned to bottom */
     SetWindowPos(hSideList, NULL, 4, 58, sidebarW - 8, cy - 160, SWP_NOZORDER);
 
-    /* Theme toggle + Settings buttons at very bottom */
+    /* Theme toggle at bottom */
     HWND hThemeBtn = GetDlgItem(hMainWnd, ID_THEME_TOGGLE);
-    HWND hSettingsBtn = GetDlgItem(hMainWnd, ID_SETTINGS);
-    if (hThemeBtn) SetWindowPos(hThemeBtn, NULL, 4, cy - 28, 104, 24, SWP_NOZORDER);
-    if (hSettingsBtn) SetWindowPos(hSettingsBtn, NULL, 112, cy - 28, 104, 24, SWP_NOZORDER);
+    if (hThemeBtn) SetWindowPos(hThemeBtn, NULL, 4, cy - 28, sidebarW - 8, 24, SWP_NOZORDER);
 
-    /* New Group button above them */
+    /* New Group button above */
     SetWindowPos(hSideBtn, NULL, 4, cy - 56, sidebarW - 8, 24, SWP_NOZORDER);
 
     /* Chat area -- calculate from bottom up */
@@ -1108,53 +1166,225 @@ void UpdateSecurityStatus(void) {
     SetWindowTextA(hStatusBar, status);
 }
 
-/* -- Settings & Nuke ------------------------------------------------ */
-void OnNuke(void) {
-    int result = MessageBoxW(hMainWnd,
-        L"NUKE MY DATA\n\n"
-        L"This will permanently delete:\n"
-        L"* All locally stored messages\n"
-        L"* All encryption keys\n"
-        L"* Your device identity\n"
-        L"* The GHOSTLINK client itself\n\n"
-        L"The server-side messages are already destroyed.\n"
-        L"This action is IRREVERSIBLE.\n\n"
-        L"Are you absolutely sure?",
-        L"GHOSTLINK -- Nuke My Data",
-        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+/* -- Settings Dialog Proc ------------------------------------------- */
+#define IDC_ACCENT_R  2001
+#define IDC_ACCENT_G  2002
+#define IDC_ACCENT_B  2003
+#define IDC_APPLYCLR  2004
+#define IDC_CHECKUPD  2005
+#define IDC_NUKE_BTN  2006
+#define IDC_DARKMODE  2007
 
-    if (result != IDYES) return;
+static HWND hSettingsDlg = NULL;
+static HWND hAccentR, hAccentG, hAccentB, hSettingsStatus;
 
-    /* Wipe local data */
-    DeleteFileA("D:\\GHOSTLINK\\msgcache.enc");
-    storage_delete_all();
+void Settings_UpdateFields(void) {
+    if (!hSettingsDlg) return;
+    char buf[64];
+    wsprintfA(buf, "%d", (gTheme->accent >> 16) & 0xFF);
+    SetWindowTextA(GetDlgItem(hSettingsDlg, IDC_ACCENT_R), buf);
+    wsprintfA(buf, "%d", (gTheme->accent >> 8) & 0xFF);
+    SetWindowTextA(GetDlgItem(hSettingsDlg, IDC_ACCENT_G), buf);
+    wsprintfA(buf, "%d", gTheme->accent & 0xFF);
+    SetWindowTextA(GetDlgItem(hSettingsDlg, IDC_ACCENT_B), buf);
+}
 
-    /* Kill DLLs and message loop */
-    DestroyWindow(hMainWnd);
+void Settings_ApplyAccent(void) {
+    if (!hSettingsDlg) return;
+    char rbuf[8], gbuf[8], bbuf[8];
+    GetWindowTextA(GetDlgItem(hSettingsDlg, IDC_ACCENT_R), rbuf, 8);
+    GetWindowTextA(GetDlgItem(hSettingsDlg, IDC_ACCENT_G), gbuf, 8);
+    GetWindowTextA(GetDlgItem(hSettingsDlg, IDC_ACCENT_B), bbuf, 8);
+    int r = atoi(rbuf), g = atoi(gbuf), b = atoi(bbuf);
+    if (r < 0) r = 0; if (r > 255) r = 255;
+    if (g < 0) g = 0; if (g > 255) g = 255;
+    if (b < 0) b = 0; if (b > 255) b = 255;
+    gTheme->accent = (COLORREF)((b << 16) | (g << 8) | r);
+    Theme_CreateBrushes();
+    SetWindowTextA(hSettingsStatus, "Accent color applied");
+    if (gRegistered) Theme_ApplyToControls(hMainWnd);
+}
 
-    /* Schedule self-deletion via cmd.exe after process exits */
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
-    char cmd[512];
-    wsprintfA(cmd, "cmd.exe /c timeout /t 2 /nobreak > nul && del /f /q \"%s\"", exePath);
-    WinExec(cmd, SW_HIDE);
+LRESULT CALLBACK SettingsDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE:
+        return 0;
+    case WM_CTLCOLORSTATIC:
+        SetBkMode((HDC)wp, TRANSPARENT);
+        SetTextColor((HDC)wp, gTheme->text);
+        SetBkColor((HDC)wp, gTheme->bg_card);
+        return (LRESULT)gCardBrush;
+    case WM_CTLCOLOREDIT:
+        SetBkMode((HDC)wp, TRANSPARENT);
+        SetTextColor((HDC)wp, gTheme->text);
+        SetBkColor((HDC)wp, gTheme->bg_input);
+        return (LRESULT)gInputBrush;
+    case WM_CTLCOLORBTN:
+        SetBkMode((HDC)wp, TRANSPARENT);
+        SetTextColor((HDC)wp, gTheme->text);
+        return (LRESULT)gCardBrush;
+    case WM_ERASEBKGND:
+        { RECT rc; GetClientRect(hwnd, &rc); FillRect((HDC)wp, &rc, gBgBrush); return 1; }
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_APPLYCLR) { Settings_ApplyAccent(); return 0; }
+        if (LOWORD(wp) == IDC_DARKMODE) {
+            Theme_Toggle();
+            Settings_UpdateFields();
+            InvalidateRect(hwnd, NULL, TRUE);
+            return 0;
+        }
+        if (LOWORD(wp) == IDC_CHECKUPD) {
+            SetWindowTextA(hSettingsStatus, "Checking for updates...");
+            HttpResponse *ver = network_get("/api/v1/version");
+            if (ver && ver->len > 10) {
+                char *latest = json_get_string(ver->data, "version");
+                if (latest) {
+                    char msg[128];
+                    wsprintfA(msg, "Latest: v%s | Current: v%s", latest, CLIENT_VERSION);
+                    SetWindowTextA(hSettingsStatus, msg);
+                    free(latest);
+                }
+            } else {
+                SetWindowTextA(hSettingsStatus, "Could not reach update server");
+            }
+            if (ver) network_free_response(ver);
+            return 0;
+        }
+        if (LOWORD(wp) == IDC_NUKE_BTN) {
+            int result = MessageBoxW(hwnd,
+                L"NUKE MY DATA\n\n"
+                L"This will permanently delete all local data,\n"
+                L"encryption keys, and the GHOSTLINK executable.\n\n"
+                L"This action is IRREVERSIBLE.",
+                L"GHOSTLINK -- Confirm Nuke",
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+            if (result == IDYES) {
+                DeleteFileA("D:\\GHOSTLINK\\msgcache.enc");
+                storage_delete_all();
+                DestroyWindow(hwnd);
+                DestroyWindow(hMainWnd);
+                char exePath[MAX_PATH];
+                GetModuleFileNameA(NULL, exePath, MAX_PATH);
+                char cmd[512];
+                wsprintfA(cmd, "cmd.exe /c timeout /t 2 /nobreak > nul && del /f /q \"%s\"", exePath);
+                WinExec(cmd, SW_HIDE);
+            }
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        hSettingsDlg = NULL;
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 void OnSettings(void) {
-    char msg[512];
-    wsprintfA(msg,
-        "GHOSTLINK v%s\n\n"
-        "Device: %.32s...\n"
-        "Platform: %s\n"
-        "Messages are destroyed on server after delivery.\n"
-        "Files: one-time download, 24h expiry.\n\n"
-        "Click OK to close, or NUKE to destroy everything.",
-        CLIENT_VERSION, gCfg.id, gCfg.platform);
+    if (hSettingsDlg) { SetForegroundWindow(hSettingsDlg); return; }
 
-    MessageBoxA(hMainWnd, msg, "GHOSTLINK Settings", MB_OK);
+    WNDCLASSEXW wc = { sizeof(wc) };
+    wc.lpfnWndProc = SettingsDlgProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = gBgBrush;
+    wc.lpszClassName = L"GHOSTLINK_Settings";
+    RegisterClassExW(&wc);
 
-    /* Offer nuke */
-    OnNuke();
+    hSettingsDlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"GHOSTLINK_Settings",
+        L"GHOSTLINK Settings", WS_VISIBLE | WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        200, 120, 440, 460, hMainWnd, NULL, hInst, NULL);
+    if (!hSettingsDlg) return;
+
+    HFONT hdr = CreateFontW(18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_DONTCARE, L"Segoe UI");
+
+    int y = 12;
+    /* Title */
+    HWND t = CreateWindowW(L"STATIC", L"GHOSTLINK Settings",
+        WS_CHILD | WS_VISIBLE, 16, y, 380, 28, hSettingsDlg, NULL, hInst, NULL);
+    SendMessage(t, WM_SETFONT, (WPARAM)hdr, TRUE);
+    y += 36;
+
+    /* -- Theme section -- */
+    HWND grp1 = CreateWindowW(L"BUTTON", L" Theme Colors ",
+        WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 10, y, 410, 120, hSettingsDlg, NULL, hInst, NULL);
+    int gy = y + 20;
+    CreateWindowW(L"STATIC", L"Dark Mode:", WS_CHILD | WS_VISIBLE, 22, gy, 70, 22, hSettingsDlg, NULL, hInst, NULL);
+    HWND dmBtn = CreateWindowW(L"BUTTON", gDarkMode ? L"ON (click to toggle)" : L"OFF (click to toggle)",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 100, gy, 160, 22, hSettingsDlg, (HMENU)IDC_DARKMODE, hInst, NULL);
+    SendMessage(dmBtn, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+    gy += 28;
+
+    CreateWindowW(L"STATIC", L"Accent:", WS_CHILD | WS_VISIBLE, 22, gy, 70, 22, hSettingsDlg, NULL, hInst, NULL);
+    CreateWindowW(L"STATIC", L"R:", WS_CHILD | WS_VISIBLE, 100, gy, 16, 22, hSettingsDlg, NULL, hInst, NULL);
+    hAccentR = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_NUMBER,
+        118, gy, 36, 20, hSettingsDlg, (HMENU)IDC_ACCENT_R, hInst, NULL);
+    CreateWindowW(L"STATIC", L"G:", WS_CHILD | WS_VISIBLE, 162, gy, 16, 22, hSettingsDlg, NULL, hInst, NULL);
+    hAccentG = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_NUMBER,
+        180, gy, 36, 20, hSettingsDlg, (HMENU)IDC_ACCENT_G, hInst, NULL);
+    CreateWindowW(L"STATIC", L"B:", WS_CHILD | WS_VISIBLE, 224, gy, 16, 22, hSettingsDlg, NULL, hInst, NULL);
+    hAccentB = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_NUMBER,
+        242, gy, 36, 20, hSettingsDlg, (HMENU)IDC_ACCENT_B, hInst, NULL);
+    HWND applyBtn = CreateWindowW(L"BUTTON", L"Apply",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 290, gy-2, 80, 24, hSettingsDlg, (HMENU)IDC_APPLYCLR, hInst, NULL);
+    gy += 24;
+    CreateWindowW(L"STATIC", L"Example: this text uses the accent color for highlights",
+        WS_CHILD | WS_VISIBLE, 22, gy, 380, 18, hSettingsDlg, NULL, hInst, NULL);
+    y += 130;
+    Settings_UpdateFields();
+
+    /* -- Account / Device section -- */
+    HWND grp2 = CreateWindowW(L"BUTTON", L" Device Info ",
+        WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 10, y, 410, 90, hSettingsDlg, NULL, hInst, NULL);
+    gy = y + 20;
+    char devInfo[256];
+    wsprintfA(devInfo, "Device ID: %.48s...", gCfg.id);
+    CreateWindowA("STATIC", devInfo, WS_CHILD | WS_VISIBLE, 22, gy, 380, 18, hSettingsDlg, NULL, hInst, NULL);
+    gy += 20;
+    wsprintfA(devInfo, "Username: %s | Platform: %s", gCfg.username, gCfg.platform);
+    CreateWindowA("STATIC", devInfo, WS_CHILD | WS_VISIBLE, 22, gy, 380, 18, hSettingsDlg, NULL, hInst, NULL);
+    gy += 22;
+    char tpmStr[128]; tpm_status_string(tpmStr, 128);
+    const char *pq = kyber_available() ? "ECDH+ML-KEM-1024 PQ" : "ECDH P-384";
+    char cryptInfo[256];
+    wsprintfA(cryptInfo, "Crypto: AES-256-GCM | %s | %s", pq, tpmStr);
+    CreateWindowA("STATIC", cryptInfo, WS_CHILD | WS_VISIBLE, 22, gy, 380, 18, hSettingsDlg, NULL, hInst, NULL);
+    y += 100;
+
+    /* -- Updates section -- */
+    HWND grp3 = CreateWindowW(L"BUTTON", L" Updates ",
+        WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 10, y, 410, 60, hSettingsDlg, NULL, hInst, NULL);
+    gy = y + 20;
+    char verStr[64];
+    wsprintfA(verStr, "Current version: GHOSTLINK v%s", CLIENT_VERSION);
+    CreateWindowA("STATIC", verStr, WS_CHILD | WS_VISIBLE, 22, gy, 300, 18, hSettingsDlg, NULL, hInst, NULL);
+    HWND chkBtn = CreateWindowW(L"BUTTON", L"Check for Updates",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 300, gy-2, 100, 22, hSettingsDlg, (HMENU)IDC_CHECKUPD, hInst, NULL);
+    y += 70;
+
+    /* -- Danger Zone -- */
+    HWND grp4 = CreateWindowW(L"BUTTON", L" Danger Zone ",
+        WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 10, y, 410, 56, hSettingsDlg, NULL, hInst, NULL);
+    gy = y + 20;
+    CreateWindowW(L"STATIC", L"Permanently destroy all data and the application:",
+        WS_CHILD | WS_VISIBLE, 22, gy, 250, 18, hSettingsDlg, NULL, hInst, NULL);
+    HWND nukeBtn = CreateWindowW(L"BUTTON", L"NUKE MY DATA",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 290, gy-2, 115, 26, hSettingsDlg, (HMENU)IDC_NUKE_BTN, hInst, NULL);
+    y += 66;
+
+    /* Status bar */
+    hSettingsStatus = CreateWindowW(L"STATIC", L"",
+        WS_CHILD | WS_VISIBLE, 10, y, 410, 20, hSettingsDlg, NULL, hInst, NULL);
+    SendMessage(hSettingsStatus, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+
+    /* Apply theme to dialog */
+    EnumChildWindows(hSettingsDlg, Theme_EnumChildProc, 0);
+    SetFocus(GetDlgItem(hSettingsDlg, IDC_DARKMODE));
+}
+
+void OnNuke(void) {
+    OnSettings();
 }
 
 /* -- Attach & Send File -------------------------------------------- */
