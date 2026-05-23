@@ -1,0 +1,149 @@
+/*
+ * GHOSTLINK Windows Client — FIPS 140-2 Native C
+ * Compile: build.bat (vcvars64 + cl /O2 /MT *.c /Fe:GHOSTLINK.exe)
+ */
+
+#ifndef GHOSTLINK_CLIENT_H
+#define GHOSTLINK_CLIENT_H
+
+#define UNICODE
+#define _UNICODE
+#define WIN32_LEAN_AND_MEAN
+#define NTDDI_VERSION 0x06020000  /* Windows 8+ for CNG */
+#define _WIN32_WINNT 0x0602
+
+#include <windows.h>
+#include <wincrypt.h>
+#include <bcrypt.h>
+#include <ncrypt.h>
+#include <winhttp.h>
+#include <winsock2.h>
+#include <dpapi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "ncrypt.lib")
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "comdlg32.lib")
+
+/* ── Configuration ────────────────────────────────────────────────── */
+#define SERVER_HOST      L"150.195.114.185"
+#define SERVER_PORT       58443
+#define SERVER_USE_TLS    0
+
+#define AES_KEY_LEN       32
+#define AES_GCM_IV_LEN    12
+#define AES_GCM_TAG_LEN   16
+#define SHA256_LEN        32
+#define PUBLIC_KEY_MAX    512
+#define DEVICE_ID_LEN     32
+#define MAX_USERNAME      64
+#define MAX_PASSWORD      128
+#define MAX_DEVICE_NAME   64
+#define MAX_MESSAGE_BODY  4096
+#define MSG_CACHE_FILE    "D:\\GHOSTLINK\\msgcache.enc"
+
+/* ── Types ─────────────────────────────────────────────────────────── */
+typedef struct {
+    BYTE data[PUBLIC_KEY_MAX];
+    DWORD len;
+} PublicKey;
+
+typedef struct {
+    NCRYPT_KEY_HANDLE handle;
+    PublicKey pub;
+} KeyPair;
+
+typedef struct {
+    char id[DEVICE_ID_LEN * 2 + 1];
+    char username[MAX_USERNAME + 1];
+    char device_name[MAX_DEVICE_NAME + 1];
+    char platform[16];
+    KeyPair identity_key;
+    BYTE session_key[AES_KEY_LEN];
+    BOOL session_valid;
+} DeviceConfig;
+
+typedef struct {
+    char *data;
+    size_t len;
+    size_t cap;
+} HttpResponse;
+
+/* ── Crypto API ───────────────────────────────────────────────────── */
+BOOL   crypto_init(void);
+KeyPair crypto_generate_keypair(void);
+void   crypto_free_keypair(KeyPair *kp);
+BOOL   crypto_derive_shared_secret(NCRYPT_KEY_HANDLE my_priv, PublicKey *peer_pub, BYTE shared_key[AES_KEY_LEN]);
+BOOL   crypto_aes_gcm_encrypt(const BYTE key[AES_KEY_LEN], const BYTE *plain, DWORD plain_len, BYTE *nonce, BYTE *cipher, BYTE *tag);
+BOOL   crypto_aes_gcm_decrypt(const BYTE key[AES_KEY_LEN], const BYTE *nonce, const BYTE *cipher, DWORD cipher_len, const BYTE *tag, BYTE *plain);
+BOOL   crypto_sha256(const BYTE *data, DWORD len, BYTE hash[SHA256_LEN]);
+void   crypto_random_bytes(BYTE *buf, DWORD len);
+char*  crypto_hex_encode(const BYTE *data, DWORD len);
+BOOL   crypto_hex_decode(const char *hex, BYTE *data, DWORD *len);
+
+/* ── Network API ──────────────────────────────────────────────────── */
+BOOL   network_init(void);
+void   network_cleanup(void);
+HttpResponse* network_post(const char *path, const char *json_body);
+HttpResponse* network_get(const char *path);
+HttpResponse* network_upload_file(const char *path, const BYTE *data, DWORD data_len,
+                                   const char *sender_id, const char *recipient_id,
+                                   const char *metadata_json);
+HttpResponse* network_download_file(const char *path, const char *device_id,
+                                     BYTE **out_data, DWORD *out_len);
+void   network_free_response(HttpResponse *r);
+
+/* File transfer helpers */
+BOOL   crypto_encrypt_file_data(const BYTE *key, const BYTE *input, DWORD input_len,
+                                 BYTE **output, DWORD *output_len);
+BOOL   crypto_decrypt_file_data(const BYTE *key, const BYTE *input, DWORD input_len,
+                                 BYTE **output, DWORD *output_len);
+
+/* ── Storage API ──────────────────────────────────────────────────── */
+BOOL   storage_save_keypair(const char *device_id, KeyPair *kp);
+BOOL   storage_load_keypair(const char *device_id, KeyPair *kp);
+BOOL   storage_save_config(DeviceConfig *cfg);
+BOOL   storage_load_config(DeviceConfig *cfg);
+BOOL   storage_exists(void);
+void   storage_delete_all(void);
+void   app_instance_id(char *out, int outSize);
+
+/* ── JSON helpers ─────────────────────────────────────────────────── */
+char*  json_get_string(const char *json, const char *key);
+
+/* ── Post-Quantum Kyber-1024 API ──────────────────────────────────── */
+#define KYBER_1024_PK_LEN  1568
+#define KYBER_1024_SK_LEN  3168
+#define KYBER_1024_CT_LEN  1568
+#define KYBER_1024_SS_LEN  32
+
+BOOL   kyber_init(void);
+void   kyber_cleanup(void);
+BOOL   kyber_available(void);
+BOOL   kyber_keygen(BYTE *pk_out, BYTE *sk_out);
+BOOL   kyber_encaps(BYTE *ct_out, BYTE *ss_out, const BYTE *pk);
+BOOL   kyber_decaps(BYTE *ss_out, const BYTE *ct, const BYTE *sk);
+DWORD  kyber_pk_size(void);
+DWORD  kyber_sk_size(void);
+DWORD  kyber_ct_size(void);
+DWORD  kyber_ss_size(void);
+
+/* ── TPM 2.0 API ──────────────────────────────────────────────────── */
+BOOL   tpm_detect(void);
+BOOL   tpm_is_available(void);
+BOOL   tpm_is_20(void);
+DWORD  tpm_spec_version(void);
+const char* tpm_manufacturer(void);
+BOOL   tpm_seal_key(const BYTE *keyData, DWORD keyLen, const char *label);
+BOOL   tpm_unseal_key(BYTE **keyData, DWORD *keyLen, const char *label);
+void   tpm_status_string(char *buf, int bufSize);
+
+/* ── Security Status Display ──────────────────────────────────────── */
+void   UpdateSecurityStatus(void);
+
+#endif /* GHOSTLINK_CLIENT_H */

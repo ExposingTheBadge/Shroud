@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GHOSTLINK — Secure Messenger Explained</title>
+<style>
+:root{--bg:#080c14;--bg2:#0d1321;--bg3:#131b2e;--border:#1a2744;--text:#c8d6e5;--dim:#6a7890;--accent:#00d4ff;--green:#2ed573;--red:#ff4757;--warn:#ffc048}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:15px;line-height:1.7;padding:0}
+.hero{background:linear-gradient(135deg,var(--bg2) 0%,#0a1628 100%);border-bottom:1px solid var(--border);padding:40px 20px;text-align:center}
+.hero h1{font-size:32px;color:var(--accent);letter-spacing:2px;margin-bottom:8px}
+.hero .tagline{font-size:14px;color:var(--dim);letter-spacing:1px}
+.badge{display:inline-block;background:var(--bg3);border:1px solid var(--border);border-radius:20px;padding:4px 14px;font-size:11px;margin:4px;color:var(--dim)}
+.badge.green{border-color:var(--green);color:var(--green)}
+.badge.red{border-color:var(--red);color:var(--red)}
+.container{max-width:780px;margin:0 auto;padding:24px 20px}
+.section{margin-bottom:36px}
+.section h2{font-size:20px;color:var(--accent);margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border);letter-spacing:.5px}
+.section h3{font-size:16px;color:var(--warn);margin:16px 0 8px}
+.rule{background:var(--bg2);border-left:3px solid var(--accent);padding:16px 20px;border-radius:0 8px 8px 0;margin:16px 0;font-size:17px;font-weight:600}
+.step{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:18px 20px;margin:14px 0}
+.step .num{display:inline-block;width:28px;height:28px;line-height:28px;text-align:center;background:var(--accent);color:#000;border-radius:50%;font-weight:700;font-size:13px;margin-right:10px}
+.step .title{font-weight:700;color:var(--accent);font-size:15px;margin-bottom:6px}
+.step p{color:var(--text);font-size:14px;margin:4px 0}
+.flow{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:16px;background:var(--bg2);border-radius:10px;font-size:13px;font-family:Consolas,monospace;margin:12px 0}
+.flow .box{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px 14px;text-align:center;white-space:nowrap}
+.flow .arrow{color:var(--accent);font-size:18px}
+.table-wrap{overflow-x:auto;margin:12px 0}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:var(--bg3);padding:10px 14px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);border-bottom:2px solid var(--border)}
+td{padding:10px 14px;border-bottom:1px solid var(--border);font-size:13px}
+tr:nth-child(even){background:var(--bg2)}
+.what-server{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0}
+.what-server .col{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:18px}
+.what-server .col h4{font-size:13px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+.what-server .col.sees h4{color:var(--dim)}
+.what-server .col.never h4{color:var(--red)}
+.what-server .col ul{list-style:none;font-size:13px;line-height:2}
+.what-server .col.sees ul li::before{content:"👁 ";font-size:11px}
+.what-server .col.never ul li::before{content:"✗ ";color:var(--red)}
+.scenario{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin:8px 0;font-size:14px}
+.scenario .q{color:var(--warn);font-weight:600}
+.scenario .a{color:var(--text);margin-top:4px}
+.anon{background:var(--bg2);border:2px solid var(--green);border-radius:12px;padding:24px;text-align:center;margin:20px 0}
+.anon h3{color:var(--green);font-size:18px;margin:0 0 8px}
+.anon p{color:var(--text);font-size:14px;margin:0}
+.footer{text-align:center;padding:30px 20px;color:var(--dim);font-size:12px;border-top:1px solid var(--border);margin-top:40px}
+@media(max-width:600px){.hero h1{font-size:22px}.flow{font-size:11px}.what-server{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="hero">
+<h1>GHOSTLINK</h1>
+<div class="tagline">Secure Messenger — Your Computer Does The Work. The Server Remembers Nothing.</div>
+<div style="margin-top:12px">
+<span class="badge green">No Personal Data</span>
+<span class="badge green">100% Anonymous</span>
+<span class="badge green">End-to-End Encrypted</span>
+<span class="badge green">Self-Destructing Messages</span>
+<span class="badge red">Server Sees Nothing</span>
+<span class="badge red">No Message History</span>
+</div>
+</div>
+
+<div class="container">
+
+<!-- THE ONE RULE -->
+<div class="rule">The One Rule: The server is BLIND and FORGETFUL. Your computer does all the encryption. The server only passes scrambled garbage between people — and deletes it the moment it's delivered.</div>
+
+<!-- ANONYMITY -->
+<div class="anon">
+<h3>No Personal Data. Complete Anonymity.</h3>
+<p>GHOSTLINK does not ask for your email. Does not ask for your phone number. Does not ask for your name, your location, your contacts, or anything else about you.<br><br>
+<strong>All you need is a username and a password.</strong> The username can be anything — &quot;bob123&quot;, &quot;coffee_fan&quot;, a random string. There is no way to trace a username back to a real person.<br><br>
+The server stores: a username (which you made up), a scrambled password hash, a random device ID, a public encryption key (which is just math — like a padlock), and encrypted garbage. That's it. No IP logs. No metadata. No activity tracking. No analytics. No cookies beyond the admin login session.<br><br>
+<strong>You exist on GHOSTLINK only as a username you invented and a public padlock.</strong> There is nothing linking you to your real identity.</p>
+</div>
+
+<!-- HOW IT WORKS -->
+<div class="section">
+<h2>How Messages Work — From Start To Finish</h2>
+
+<div class="step">
+<div class="title"><span class="num">1</span> You Register</div>
+<p>You open GHOSTLINK and type a made-up username and a password. <strong>On your computer only:</strong></p>
+<p>• A 384-bit secret key is created — a number so big that guessing it would take billions of years with every computer on Earth.</p>
+<p>• A matching public key is created — like a padlock you can give to anyone. Only your secret key opens it.</p>
+<p>• Your password is scrambled 600,000 times before being sent. The server stores only the scrambled result.</p>
+<p>• Your computer sends: username + scrambled password + device name + public padlock.</p>
+<p><strong>The server now knows: a made-up username, scrambled math, and a public padlock. None of this can be used to impersonate you or read your messages.</strong></p>
+</div>
+
+<div class="step">
+<div class="title"><span class="num">2</span> You Find A Friend</div>
+<p>You type a username in the search box. The server says "yes, that user exists" and returns their username.</p>
+<p>You click their name. Your computer asks the server for their public padlock(s).</p>
+<p>Now your computer has their padlock. <strong>The server never knows who you're searching for beyond what you type — and it doesn't log searches.</strong></p>
+</div>
+
+<div class="step">
+<div class="title"><span class="num">3</span> You Send A Message</div>
+<p>You type "hey what's up" and click Send. <strong>Everything below happens on your computer, before anything leaves:</strong></p>
+<p>• Your computer does ECDH math: your secret key + their public padlock = a <strong>shared secret</strong> that only you and the recipient can compute. The server never sees this.</p>
+<p>• Your computer builds a package: the message body, your display name, any note/comment, your device ID, and a timestamp.</p>
+<p>• Your computer encrypts the entire package with AES-256-GCM using the shared secret. The result is complete gibberish.</p>
+<p>• This gibberish is wrapped in an envelope — just an ID, a timestamp, a random number, and the scrambled data.</p>
+<p>• The envelope is sent to the server.</p>
+
+<div class="flow">
+<div class="box">"hey"</div>
+<div class="arrow">→</div>
+<div class="box">Your computer<br>encrypts</div>
+<div class="arrow">→</div>
+<div class="box">x9f3k2a1b7...<br>(gibberish)</div>
+<div class="arrow">→</div>
+<div class="box">Server stores<br>gibberish briefly</div>
+</div>
+</div>
+
+<div class="step">
+<div class="title"><span class="num">4</span> Your Friend Gets The Message</div>
+<p>Every 4 seconds, your friend's computer checks the server: "Any new messages for me?"</p>
+<p>• The server finds your envelope and hands it over. <strong>Then the server DELETES it permanently — gone from the database forever.</strong></p>
+<p>• Your friend's computer does the ECDH math in reverse: your public padlock + their secret key = the same shared secret.</p>
+<p>• Their computer decrypts the gibberish and displays: your display name, your message, and any note you attached.</p>
+<p><strong>The message now exists ONLY on your two devices. The server has zero copies. Zero record. Nothing.</strong></p>
+</div>
+</div>
+
+<!-- FILE TRANSFER -->
+<div class="section">
+<h2>How File Sharing Works</h2>
+
+<div class="step">
+<div class="title"><span class="num">1</span> You Attach a File</div>
+<p>You click Attach and pick any file — a photo, video, document, anything. No size limit.</p>
+<p>• Your computer reads the entire file.</p>
+<p>• Your computer encrypts it with AES-256-GCM using the shared secret. The file becomes random bytes.</p>
+<p>• Your computer uploads the encrypted blob to the server. The server stores it under a random name like <code>a3f8b2c1.enc</code>.</p>
+<p><strong>The server never learns:</strong> the original filename, the file type, the file size (in plaintext), or what's inside. It sees only random bytes.</p>
+<p>• Your computer sends a message to your friend with the file ID and the original filename — <strong>encrypted inside the message</strong>, so the server never sees the filename either.</p>
+</div>
+
+<div class="step">
+<div class="title"><span class="num">2</span> Your Friend Downloads</div>
+<p>• Their computer receives the file notification message and decrypts it — now it knows the file ID and the original filename.</p>
+<p>• Their computer downloads the encrypted blob from the server.</p>
+<p>• <strong>The moment the download completes, the server deletes the file from disk and removes it from the database.</strong></p>
+<p>• Their computer decrypts the blob with the shared secret and saves it with the original filename.</p>
+<p>• <strong>One download only.</strong> If your friend tries again, the server returns "410 Gone" — the file no longer exists.</p>
+<p>• If your friend doesn't download within <strong>24 hours</strong>, the server automatically deletes the expired file.</p>
+</div>
+</div>
+
+<!-- WHAT THE SERVER SEES -->
+<div class="section">
+<h2>What The Server Actually Sees</h2>
+<div class="what-server">
+<div class="col sees">
+<h4>Server Stores</h4>
+<ul>
+<li>Made-up usernames</li>
+<li>Scrambled password hashes</li>
+<li>Public padlocks (useless alone)</li>
+<li>Encrypted gibberish (temporarily)</li>
+<li>Random filenames like <code>a3f8.enc</code></li>
+<li>Group names (optional)</li>
+</ul>
+</div>
+<div class="col never">
+<h4>Server NEVER Has</h4>
+<ul>
+<li>Real names or identities</li>
+<li>Email or phone numbers</li>
+<li>Actual passwords</li>
+<li>Secret keys</li>
+<li>Message plaintext</li>
+<li>Original filenames</li>
+<li>Message history</li>
+<li>IP logs or activity tracking</li>
+</ul>
+</div>
+</div>
+</div>
+
+<!-- SCENARIOS -->
+<div class="section">
+<h2>What Happens If...</h2>
+
+<div class="scenario">
+<div class="q">The server gets hacked?</div>
+<div class="a">Hackers get encrypted garbage and random filenames. Useless without client keys — which were never on the server.</div>
+</div>
+
+<div class="scenario">
+<div class="q">Someone steals your computer?</div>
+<div class="a">Your keys are sealed by the TPM 2.0 chip and DPAPI — they can't be extracted. You can remotely NUKE your data by clicking one button in Settings.</div>
+</div>
+
+<div class="scenario">
+<div class="q">Law enforcement demands server data?</div>
+<div class="a">Messages are already deleted. Files are already deleted. The server has no message history, no plaintext, no filenames, no real identities. There is nothing useful to hand over.</div>
+</div>
+
+<div class="scenario">
+<div class="q">Someone intercepts network traffic?</div>
+<div class="a">Everything is AES-256-GCM encrypted before leaving your computer. They see only encrypted data streams.</div>
+</div>
+
+<div class="scenario">
+<div class="q">A quantum computer is built?</div>
+<div class="a">AES-256-GCM (message encryption) remains safe — 2^128 effective strength. Only the ECDH key exchange would need upgrading to hybrid post-quantum (ML-KEM-1024), which is a straightforward update.</div>
+</div>
+
+<div class="scenario">
+<div class="q">The server goes down?</div>
+<div class="a">Your client detects it immediately, blocks all messages, and shows "ENCRYPTION SERVER OFFLINE — Messages blocked for security." It retries every 3 seconds until the server is back. No unencrypted message ever leaves your computer.</div>
+</div>
+</div>
+
+<!-- CRYPTO -->
+<div class="section">
+<h2>The Encryption — Simple Version</h2>
+<table>
+<tr><th>What</th><th>How</th><th>Strength</th></tr>
+<tr><td>Messages</td><td>AES-256-GCM</td><td>Would take billions of years to brute-force</td></tr>
+<tr><td>Key exchange</td><td>ECDH P-384</td><td>Both sides compute same secret independently</td></tr>
+<tr><td>Passwords</td><td>PBKDF2-SHA256 × 600,000</td><td>Each guess takes 600,000 hash rounds</td></tr>
+<tr><td>Integrity</td><td>HMAC-SHA256</td><td>Tampering is cryptographically detectable</td></tr>
+<tr><td>Keys on disk</td><td>TPM 2.0 + DPAPI</td><td>Sealed to your hardware — can't be copied</td></tr>
+<tr><td>Random numbers</td><td>FIPS DRBG</td><td>Unpredictable — every message uses a unique nonce</td></tr>
+</table>
+</div>
+
+<!-- ANONYMITY AGAIN -->
+<div class="anon" style="margin-top:30px">
+<h3>Zero Personal Data. Zero Metadata. Zero History.</h3>
+<p>
+No email required. No phone number. No real name. No profile picture. No contact list upload. No IP logging. No activity tracking. No analytics. No cookies (except admin session).<br><br>
+<strong>You are a username you invented and a public padlock.</strong> That's all the server knows. That's all anyone can know.<br><br>
+You control your identity. You control your data. You can delete everything with one click.
+</p>
+</div>
+
+<!-- CLIENTS -->
+<div class="section">
+<h2>Client Applications</h2>
+<table>
+<tr><th>Platform</th><th>Language</th><th>Crypto Library</th><th>Status</th></tr>
+<tr><td>Windows</td><td>Native C (no dependencies)</td><td>CNG (BCrypt/NCrypt) + TPM 2.0</td><td>Compiled — 150KB EXE</td></tr>
+<tr><td>Android</td><td>Kotlin + Jetpack Compose</td><td>AndroidKeyStore + javax.crypto</td><td>Compiled — 1.3MB APK</td></tr>
+<tr><td>iOS</td><td>Swift + SwiftUI</td><td>CryptoKit + Secure Enclave</td><td>Source complete — needs Xcode</td></tr>
+</table>
+</div>
+
+<div class="footer">
+GHOSTLINK — FIPS 140-2 Compliant Secure Messaging<br>
+No personal data. No message history. No trace.
+</div>
+
+</div>
+</body>
+</html>
