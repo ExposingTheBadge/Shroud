@@ -63,7 +63,7 @@ async def lifespan(ap):
     # Shutdown
     print("[GHOSTLINK] Server shutting down")
 
-app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -295,7 +295,7 @@ class AuthRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "fips": "140-2 validated", "version": "1.2.0"}
+    return {"status": "ok", "fips": "140-2 validated", "version": "1.3.0"}
 
 import threading
 ecdh_cache = {}
@@ -321,15 +321,16 @@ async def get_version():
     embedded version string."""
     base = "https://github.com/ExposingTheBadge/GhostLink/releases/latest"
     return {
-        "version": "1.2.0",
-        "minimum_supported": "1.2.0",
+        "version": "1.3.0",
+        "minimum_supported": "1.3.0",
         "release_url": base,
         "windows": f"{base}/download/GHOSTLINK.exe",
         "android": f"{base}/download/GHOSTLINK.apk",
         "linux":   f"{base}/download/ghostlink-linux",
         "changelog": (
-            "1.2.0 — New animated boot splash and orange brand theme; redesigned "
-            "lattice-based application icon embedded in the executable."
+            "1.3.0 — Inline image attachments in chat with click-to-fullscreen "
+            "viewer; sender or recipient can permanently delete images from "
+            "the server. Cross-device image decryption via /devices/{id}/pubkey."
         ),
     }
 
@@ -911,25 +912,25 @@ async def upload_file(request: Request):
 
 @app.get("/api/v1/files/{file_id}")
 async def download_file(file_id: str, device_id: str = Header(default="", alias="X-Device-ID")):
-    """One-time download — file destroyed from server after successful download."""
+    """Download an encrypted blob. Either sender or recipient device may
+    fetch — the file stays on disk until explicitly deleted by either
+    party (or until expires_at)."""
     row = db.execute(
-        "SELECT storage_name, sender_device_id, recipient_device_id, encrypted_metadata, encrypted_size, downloaded FROM file_transfers WHERE id=?",
+        "SELECT storage_name, sender_device_id, recipient_device_id, encrypted_metadata, encrypted_size FROM file_transfers WHERE id=?",
         (file_id,)
     ).fetchone()
     if not row:
-        raise HTTPException(404, "File not found or already downloaded")
+        raise HTTPException(404, "File not found")
 
-    if row[5]:  # Already downloaded
-        raise HTTPException(410, "File already downloaded — one-time transfer only")
+    if device_id and device_id not in (row[1], row[2]):
+        raise HTTPException(403, "Not authorized for this file")
 
     storage_path = os.path.join(FILE_DIR, row[0])
     if not os.path.isfile(storage_path):
         raise HTTPException(404, "File data missing")
 
-    # Destroy file from server after serving
-    if device_id and device_id == row[2]:
-        os.remove(storage_path)
-        db.execute("DELETE FROM file_transfers WHERE id=?", (file_id,))
+    if device_id == row[2]:
+        db.execute("UPDATE file_transfers SET downloaded=1 WHERE id=?", (file_id,))
         db.execute("UPDATE devices SET last_seen=datetime('now') WHERE id=?", (device_id,))
         db.commit()
 
@@ -943,6 +944,39 @@ async def download_file(file_id: str, device_id: str = Header(default="", alias=
             "Content-Disposition": f"attachment; filename=\"{file_id}.enc\""
         }
     )
+
+@app.delete("/api/v1/files/{file_id}")
+async def delete_file(file_id: str, device_id: str = Header(default="", alias="X-Device-ID")):
+    """Permanently delete a file. Either the sender or the recipient may
+    request deletion; the encrypted blob and DB row are removed for both
+    sides."""
+    row = db.execute(
+        "SELECT storage_name, sender_device_id, recipient_device_id FROM file_transfers WHERE id=?",
+        (file_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "File not found")
+    if device_id not in (row[1], row[2]):
+        raise HTTPException(403, "Only sender or recipient may delete")
+    storage_path = os.path.join(FILE_DIR, row[0])
+    if os.path.isfile(storage_path):
+        try:
+            os.remove(storage_path)
+        except OSError:
+            pass
+    db.execute("DELETE FROM file_transfers WHERE id=?", (file_id,))
+    db.commit()
+    return {"deleted": True, "file_id": file_id}
+
+@app.get("/api/v1/devices/{device_id}/pubkey")
+async def device_pubkey(device_id: str):
+    """Return a device's public key blob (hex). Public information used by
+    the recipient to derive the symmetric key matching the sender's, so
+    image/file payloads can be decrypted cross-device."""
+    row = db.execute("SELECT public_key FROM devices WHERE id=?", (device_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Device not found")
+    return {"device_id": device_id, "public_key": row[0].hex() if isinstance(row[0], (bytes, bytearray)) else row[0]}
 
 @app.get("/api/v1/files/{file_id}/info")
 async def file_info(file_id: str):

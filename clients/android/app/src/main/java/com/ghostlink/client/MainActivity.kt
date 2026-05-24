@@ -5,16 +5,29 @@ import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,9 +49,9 @@ import org.json.JSONObject
 import java.security.KeyPair as JavaKeyPair
 
 private val DarkColors = darkColorScheme(
-    primary = Color(0xFF0066CC), background = Color(0xFF1A1A1A),
+    primary = Color(0xFFff8c1e), background = Color(0xFF1A1A1A),
     surface = Color(0xFF222222), surfaceVariant = Color(0xFF2D2D2D),
-    onPrimary = Color.White, onBackground = Color(0xFFCCCCCC),
+    onPrimary = Color.Black, onBackground = Color(0xFFCCCCCC),
     onSurface = Color(0xFFCCCCCC), onSurfaceVariant = Color(0xFF888888),
     outline = Color(0xFF3D3D3D),
 )
@@ -177,6 +190,101 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Send an image from a content Uri. Saves a local plaintext copy so the
+     *  sender sees the image inline in their own chat, uploads an
+     *  encrypted blob to /api/v1/files/upload, and sends a file-type
+     *  message envelope to the recipient. */
+    fun sendImage(uri: android.net.Uri) {
+        val recip = selectedRecipient
+        if (recip.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val app = getApplication<Application>()
+                val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@launch
+
+                // Derive symmetric file key = SHA-256(my public-key blob).
+                val pub = identityKey?.public?.encoded ?: return@launch
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                val sk = javax.crypto.spec.SecretKeySpec(md.digest(pub).copyOf(32), "AES")
+
+                val (iv, ct, tag) = CryptoProvider.encryptAESGCM(sk, bytes)
+                val combined = iv + ct + tag
+
+                // Resolve a filename + mime; default to .jpg if unknown.
+                val mime = app.contentResolver.getType(uri) ?: "image/jpeg"
+                val ext = when {
+                    mime.endsWith("png") -> "png"
+                    mime.endsWith("gif") -> "gif"
+                    mime.endsWith("webp") -> "webp"
+                    mime.endsWith("bmp") -> "bmp"
+                    else -> "jpg"
+                }
+                val fname = "img_${System.currentTimeMillis()}.$ext"
+
+                val meta = JSONObject().apply {
+                    put("name", fname); put("size", bytes.size)
+                    put("mime", mime); put("is_image", true)
+                }
+                val ur = NetworkClient.uploadFile("/api/v1/files/upload", combined,
+                    deviceID, recip, meta.toString())
+                val fileId = ur.optString("file_id", "")
+                if (fileId.isEmpty()) return@launch
+
+                // Cache plaintext locally for inline display + viewer.
+                val dir = java.io.File(app.filesDir, "images").apply { mkdirs() }
+                val local = java.io.File(dir, "$fileId.$ext")
+                local.writeBytes(bytes)
+
+                // Send file message envelope mirroring Windows' format.
+                val pkResp = NetworkClient.post("/api/v1/contacts/devices", JSONObject().apply { put("device_id", deviceID); put("contact_username", username) })
+                val devs = pkResp.optJSONArray("devices")
+                var peerPub: java.security.PublicKey? = null
+                if (devs != null) for (i in 0 until devs.length()) {
+                    val dv = devs.getJSONObject(i)
+                    if (dv.getString("id") == recip) { peerPub = CryptoProvider.importPublicKey(dv.getString("public_key").hexToBytes()); break }
+                }
+                if (peerPub != null) {
+                    val sessionKey = CryptoProvider.deriveSessionKey(identityKey!!.private, peerPub)
+                    val pl = JSONObject().apply {
+                        put("type", "image"); put("file_id", fileId)
+                        put("name", fname); put("size", bytes.size)
+                        put("mime", mime); put("is_image", true)
+                        put("body", "Sent image: $fname")
+                    }.toString().toByteArray()
+                    val (eiv, ect, etag) = CryptoProvider.encryptAESGCM(sessionKey, pl)
+                    val esg = CryptoProvider.hmacSign(sessionKey, ect)
+                    val env = JSONObject().apply {
+                        put("sender", deviceID); put("ts", System.currentTimeMillis() / 1000)
+                        put("nonce", eiv.toHex()); put("ciphertext", ect.toHex())
+                        put("tag", etag.toHex()); put("sig", esg.toHex())
+                    }
+                    NetworkClient.post("/api/v1/messages/send", JSONObject().apply {
+                        put("sender_device_id", deviceID)
+                        put("recipient_device_id", recip)
+                        put("envelope", env.toString())
+                    })
+                }
+
+                messages = messages + Msg(deviceID, "", imagePath = local.absolutePath,
+                    fileId = fileId, name = username)
+            } catch (_: Exception) {}
+        }
+    }
+
+    /** Delete an image both locally and on the server. */
+    fun deleteImage(msg: Msg) {
+        val fid = msg.fileId ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                NetworkClient.deleteFile("/api/v1/files/$fid", deviceID)
+                msg.imagePath?.let { java.io.File(it).delete() }
+                messages = messages.map {
+                    if (it.fileId == fid) it.copy(imagePath = null, body = "[image deleted]") else it
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
     fun search(q: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -216,7 +324,13 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
     }
 }
 
-data class Msg(val sender: String, val body: String)
+data class Msg(
+    val sender: String,
+    val body: String,
+    val imagePath: String? = null,   // local plaintext path for inline display
+    val fileId: String? = null,      // server file id (for delete)
+    val name: String? = null,        // sender display name
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -246,12 +360,21 @@ fun AuthScreen(vm: GhostlinkVM) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class,
+       androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(vm: GhostlinkVM) {
     var showSide by remember { mutableStateOf(false) }
     var tab by remember { mutableIntStateOf(0) }
     var searchQ by remember { mutableStateOf("") }
+    var fullscreenMsg by remember { mutableStateOf<Msg?>(null) }
+    var pendingDelete by remember { mutableStateOf<Msg?>(null) }
+
+    val pickImage = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) vm.sendImage(uri)
+    }
 
     LaunchedEffect(Unit) { vm.ownDevices() }
 
@@ -272,6 +395,10 @@ fun ChatScreen(vm: GhostlinkVM) {
                 Text(vm.connStatus, fontSize = 10.sp, color = vm.connColor, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp))
                 Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
                     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = { pickImage.launch("image/*") },
+                            enabled = vm.selectedRecipient.isNotBlank()
+                        ) { Icon(Icons.Filled.Add, "Attach image", tint = MaterialTheme.colorScheme.primary) }
                         OutlinedTextField(vm.currentMessage, { vm.currentMessage = it }, placeholder = { Text("Message...") }, modifier = Modifier.weight(1f), singleLine = true)
                         IconButton(onClick = { vm.send() }, enabled = vm.currentMessage.isNotBlank()) { Icon(Icons.Filled.Send, "Send", tint = MaterialTheme.colorScheme.primary) }
                     }
@@ -285,9 +412,31 @@ fun ChatScreen(vm: GhostlinkVM) {
                     val isMe = msg.sender == vm.deviceID
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start) {
                         Surface(color = if (isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium, modifier = Modifier.widthIn(max = 280.dp)) {
-                            Column(Modifier.padding(12.dp)) {
-                                Text(msg.body, color = if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface)
-                                Text(vm.username.take(16), fontSize = 9.sp, color = (if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface).copy(alpha = 0.5f))
+                            Column(Modifier.padding(8.dp)) {
+                                if (msg.imagePath != null) {
+                                    val bm = remember(msg.imagePath) {
+                                        android.graphics.BitmapFactory.decodeFile(msg.imagePath)
+                                    }
+                                    if (bm != null) {
+                                        Image(
+                                            bitmap = bm.asImageBitmap(),
+                                            contentDescription = "Sent image",
+                                            modifier = Modifier
+                                                .sizeIn(maxWidth = 260.dp, maxHeight = 320.dp)
+                                                .clip(MaterialTheme.shapes.small)
+                                                .combinedClickable(
+                                                    onClick = { fullscreenMsg = msg },
+                                                    onLongClick = { pendingDelete = msg }
+                                                ),
+                                            contentScale = ContentScale.Fit
+                                        )
+                                    } else {
+                                        Text("[image unavailable]", color = if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface)
+                                    }
+                                } else if (msg.body.isNotEmpty()) {
+                                    Text(msg.body, color = if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface)
+                                }
+                                Text((msg.name ?: vm.username).take(16), fontSize = 9.sp, color = (if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface).copy(alpha = 0.5f))
                             }
                         }
                     }
@@ -315,5 +464,63 @@ fun ChatScreen(vm: GhostlinkVM) {
                 }
             }
         }
+    }
+
+    /* Fullscreen image viewer with a clearly-visible orange X close button
+       in the top-right corner and a Delete button in the bottom-right. */
+    fullscreenMsg?.let { msg ->
+        Dialog(
+            onDismissRequest = { fullscreenMsg = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true)
+        ) {
+            Box(Modifier.fillMaxSize().background(Color(0xEE000000))) {
+                val bm = remember(msg.imagePath) {
+                    msg.imagePath?.let { android.graphics.BitmapFactory.decodeFile(it) }
+                }
+                if (bm != null) {
+                    Image(
+                        bitmap = bm.asImageBitmap(),
+                        contentDescription = "Image",
+                        modifier = Modifier.fillMaxSize().padding(32.dp),
+                        contentScale = ContentScale.Fit
+                    )
+                }
+                /* X close button — bright orange, white border, top-right. */
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(16.dp)
+                        .size(56.dp)
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(Color(0xFFff8c1e))
+                        .combinedClickable(
+                            onClick = { fullscreenMsg = null },
+                            onLongClick = { fullscreenMsg = null }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Filled.Close, contentDescription = "Close",
+                         tint = Color.Black, modifier = Modifier.size(32.dp))
+                }
+                /* Delete button — bottom-right. */
+                Button(
+                    onClick = { pendingDelete = msg; fullscreenMsg = null },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xCC551515), contentColor = Color(0xFFffaaaa)),
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
+                ) { Text("Delete") }
+            }
+        }
+    }
+
+    pendingDelete?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete image") },
+            text = { Text("Permanently delete this image for both you and the recipient?") },
+            confirmButton = {
+                TextButton(onClick = { vm.deleteImage(msg); pendingDelete = null }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } }
+        )
     }
 }

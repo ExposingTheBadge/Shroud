@@ -250,6 +250,58 @@ HttpResponse* network_download_file(const char *path, const char *device_id,
     return NULL;  /* No JSON response for file downloads, data is in out_data */
 }
 
+HttpResponse* network_delete(const char *path, const char *device_id) {
+    if (!hSession) return NULL;
+
+    WCHAR url[512], wpath[256];
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 256);
+    wsprintf(url, L"%s%s", base_url, wpath);
+
+    URL_COMPONENTS urlComp = { sizeof(URL_COMPONENTS) };
+    WCHAR hostname[256], urlPath[512];
+    urlComp.lpszHostName = hostname; urlComp.dwHostNameLength = 256;
+    urlComp.lpszUrlPath = urlPath;  urlComp.dwUrlPathLength = 512;
+
+    if (!WinHttpCrackUrl(url, 0, 0, &urlComp)) return NULL;
+
+    HINTERNET hConnect = WinHttpConnect(hSession, urlComp.lpszHostName, urlComp.nPort, 0);
+    if (!hConnect) return NULL;
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"DELETE", urlComp.lpszUrlPath,
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
+
+    WCHAR headers[256], devW[128];
+    MultiByteToWideChar(CP_UTF8, 0, device_id ? device_id : "", -1, devW, 128);
+    wsprintf(headers, L"X-Device-ID: %s\r\n", devW);
+
+    if (!WinHttpSendRequest(hRequest, headers, -1, NULL, 0, 0, 0)) {
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
+    }
+    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
+    }
+
+    HttpResponse *r = calloc(1, sizeof(HttpResponse));
+    r->cap = 4096;
+    r->data = malloc(r->cap);
+    DWORD bytesRead, totalRead = 0;
+    while (WinHttpReadData(hRequest, r->data + totalRead, r->cap - totalRead - 1, &bytesRead)) {
+        if (bytesRead == 0) break;
+        totalRead += bytesRead;
+        if (totalRead + 1024 >= r->cap) {
+            r->cap *= 2;
+            r->data = realloc(r->data, r->cap);
+        }
+    }
+    r->data[totalRead] = 0;
+    r->len = totalRead;
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    return r;
+}
+
 void network_free_response(HttpResponse *r) {
     if (!r) return;
     if (r->data) free(r->data);

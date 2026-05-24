@@ -99,6 +99,7 @@ HttpResponse* network_upload_file(const char *path, const BYTE *data, DWORD data
                                    const char *metadata_json);
 HttpResponse* network_download_file(const char *path, const char *device_id,
                                      BYTE **out_data, DWORD *out_len);
+HttpResponse* network_delete(const char *path, const char *device_id);
 void   network_free_response(HttpResponse *r);
 
 /* File transfer helpers */

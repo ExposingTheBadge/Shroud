@@ -51,4 +51,46 @@ object NetworkClient {
         conn.disconnect()
         JSONObject(response)
     }
+
+    /** Upload encrypted file bytes via raw POST. Returns JSON response body. */
+    suspend fun uploadFile(
+        path: String,
+        bytes: ByteArray,
+        senderId: String,
+        recipientId: String,
+        metadataJson: String,
+    ): JSONObject = withContext(Dispatchers.IO) {
+        val url = URL(BASE + path)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            setRequestProperty("Content-Type", "application/octet-stream")
+            setRequestProperty("X-Device-ID", senderId)
+            setRequestProperty("X-Recipient-ID", recipientId)
+            setRequestProperty("X-File-Metadata", metadataJson)
+            connectTimeout = TIMEOUT
+            readTimeout = 30_000
+            doOutput = true
+            setFixedLengthStreamingMode(bytes.size)
+        }
+        conn.outputStream.use { it.write(bytes) }
+        val resp = BufferedReader(InputStreamReader(
+            if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+        )).readText()
+        conn.disconnect()
+        JSONObject(resp)
+    }
+
+    /** DELETE a file by id. Server requires X-Device-ID for authorization. */
+    suspend fun deleteFile(path: String, deviceId: String): Boolean = withContext(Dispatchers.IO) {
+        val url = URL(BASE + path)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "DELETE"
+            setRequestProperty("X-Device-ID", deviceId)
+            connectTimeout = TIMEOUT
+            readTimeout = TIMEOUT
+        }
+        val ok = conn.responseCode in 200..299
+        conn.disconnect()
+        ok
+    }
 }

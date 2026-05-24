@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "1.2.0"
+#define CLIENT_VERSION "1.3.0"
 
 extern "C" {
 #include "client.h"
@@ -109,6 +109,100 @@ static void attachPasswordReveal(QLineEdit *field) {
 }
 
 /* ===================================================================
+ *  ImageViewer — borderless full-screen image dialog with a very
+ *  visible X close button (top-right) and a delete option.
+ * =================================================================== */
+class ImageViewer : public QDialog {
+    Q_OBJECT
+public:
+    ImageViewer(const QString &fileId, const QString &path, QWidget *parent = nullptr)
+        : QDialog(parent), m_fileId(fileId)
+    {
+        setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+        setAttribute(Qt::WA_DeleteOnClose);
+        setModal(true);
+        setStyleSheet("QDialog { background-color: rgba(0,0,0,235); }");
+
+        QImage src(path);
+        if (src.isNull()) {
+            QMessageBox::warning(this, "Image", "Could not load image."); QTimer::singleShot(0, this, &QDialog::reject); return;
+        }
+        QScreen *scr = QGuiApplication::primaryScreen();
+        QRect g = scr ? scr->availableGeometry() : QRect(0, 0, 1280, 720);
+        const int margin = 60;
+        QSize maxSize(g.width() - margin, g.height() - margin);
+        QImage scaled = src.scaled(maxSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+
+        resize(g.size());
+        move(g.topLeft());
+
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+
+        m_label = new QLabel(this);
+        m_label->setAlignment(Qt::AlignCenter);
+        m_label->setPixmap(QPixmap::fromImage(scaled));
+        layout->addWidget(m_label, 1);
+
+        /* Top-right close button — bright, high-contrast, always visible. */
+        m_close = new QPushButton("✕", this);  // ✕
+        m_close->setFixedSize(48, 48);
+        m_close->setCursor(Qt::PointingHandCursor);
+        m_close->setToolTip("Close (Esc)");
+        m_close->setStyleSheet(
+            "QPushButton {"
+            "  background-color: #ff8c1e; color: #1a1a1a;"
+            "  border: 2px solid #ffffff; border-radius: 24px;"
+            "  font-size: 22px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background-color: #ffa040; }"
+            "QPushButton:pressed { background-color: #cc6e10; }"
+        );
+        connect(m_close, &QPushButton::clicked, this, &QDialog::accept);
+
+        /* Bottom-right delete button. */
+        m_del = new QPushButton("Delete", this);
+        m_del->setFixedSize(120, 36);
+        m_del->setCursor(Qt::PointingHandCursor);
+        m_del->setStyleSheet(
+            "QPushButton {"
+            "  background-color: rgba(40,40,40,220); color: #ff8888;"
+            "  border: 1px solid #ff8888; border-radius: 6px;"
+            "  font-weight: bold;"
+            "}"
+            "QPushButton:hover { background-color: rgba(80,30,30,240); color: #ffaaaa; }"
+        );
+        connect(m_del, &QPushButton::clicked, this, [this]() {
+            emit deleteRequested(m_fileId);
+            accept();
+        });
+
+        positionOverlays();
+    }
+
+signals:
+    void deleteRequested(const QString &fileId);
+
+protected:
+    void keyPressEvent(QKeyEvent *e) override {
+        if (e->key() == Qt::Key_Escape) { accept(); return; }
+        QDialog::keyPressEvent(e);
+    }
+    void resizeEvent(QResizeEvent *) override { positionOverlays(); }
+
+private:
+    void positionOverlays() {
+        if (m_close) m_close->move(width() - m_close->width() - 24, 24);
+        if (m_del)   m_del->move(width() - m_del->width() - 24,
+                                  height() - m_del->height() - 24);
+    }
+    QString m_fileId;
+    QLabel *m_label = nullptr;
+    QPushButton *m_close = nullptr;
+    QPushButton *m_del = nullptr;
+};
+
+/* ===================================================================
  *  MAIN WINDOW
  * =================================================================== */
 class GhostlinkWindow : public QMainWindow {
@@ -150,7 +244,8 @@ public:
 private:
     QStackedWidget *m_stack;
     QListWidget *m_sideList;
-    QTextEdit *m_chatLog;
+    QTextBrowser *m_chatLog;
+    QMap<QString, QString> m_imagePaths; // file_id -> local plaintext image path
     QLineEdit *m_toField, *m_msgInput;
     QPushButton *m_sendBtn, *m_attachBtn;
     QLabel *m_statusBar;
@@ -510,8 +605,14 @@ private:
         m_statusBar->setStyleSheet("color: #cc8800; font-size: 11px; font-weight: bold;");
         cl->addWidget(m_statusBar);
 
-        /* Chat log */
-        m_chatLog = new QTextEdit; m_chatLog->setReadOnly(true);
+        /* Chat log — QTextBrowser so we can click inline images. */
+        m_chatLog = new QTextBrowser;
+        m_chatLog->setReadOnly(true);
+        m_chatLog->setOpenLinks(false);
+        m_chatLog->setOpenExternalLinks(false);
+        connect(m_chatLog, &QTextBrowser::anchorClicked, this, &GhostlinkWindow::onChatAnchorClicked);
+        m_chatLog->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(m_chatLog, &QWidget::customContextMenuRequested, this, &GhostlinkWindow::onChatContextMenu);
         cl->addWidget(m_chatLog, 1);
 
         /* File panel */
@@ -659,6 +760,130 @@ private:
             jsonBody({{"device_id", m_deviceId}, {"contact_username", username}}));
         QJsonArray devs = QJsonDocument::fromJson(r).object().value("devices").toArray();
         return devs.isEmpty() ? QString() : devs[0].toObject().value("id").toString();
+    }
+
+    /* ── Image attachment storage ───────────────────────────────── */
+    QString imagesDir() {
+        QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (base.isEmpty()) base = QDir::tempPath();
+        QString dir = base + "/GHOSTLINK/images";
+        QDir().mkpath(dir);
+        return dir;
+    }
+
+    static bool isImageFileName(const QString &name) {
+        QString n = name.toLower();
+        return n.endsWith(".png") || n.endsWith(".jpg") || n.endsWith(".jpeg")
+            || n.endsWith(".gif") || n.endsWith(".bmp") || n.endsWith(".webp");
+    }
+
+    /* Insert an image bubble into the chat log. The image is wrapped in an
+       anchor whose href encodes the file_id so anchorClicked can open the
+       viewer. A constrained width preserves the aspect ratio. */
+    void insertImageBubble(const QString &fileId, const QString &localPath,
+                            const QString &senderLabel) {
+        QImage img(localPath);
+        if (img.isNull()) {
+            m_chatLog->append(QString("<b>[%1]</b> [image unreadable]")
+                .arg(senderLabel.toHtmlEscaped()));
+            return;
+        }
+        m_imagePaths[fileId] = localPath;
+        QString resName = QString("image_%1").arg(fileId);
+        m_chatLog->document()->addResource(QTextDocument::ImageResource,
+                                            QUrl(resName), QVariant(img));
+        int maxW = 280;
+        int displayW = qMin(maxW, img.width());
+        QString html = QString(
+            "<div><b>[%1]</b><br/>"
+            "<a href=\"ghostlink-img://%2\">"
+            "<img src=\"%3\" width=\"%4\"/></a></div>"
+        ).arg(senderLabel.toHtmlEscaped(), fileId, resName).arg(displayW);
+        m_chatLog->append(html);
+    }
+
+    void onChatAnchorClicked(const QUrl &url) {
+        if (url.scheme() != "ghostlink-img") return;
+        QString fileId = url.host().isEmpty() ? url.path().mid(1) : url.host();
+        if (fileId.isEmpty()) fileId = url.toString().section("//", 1, 1);
+        QString path = m_imagePaths.value(fileId);
+        if (path.isEmpty() || !QFileInfo::exists(path)) {
+            QMessageBox::information(this, "Image", "This image is no longer available.");
+            return;
+        }
+        openImageViewer(fileId, path);
+    }
+
+    void onChatContextMenu(const QPoint &pos) {
+        QTextCursor cur = m_chatLog->cursorForPosition(pos);
+        QString href = cur.charFormat().anchorHref();
+        QMenu menu(this);
+        if (href.startsWith("ghostlink-img://")) {
+            QString fileId = href.mid(QString("ghostlink-img://").length());
+            QAction *open = menu.addAction("Open Full Size");
+            QAction *del = menu.addAction("Delete Image");
+            menu.addSeparator();
+            menu.addAction("Copy", [this]() { m_chatLog->copy(); });
+            QAction *chosen = menu.exec(m_chatLog->mapToGlobal(pos));
+            if (chosen == open) {
+                QString path = m_imagePaths.value(fileId);
+                if (!path.isEmpty()) openImageViewer(fileId, path);
+            } else if (chosen == del) {
+                if (QMessageBox::question(this, "Delete Image",
+                    "Permanently delete this image for both you and the recipient?",
+                    QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes)
+                    deleteImage(fileId);
+            }
+        } else {
+            menu.addAction("Copy", [this]() { m_chatLog->copy(); });
+            menu.exec(m_chatLog->mapToGlobal(pos));
+        }
+    }
+
+    /* Server delete + local cache delete + remove the bubble from chat. */
+    void deleteImage(const QString &fileId) {
+        HttpResponse *r = network_delete(
+            QString("/api/v1/files/%1").arg(fileId).toUtf8().constData(),
+            m_deviceId.toUtf8().constData());
+        if (r) network_free_response(r);
+        QString path = m_imagePaths.take(fileId);
+        if (!path.isEmpty()) QFile::remove(path);
+        replaceImageInChatLog(fileId);
+    }
+
+    /* After deletion, walk the chat log document and replace the image
+       fragment with a [deleted] placeholder so the bubble updates visually. */
+    void replaceImageInChatLog(const QString &fileId) {
+        QString anchor = QString("ghostlink-img://%1").arg(fileId);
+        QTextCursor c(m_chatLog->document());
+        while (!c.atEnd()) {
+            c.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
+            QString href = c.charFormat().anchorHref();
+            if (href == anchor) {
+                QTextCursor lineStart = c;
+                lineStart.movePosition(QTextCursor::StartOfBlock, QTextCursor::MoveAnchor);
+                QTextCursor lineEnd = c;
+                lineEnd.movePosition(QTextCursor::EndOfBlock, QTextCursor::MoveAnchor);
+                QTextCursor wipe(m_chatLog->document());
+                wipe.setPosition(lineStart.position());
+                wipe.setPosition(lineEnd.position(), QTextCursor::KeepAnchor);
+                wipe.removeSelectedText();
+                wipe.insertHtml("<i style=\"color:#888;\">[image deleted]</i>");
+                return;
+            }
+            c.movePosition(QTextCursor::NextCharacter, QTextCursor::MoveAnchor);
+        }
+    }
+
+    void openImageViewer(const QString &fileId, const QString &path) {
+        ImageViewer *v = new ImageViewer(fileId, path, this);
+        connect(v, &ImageViewer::deleteRequested, this, [this](const QString &fid) {
+            if (QMessageBox::question(this, "Delete Image",
+                "Permanently delete this image for both you and the recipient?",
+                QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes)
+                deleteImage(fid);
+        });
+        v->show();
     }
 
     void selectUsernameForChat(const QString &username) {
@@ -946,28 +1171,88 @@ private:
         m_msgInput->clear();
     }
 
+    /* Fetch a sender device's public-key blob (hex) and derive the symmetric
+       file key as SHA-256(pubkey_blob), matching how the sender encrypted. */
+    bool senderFileKey(const QString &senderDeviceId, BYTE key_out[32]) {
+        QByteArray r = httpGet(QString("/api/v1/devices/%1/pubkey").arg(senderDeviceId).toUtf8().constData());
+        if (r.isEmpty()) return false;
+        QString pubHex = QJsonDocument::fromJson(r).object().value("public_key").toString();
+        if (pubHex.isEmpty()) return false;
+        BYTE pub[PUBLIC_KEY_MAX]; DWORD pubLen = 0;
+        if (!crypto_hex_decode(pubHex.toUtf8().constData(), pub, &pubLen)) return false;
+        return crypto_sha256(pub, pubLen, key_out);
+    }
+
+    QJsonObject decryptEnvelope(const QJsonObject &env, const QString &senderDeviceId) {
+        BYTE sk[32];
+        if (!senderFileKey(senderDeviceId, sk)) return QJsonObject();
+        BYTE nonce[12], tag[16];
+        DWORD nl = 12, tl = 16;
+        crypto_hex_decode(env.value("nonce").toString().toUtf8().constData(), nonce, &nl);
+        crypto_hex_decode(env.value("tag").toString().toUtf8().constData(), tag, &tl);
+        QByteArray ctHex = env.value("ciphertext").toString().toUtf8();
+        DWORD clen = (DWORD)(ctHex.size() / 2);
+        if (clen == 0 || clen > 8192) return QJsonObject();
+        QVector<BYTE> ct(clen), pt(clen);
+        DWORD got = clen;
+        if (!crypto_hex_decode(ctHex.constData(), ct.data(), &got)) return QJsonObject();
+        if (!crypto_aes_gcm_decrypt(sk, nonce, ct.data(), clen, tag, pt.data())) return QJsonObject();
+        return QJsonDocument::fromJson(QByteArray(reinterpret_cast<const char*>(pt.data()), (int)clen)).object();
+    }
+
+    QString downloadAndDecryptImage(const QString &fileId, const QString &senderDeviceId,
+                                     const QString &originalName) {
+        BYTE sk[32];
+        if (!senderFileKey(senderDeviceId, sk)) return QString();
+        BYTE *enc = nullptr; DWORD elen = 0;
+        network_download_file(QString("/api/v1/files/%1").arg(fileId).toUtf8().constData(),
+                              m_deviceId.toUtf8().constData(), &enc, &elen);
+        if (!enc || elen < 28) { if (enc) free(enc); return QString(); }
+        BYTE *plain = nullptr; DWORD plen = 0;
+        bool ok = crypto_decrypt_file_data(sk, enc, elen, &plain, &plen);
+        free(enc);
+        if (!ok || !plain) { if (plain) free(plain); return QString(); }
+        QString ext = QFileInfo(originalName).suffix().toLower();
+        if (ext.isEmpty()) ext = "png";
+        QString localPath = QString("%1/%2.%3").arg(imagesDir(), fileId, ext);
+        QFile out(localPath);
+        if (out.open(QIODevice::WriteOnly)) {
+            out.write(reinterpret_cast<const char*>(plain), plen);
+            out.close();
+        }
+        free(plain);
+        return localPath;
+    }
+
     void fetchMessages() {
         if (m_deviceId.isEmpty()) return;
         QByteArray r = httpPost("/api/v1/messages/fetch", jsonBody({{"device_id", m_deviceId}}));
         m_statusBar->setText("Online — AES-256-GCM | ECDH P-384");
         m_statusBar->setStyleSheet("color: #2ed573; font-size: 11px; font-weight: bold;");
-        /* messages/fetch returns {"messages":[{"sender_device_id":..., "envelope":{...}}]} */
         QJsonObject root = QJsonDocument::fromJson(r).object();
         QJsonArray msgs = root.value("messages").toArray();
-        if (msgs.isEmpty()) {
-            /* Some server versions return a top-level array. */
-            msgs = QJsonDocument::fromJson(r).array();
-        }
         for (const QJsonValue &mv : msgs) {
             QJsonObject m = mv.toObject();
             QString sender = m.value("sender_device_id").toString();
             QJsonObject env = m.value("envelope").toObject();
-            /* Envelope body is the encrypted plaintext field after decryption;
-               for now we just display the cleartext "body" field if present. */
-            QString body = env.value("body").toString();
-            if (body.isEmpty()) continue;
-            m_chatLog->append(QString("<b>[%1]</b> %2")
-                .arg(sender.left(12).toHtmlEscaped(), body.toHtmlEscaped()));
+            QJsonObject plain = decryptEnvelope(env, sender);
+            QString senderName = plain.value("name").toString();
+            if (senderName.isEmpty()) senderName = sender.left(12);
+            QString body = plain.value("body").toString();
+            QString type = plain.value("type").toString();
+            QString fileId = plain.value("file_id").toString();
+            bool isImage = plain.value("is_image").toBool() || type == "image";
+            if (isImage && !fileId.isEmpty()) {
+                QString localPath = downloadAndDecryptImage(fileId, sender, plain.value("name").toString());
+                if (!localPath.isEmpty()) {
+                    insertImageBubble(fileId, localPath, senderName);
+                    continue;
+                }
+            }
+            if (!body.isEmpty()) {
+                m_chatLog->append(QString("<b>[%1]</b> %2")
+                    .arg(senderName.toHtmlEscaped(), body.toHtmlEscaped()));
+            }
         }
     }
 
@@ -975,13 +1260,17 @@ private:
      *  FILE ATTACH
      * =============================================================== */
     void attachFile() {
-        QString path = QFileDialog::getOpenFileName(this, "Select File to Send (Encrypted)");
+        QString path = QFileDialog::getOpenFileName(this, "Select File to Send (Encrypted)",
+            QString(), "All Files (*.*);;Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)");
         if (path.isEmpty() || m_selectedRecip.isEmpty()) return;
 
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly)) return;
         QByteArray data = f.readAll();
         f.close();
+
+        QString fname = QFileInfo(path).fileName();
+        bool isImage = isImageFileName(fname);
 
         BYTE sk[32];
         DeviceConfig cfg;
@@ -991,8 +1280,11 @@ private:
         BYTE *enc = nullptr; DWORD elen = 0;
         if (!crypto_encrypt_file_data(sk, (const BYTE*)data.constData(), data.size(), &enc, &elen)) return;
 
-        QString fname = QFileInfo(path).fileName();
-        QByteArray meta = jsonBody({{"name", fname}, {"size", (qint64)data.size()}});
+        QString mime = isImage ? QString("image/") + QFileInfo(path).suffix().toLower() : QString();
+        QByteArray meta = jsonBody({
+            {"name", fname}, {"size", (qint64)data.size()},
+            {"mime", mime}, {"is_image", isImage}
+        });
 
         m_statusBar->setText("Uploading encrypted file...");
         QApplication::processEvents();
@@ -1010,11 +1302,24 @@ private:
         }
         if (fileId.isEmpty()) { m_statusBar->setText("Upload failed"); return; }
 
+        /* Cache plaintext locally so the sender can view + the viewer can
+           open it from disk later. */
+        QString localPath;
+        if (isImage) {
+            QString ext = QFileInfo(path).suffix().toLower();
+            localPath = QString("%1/%2.%3").arg(imagesDir(), fileId, ext);
+            QFile out(localPath);
+            if (out.open(QIODevice::WriteOnly)) { out.write(data); out.close(); }
+        }
+
         qint64 ts = QDateTime::currentSecsSinceEpoch();
         QByteArray plb = jsonBody({
-            {"type", QString("file")}, {"file_id", fileId},
+            {"type", QString(isImage ? "image" : "file")}, {"file_id", fileId},
             {"name", fname}, {"size", (qint64)data.size()},
-            {"body", QString("Sent file: %1 (%2 bytes)").arg(fname).arg(data.size())}
+            {"mime", mime}, {"is_image", isImage},
+            {"body", isImage
+                ? QString("Sent image: %1").arg(fname)
+                : QString("Sent file: %1 (%2 bytes)").arg(fname).arg(data.size())}
         });
 
         BYTE iv[12], ct[5000], tag[16];
@@ -1039,9 +1344,15 @@ private:
         });
         httpPost("/api/v1/messages/send", jb);
 
-        m_chatLog->append(QString("<b>[%1]</b> [FILE] %2 (%3 bytes)")
-            .arg(m_username.toHtmlEscaped(), fname.toHtmlEscaped()).arg(data.size()));
-        m_statusBar->setText(QString("File sent: %1").arg(fname));
+        if (isImage && !localPath.isEmpty()) {
+            insertImageBubble(fileId, localPath, m_username);
+        } else {
+            m_chatLog->append(QString("<b>[%1]</b> [FILE] %2 (%3 bytes)")
+                .arg(m_username.toHtmlEscaped(), fname.toHtmlEscaped()).arg(data.size()));
+        }
+        m_statusBar->setText(isImage
+            ? QString("Image sent: %1").arg(fname)
+            : QString("File sent: %1").arg(fname));
     }
 
     /* ===============================================================
