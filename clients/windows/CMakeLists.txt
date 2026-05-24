@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(GHOSTLINK VERSION 1.0.1 LANGUAGES CXX C)
+project(GHOSTLINK VERSION 1.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,13 +8,13 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Network)
 
-# Windows crypto/network modules
+# Crypto/network/storage modules
 set(WIN_MODULES
-    ../windows/crypto.c
-    ../windows/network.c
-    ../windows/storage.c
-    ../windows/tpm.c
-    ../windows/kyber1024.c
+    crypto.c
+    network.c
+    storage.c
+    tpm.c
+    kyber1024.c
 )
 
 add_executable(ghostlink
@@ -23,7 +23,6 @@ add_executable(ghostlink
 )
 
 target_include_directories(ghostlink PRIVATE
-    ../windows
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

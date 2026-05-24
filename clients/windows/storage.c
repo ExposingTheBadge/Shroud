@@ -143,6 +143,21 @@ void app_instance_id(char *out, int outSize) {
     }
 }
 
+char* json_get_string(const char *json, const char *key) {
+    char search[256];
+    wsprintfA(search, "\"%s\":\"", key);
+    char *start = strstr((char*)json, search);
+    if (!start) return NULL;
+    start += strlen(search);
+    char *end = strchr(start, '"');
+    if (!end) return NULL;
+    int len = (int)(end - start);
+    char *val = (char*)malloc(len + 1);
+    strncpy(val, start, len);
+    val[len] = 0;
+    return val;
+}
+
 void storage_delete_all(void) {
     /* Delete registry key */
     RegDeleteKeyA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK");

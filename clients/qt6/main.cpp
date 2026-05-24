@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "1.0.1"
+#define CLIENT_VERSION "1.1.0"
 
 extern "C" {
 #include "client.h"

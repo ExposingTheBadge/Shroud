@@ -55,5 +55,10 @@ clients/android/sdk/
 temp/
 tmp/
 clients/qt6/build/
+clients/windows/build/
 clients/qt-test/
 GHOSTLINK_Explained.html
+
+# Claude Code session state
+.claude/
+admin_js_check.js

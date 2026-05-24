@@ -62,29 +62,45 @@ void crypto_free_keypair(KeyPair *kp) {
 /* ── ECDH Shared Secret → AES-256 Key via SHA-256 KDF ──────────────── */
 BOOL crypto_derive_shared_secret(NCRYPT_KEY_HANDLE my_priv, PublicKey *peer_pub,
                                   BYTE shared_key[AES_KEY_LEN]) {
-    NCRYPT_SECRET_HANDLE hSecret = NULL;
-    BYTE rawSecret[48]; /* P-384 shared secret */
-    DWORD secretLen = sizeof(rawSecret);
-
-    /* Import peer's public key for ECDH */
+    NCRYPT_PROV_HANDLE hProv = NULL;
     NCRYPT_KEY_HANDLE hPeerKey = NULL;
-    SECURITY_STATUS s = NCryptImportKey(NULL, NULL, BCRYPT_ECCPUBLIC_BLOB, NULL,
-                          &hPeerKey, peer_pub->data, peer_pub->len, 0);
+    NCRYPT_SECRET_HANDLE hSecret = NULL;
+    BYTE derived[64];
+    DWORD derivedLen = sizeof(derived);
+
+    SECURITY_STATUS s = NCryptOpenStorageProvider(&hProv, MS_KEY_STORAGE_PROVIDER, 0);
     if (!BCRYPT_SUCCESS(s)) return FALSE;
 
-    /* ECDH agreement */
+    s = NCryptImportKey(hProv, NULL, BCRYPT_ECCPUBLIC_BLOB, NULL,
+                        &hPeerKey, peer_pub->data, peer_pub->len, 0);
+    NCryptFreeObject(hProv);
+    if (!BCRYPT_SUCCESS(s)) return FALSE;
+
     s = NCryptSecretAgreement(my_priv, hPeerKey, &hSecret, 0);
     NCryptDeleteKey(hPeerKey, 0);
     if (!BCRYPT_SUCCESS(s)) return FALSE;
 
-    /* Derive secret */
-    s = NCryptDeriveKey(hSecret, BCRYPT_KDF_HASH, (PUCHAR)BCRYPT_SHA256_ALGORITHM,
-                        rawSecret, secretLen, &secretLen, 0);
-    NCryptFreeBuffer(hSecret);
+    /* SHA-256 KDF over raw ECDH secret. pParameterList must be a real
+       BCryptBufferDesc — passing the algorithm string directly is what
+       caused NTE_INVALID_PARAMETER. */
+    BCryptBuffer kdfBuf;
+    kdfBuf.cbBuffer = (ULONG)((wcslen(BCRYPT_SHA256_ALGORITHM) + 1) * sizeof(WCHAR));
+    kdfBuf.BufferType = KDF_HASH_ALGORITHM;
+    kdfBuf.pvBuffer = (PVOID)BCRYPT_SHA256_ALGORITHM;
 
-    /* Hash raw secret to get AES-256 key */
-    if (!BCRYPT_SUCCESS(s)) return FALSE;
-    return crypto_sha256(rawSecret, secretLen, shared_key);
+    BCryptBufferDesc kdfDesc;
+    kdfDesc.ulVersion = BCRYPTBUFFER_VERSION;
+    kdfDesc.cBuffers = 1;
+    kdfDesc.pBuffers = &kdfBuf;
+
+    s = NCryptDeriveKey(hSecret, BCRYPT_KDF_HASH, &kdfDesc,
+                        derived, derivedLen, &derivedLen, 0);
+    NCryptFreeObject(hSecret);
+    if (!BCRYPT_SUCCESS(s) || derivedLen < AES_KEY_LEN) return FALSE;
+
+    /* derived now holds SHA-256(raw_ECDH) — matches server's first hash step. */
+    memcpy(shared_key, derived, AES_KEY_LEN);
+    return TRUE;
 }
 
 /* ── AES-256-GCM Encrypt ──────────────────────────────────────────── */
@@ -163,6 +179,20 @@ BOOL crypto_sha256(const BYTE *data, DWORD len, BYTE hash[SHA256_LEN]) {
     BCryptFinishHash(hHash, hash, SHA256_LEN, 0);
     BCryptDestroyHash(hHash);
     return TRUE;
+}
+
+/* ── Auth Key Derivation ──────────────────────────────────────────── */
+BOOL crypto_auth_derive_key(NCRYPT_KEY_HANDLE my_priv, const BYTE *peer_blob, DWORD blob_len, BYTE key_out[32]) {
+    if (blob_len == 0 || blob_len > PUBLIC_KEY_MAX) return FALSE;
+    PublicKey pk;
+    memcpy(pk.data, peer_blob, blob_len);
+    pk.len = blob_len;
+    BYTE shared[AES_KEY_LEN];
+    if (!crypto_derive_shared_secret(my_priv, &pk, shared)) return FALSE;
+    BYTE buf[AES_KEY_LEN + 17];
+    memcpy(buf, shared, AES_KEY_LEN);
+    memcpy(buf + AES_KEY_LEN, "GHOSTLINK-AUTH-v1", 17);
+    return crypto_sha256(buf, sizeof(buf), key_out);
 }
 
 /* ── Hex ──────────────────────────────────────────────────────────── */

