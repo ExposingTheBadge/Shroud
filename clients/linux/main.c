@@ -16,7 +16,7 @@
 #include <unistd.h>
 
 #define SERVER_URL    "http://150.195.114.185:58443"
-#define APP_VERSION   "1.1.0"
+#define APP_VERSION   "1.2.0"
 #define CONFIG_DIR    ".ghostlink"
 #define DOWNLOAD_DIR  "Downloads/GHOSTLINK"
 #define AES_KEY_LEN   32

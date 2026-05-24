@@ -63,7 +63,7 @@ async def lifespan(ap):
     # Shutdown
     print("[GHOSTLINK] Server shutting down")
 
-app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -295,7 +295,7 @@ class AuthRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "fips": "140-2 validated", "version": "1.1.0"}
+    return {"status": "ok", "fips": "140-2 validated", "version": "1.2.0"}
 
 import threading
 ecdh_cache = {}
@@ -321,17 +321,15 @@ async def get_version():
     embedded version string."""
     base = "https://github.com/ExposingTheBadge/GhostLink/releases/latest"
     return {
-        "version": "1.1.0",
-        "minimum_supported": "1.1.0",
+        "version": "1.2.0",
+        "minimum_supported": "1.2.0",
         "release_url": base,
         "windows": f"{base}/download/GHOSTLINK.exe",
         "android": f"{base}/download/GHOSTLINK.apk",
         "linux":   f"{base}/download/ghostlink-linux",
         "changelog": (
-            "1.1.0 — Friend/group invite requests with optional reason; exact-"
-            "username search (no enumeration); password reveal toggle; "
-            "fixed key derivation crash; JSON-injection hardening across "
-            "client/server."
+            "1.2.0 — New animated boot splash and orange brand theme; redesigned "
+            "lattice-based application icon embedded in the executable."
         ),
     }
 

@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "1.1.0"
+#define CLIENT_VERSION "1.2.0"
 
 extern "C" {
 #include "client.h"
@@ -22,17 +22,17 @@ QString themeCSS(bool dark) {
         "* { background-color: #1a1a1a; color: #cccccc; font-family: \"Segoe UI\"; }"
         "QMainWindow { background-color: #1a1a1a; }"
         "QMenuBar { background-color: #222222; color: #cccccc; border-bottom: 1px solid #333; }"
-        "QMenuBar::item:selected { background-color: #0066cc; }"
+        "QMenuBar::item:selected { background-color: #ff8c1e; }"
         "QMenu { background-color: #222222; color: #cccccc; border: 1px solid #333; }"
-        "QMenu::item:selected { background-color: #0066cc; }"
+        "QMenu::item:selected { background-color: #ff8c1e; }"
         "QLineEdit, QTextEdit, QPlainTextEdit { background-color: #2d2d2d; color: #cccccc; border: 1px solid #3d3d3d; padding: 6px; border-radius: 4px; }"
         "QTextEdit { background-color: #1a1a1a; }"
         "QPushButton { background-color: #2d2d2d; color: #cccccc; border: 1px solid #3d3d3d; padding: 6px 16px; border-radius: 4px; }"
         "QPushButton:hover { background-color: #3d3d3d; border-color: #555; }"
-        "QPushButton:pressed { background-color: #0066cc; }"
+        "QPushButton:pressed { background-color: #ff8c1e; }"
         "QPushButton:disabled { background-color: #1a1a1a; color: #555; }"
         "QListWidget { background-color: #222222; color: #cccccc; border: 1px solid #333; }"
-        "QListWidget::item:selected { background-color: #0066cc; }"
+        "QListWidget::item:selected { background-color: #ff8c1e; }"
         "QCheckBox { color: #cccccc; }"
         "QGroupBox { color: #cccccc; border: 1px solid #333; border-radius: 4px; margin-top: 8px; padding-top: 16px; }"
         "QGroupBox::title { color: #888; }"
@@ -45,16 +45,16 @@ QString themeCSS(bool dark) {
         "* { background-color: #FFFFFF; color: #1a1a1a; font-family: \"Segoe UI\"; }"
         "QMainWindow { background-color: #FFFFFF; }"
         "QMenuBar { background-color: #F5F5F0; color: #1a1a1a; border-bottom: 1px solid #ddd; }"
-        "QMenuBar::item:selected { background-color: #0066cc; color: white; }"
+        "QMenuBar::item:selected { background-color: #ff8c1e; color: white; }"
         "QMenu { background-color: #F5F5F0; color: #1a1a1a; border: 1px solid #ddd; }"
-        "QMenu::item:selected { background-color: #0066cc; color: white; }"
+        "QMenu::item:selected { background-color: #ff8c1e; color: white; }"
         "QLineEdit, QTextEdit, QPlainTextEdit { background-color: #F0F0E8; color: #1a1a1a; border: 1px solid #ccc; padding: 6px; border-radius: 4px; }"
         "QPushButton { background-color: #E8E8E0; color: #1a1a1a; border: 1px solid #ccc; padding: 6px 16px; border-radius: 4px; }"
         "QPushButton:hover { background-color: #ddd; }"
-        "QPushButton:pressed { background-color: #0066cc; color: white; }"
+        "QPushButton:pressed { background-color: #ff8c1e; color: white; }"
         "QPushButton:disabled { background-color: #f0f0f0; color: #999; }"
         "QListWidget { background-color: #F8F8F0; color: #1a1a1a; border: 1px solid #ddd; }"
-        "QListWidget::item:selected { background-color: #0066cc; color: white; }"
+        "QListWidget::item:selected { background-color: #ff8c1e; color: white; }"
         "QCheckBox { color: #1a1a1a; }"
         "QGroupBox { color: #1a1a1a; border: 1px solid #ddd; border-radius: 4px; margin-top: 8px; padding-top: 16px; }"
         "QGroupBox::title { color: #666; }"
@@ -325,7 +325,7 @@ private:
 
     auto *toggleLink = new QPushButton("Don't have an account? Register");
     toggleLink->setFlat(true);
-    toggleLink->setStyleSheet("QPushButton { color: #0066cc; border: none; background: transparent; }");
+    toggleLink->setStyleSheet("QPushButton { color: #ff8c1e; border: none; background: transparent; }");
     cl->addWidget(toggleLink);
 
     lay->addWidget(card);
@@ -1119,13 +1119,248 @@ private:
     }
 };
 
+/* ===================================================================
+ *  CryptoSplash — animated boot splash. Lattice-themed to mirror the
+ *  app icon. Drawn entirely with QPainter, no external assets.
+ * =================================================================== */
+class CryptoSplash : public QWidget {
+    Q_OBJECT
+public:
+    explicit CryptoSplash(int holdMs = 2000)
+        : QWidget(nullptr, Qt::SplashScreen | Qt::FramelessWindowHint)
+        , m_holdMs(holdMs)
+    {
+        setAttribute(Qt::WA_TranslucentBackground);
+        setFixedSize(600, 380);
+        QScreen *scr = QGuiApplication::primaryScreen();
+        if (scr) {
+            QRect g = scr->availableGeometry();
+            move(g.center() - rect().center());
+        }
+        m_phases = {
+            "Initializing CNG provider",
+            "Generating ECDH P-384 keypair",
+            "Loading ML-KEM-1024 lattice",
+            "Detecting TPM 2.0 module",
+            "Running FIPS 140-2 self-test",
+            "Establishing secure channel",
+        };
+        m_anim = new QTimer(this);
+        connect(m_anim, &QTimer::timeout, this, [this]() {
+            m_tick++;
+            int pct = (int)(100.0 * m_tick / qMax(1, m_holdMs / 33));
+            m_progress = qMin(100, pct);
+            int idx = qMin((int)m_phases.size() - 1,
+                           (int)(m_progress * m_phases.size() / 100));
+            m_phaseIdx = idx;
+            update();
+        });
+        m_anim->start(33);
+    }
+
+    int holdMs() const { return m_holdMs; }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QRectF r = rect();
+        const qreal radius = 16.0;
+
+        /* ── Background card ────────────────────────────────────── */
+        QLinearGradient bg(r.topLeft(), r.bottomLeft());
+        bg.setColorAt(0.0, QColor(8, 14, 28));
+        bg.setColorAt(1.0, QColor(16, 26, 48));
+        QPainterPath card;
+        card.addRoundedRect(r.adjusted(1, 1, -1, -1), radius, radius);
+        p.fillPath(card, bg);
+
+        /* ── Hex lattice background ─────────────────────────────── */
+        p.save();
+        p.setClipPath(card);
+        QPen latPen(QColor(255, 140, 30, 40));
+        latPen.setWidthF(1.0);
+        p.setPen(latPen);
+        const qreal hr = 18.0;
+        const qreal hx = hr * 1.5;
+        const qreal hy = hr * std::sqrt(3.0);
+        qreal drift = (m_tick * 0.4);
+        for (qreal y = -hy; y < r.height() + hy; y += hy) {
+            for (qreal x = -hx; x < r.width() + hx; x += hx) {
+                qreal cx = x + std::fmod(drift, hx);
+                qreal cy = y + ((int)((x - drift) / hx) % 2 ? hy * 0.5 : 0);
+                drawHex(p, cx, cy, hr, 0);
+            }
+        }
+        p.restore();
+
+        /* ── Central crypto core: layered hex cluster ───────────── */
+        const QPointF center(r.width() * 0.28, r.height() * 0.5);
+        const qreal R = 44.0;
+        const qreal spacing = R * std::sqrt(3.0) * 1.0;
+
+        /* Lines from outer hexes to center, animated phase pulse */
+        QPen linePen(QColor(255, 160, 50,
+                            120 + (int)(60 * std::sin(m_tick * 0.08))));
+        linePen.setWidthF(1.5);
+        p.setPen(linePen);
+        for (int i = 0; i < 6; i++) {
+            qreal a = qDegreesToRadians(60.0 * i - 30.0);
+            QPointF o(center.x() + spacing * std::cos(a),
+                      center.y() + spacing * std::sin(a));
+            p.drawLine(center, o);
+        }
+
+        /* Outer six hexes — rotate slowly */
+        qreal rot = m_tick * 0.5;
+        for (int i = 0; i < 6; i++) {
+            qreal a = qDegreesToRadians(60.0 * i - 30.0 + rot);
+            QPointF o(center.x() + spacing * std::cos(a),
+                      center.y() + spacing * std::sin(a));
+            QPen op(QColor(255, 160, 50, 220));
+            op.setWidthF(2.0);
+            p.setPen(op);
+            p.setBrush(Qt::NoBrush);
+            drawHex(p, o.x(), o.y(), R * 0.42, 30);
+            p.setBrush(QColor(255, 180, 70, 230));
+            p.setPen(Qt::NoPen);
+            p.drawEllipse(o, 4.0, 4.0);
+        }
+
+        /* Central hex — bright core with mint key glyph */
+        QColor coreBorder = QColor(255, 140, 30);
+        QPen cp(coreBorder);
+        cp.setWidthF(3.0);
+        p.setPen(cp);
+        p.setBrush(QColor(40, 20, 8, 230));
+        drawHex(p, center.x(), center.y(), R, 30);
+
+        qreal inner = R * 0.42;
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(255, 210, 100));
+        p.drawRect(QRectF(center.x() - inner * 0.5, center.y() - inner * 0.5,
+                          inner, inner));
+        p.drawRect(QRectF(center.x() + inner * 0.5 - inner * 0.12,
+                          center.y() - inner * 0.15,
+                          inner * 0.30, inner * 0.30));
+
+        /* Pulsing glow ring around the core */
+        qreal pulse = 0.5 + 0.5 * std::sin(m_tick * 0.10);
+        QPen glowP(QColor(255, 140, 30, (int)(60 + pulse * 80)));
+        glowP.setWidthF(2.0 + pulse * 2.0);
+        p.setPen(glowP);
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(center, R + 18 + pulse * 6, R + 18 + pulse * 6);
+
+        /* ── Title block (right side) ───────────────────────────── */
+        const qreal textX = r.width() * 0.5;
+        const qreal textW = r.width() - textX - 32;
+
+        QFont titleFont("Segoe UI", 28, QFont::Black);
+        titleFont.setLetterSpacing(QFont::AbsoluteSpacing, 6.0);
+        p.setFont(titleFont);
+        p.setPen(QColor(255, 170, 60));
+        p.drawText(QRectF(textX, 96, textW, 44),
+                   Qt::AlignLeft | Qt::AlignVCenter, "GHOSTLINK");
+
+        /* Underline accent */
+        p.setPen(QPen(QColor(255, 140, 30, 230), 2.0));
+        p.drawLine(QPointF(textX, 148), QPointF(textX + 180, 148));
+
+        /* Crypto specs */
+        QFont specFont("Consolas", 9);
+        p.setFont(specFont);
+        p.setPen(QColor(230, 165, 80));
+        p.drawText(QRectF(textX, 158, textW, 18),
+                   Qt::AlignLeft | Qt::AlignVCenter,
+                   "AES-256-GCM  ·  ECDH P-384  ·  ML-KEM-1024");
+        p.setPen(QColor(180, 120, 55));
+        p.drawText(QRectF(textX, 174, textW, 16),
+                   Qt::AlignLeft | Qt::AlignVCenter,
+                   "FIPS 140-2  ·  TPM 2.0  ·  Zero metadata");
+
+        /* ── Progress bar ───────────────────────────────────────── */
+        const qreal barY = r.height() - 70;
+        const qreal barH = 4;
+        QRectF barBg(textX, barY, textW, barH);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(50, 30, 14));
+        p.drawRoundedRect(barBg, 2, 2);
+        QRectF barFill(textX, barY, textW * m_progress / 100.0, barH);
+        QLinearGradient barG(barFill.topLeft(), barFill.topRight());
+        barG.setColorAt(0.0, QColor(255, 110, 20));
+        barG.setColorAt(1.0, QColor(255, 200, 80));
+        p.setBrush(barG);
+        p.drawRoundedRect(barFill, 2, 2);
+
+        /* Phase label */
+        QFont phaseFont("Consolas", 9);
+        p.setFont(phaseFont);
+        p.setPen(QColor(255, 160, 40));
+        QString tag = QString("[%1]").arg(m_progress, 3, 10, QChar('0'));
+        p.drawText(QRectF(textX, barY + 12, 50, 18),
+                   Qt::AlignLeft | Qt::AlignVCenter, tag);
+        p.setPen(QColor(245, 200, 130));
+        QString phase = m_phases.value(m_phaseIdx) + "...";
+        p.drawText(QRectF(textX + 50, barY + 12, textW - 50, 18),
+                   Qt::AlignLeft | Qt::AlignVCenter, phase);
+
+        /* Version watermark */
+        QFont vFont("Consolas", 8);
+        p.setFont(vFont);
+        p.setPen(QColor(140, 95, 50));
+        p.drawText(QRectF(r.width() - 80, r.height() - 22, 70, 16),
+                   Qt::AlignRight | Qt::AlignVCenter,
+                   QString("v") + CLIENT_VERSION);
+
+        /* ── Outer border highlight ─────────────────────────────── */
+        p.setPen(QPen(QColor(255, 140, 30, 180), 1.5));
+        p.setBrush(Qt::NoBrush);
+        p.drawRoundedRect(r.adjusted(1, 1, -1, -1), radius, radius);
+    }
+
+private:
+    static void drawHex(QPainter &p, qreal cx, qreal cy, qreal radius, qreal rotDeg) {
+        QPolygonF poly;
+        for (int i = 0; i < 6; i++) {
+            qreal a = qDegreesToRadians(60.0 * i + rotDeg);
+            poly << QPointF(cx + radius * std::cos(a), cy + radius * std::sin(a));
+        }
+        p.drawPolygon(poly);
+    }
+
+    QTimer *m_anim;
+    int m_tick = 0;
+    int m_progress = 0;
+    int m_phaseIdx = 0;
+    int m_holdMs;
+    QStringList m_phases;
+};
+
 #include "main.moc"
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName("GHOSTLINK");
     app.setApplicationVersion(CLIENT_VERSION);
+    app.setWindowIcon(QIcon(":/ghostlink.png"));
+
+    CryptoSplash splash;
+    splash.show();
+    app.processEvents();
+
+    /* Construct main window synchronously (crypto/network/TPM init runs here).
+       The splash stays visible while the constructor runs, then for the
+       remainder of the hold time. */
     GhostlinkWindow w;
-    w.show();
+    w.setWindowIcon(QIcon(":/ghostlink.png"));
+
+    QTimer::singleShot(splash.holdMs(), &splash, [&]() {
+        w.show();
+        w.raise();
+        w.activateWindow();
+        splash.close();
+    });
+
     return app.exec();
 }

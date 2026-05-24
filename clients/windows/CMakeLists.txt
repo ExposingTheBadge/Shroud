@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(GHOSTLINK VERSION 1.1.0 LANGUAGES CXX C)
+project(GHOSTLINK VERSION 1.2.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +19,8 @@ set(WIN_MODULES
 
 add_executable(ghostlink
     main.cpp
+    ghostlink.qrc
+    ghostlink.rc
     ${WIN_MODULES}
 )
 
