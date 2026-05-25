@@ -13,21 +13,27 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include "ratchet.h"
-#include <bcrypt.h>
 #include <string.h>
 #include <stdio.h>
 
-#ifndef BCRYPT_ECC_CURVE_NAME
-#define BCRYPT_ECC_CURVE_NAME L"ECCCurveName"
+/* NT_SUCCESS is normally in <winnt.h> but only when the user defined macro
+   guard wasn't tripped; redefine locally for safety. */
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(s) (((NTSTATUS)(s)) >= 0)
 #endif
+
+/* The Windows 10 SDK defines BCRYPT_ECC_CURVE_25519 and the generic-magic
+ * constants. If we're targeting an older SDK they may need shimming. */
 #ifndef BCRYPT_ECC_CURVE_25519
 #define BCRYPT_ECC_CURVE_25519 L"curve25519"
 #endif
-#ifndef BCRYPT_ECCKEY_BLOB
-typedef struct _BCRYPT_ECCKEY_BLOB { ULONG dwMagic; ULONG cbKey; } BCRYPT_ECCKEY_BLOB;
+#ifndef BCRYPT_ECC_CURVE_NAME
+#define BCRYPT_ECC_CURVE_NAME L"ECCCurveName"
 #endif
 #ifndef BCRYPT_ECDH_PUBLIC_GENERIC_MAGIC
 #define BCRYPT_ECDH_PUBLIC_GENERIC_MAGIC  0x504B4345
+#endif
+#ifndef BCRYPT_ECDH_PRIVATE_GENERIC_MAGIC
 #define BCRYPT_ECDH_PRIVATE_GENERIC_MAGIC 0x564B4345
 #endif
 

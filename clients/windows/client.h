@@ -9,8 +9,8 @@
 #define UNICODE
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
-#define NTDDI_VERSION 0x06020000  /* Windows 8+ for CNG */
-#define _WIN32_WINNT 0x0602
+#define NTDDI_VERSION 0x0A000000  /* Windows 10 — needed for BCRYPT_ECDH_ALGORITHM, X25519, HKDF */
+#define _WIN32_WINNT 0x0A00
 
 #include <windows.h>
 #include <wincrypt.h>
