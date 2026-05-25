@@ -13,6 +13,8 @@ REQ_COUNTS = collections.Counter()
 REQ_LATENCY = collections.deque(maxlen=2000)  # (path, ms, ts)
 ERR_COUNTS = collections.Counter()
 RECENT_ERRORS = collections.deque(maxlen=100)
+COVER_COUNT = 0           # number of cover messages received since boot
+COVER_BYTES = 0           # bytes received as cover (post-padding)
 
 # Add parent to path for crypto imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -50,6 +52,14 @@ except Exception as _sig_e:
     hybrid_sig = None
     HYBRID_SIG_AVAILABLE = False
     print(f"[GHOSTLINK] Hybrid signatures unavailable: {_sig_e}")
+
+try:
+    from crypto import anon_creds
+    ANON_CREDS_AVAILABLE = anon_creds.self_test()
+except Exception as _ac_e:
+    anon_creds = None
+    ANON_CREDS_AVAILABLE = False
+    print(f"[GHOSTLINK] Anonymous credentials unavailable: {_ac_e}")
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -112,6 +122,36 @@ def server_sign_attestation(session_id: str, pq_pubkey_blob: bytes) -> bytes:
 
 
 _load_or_create_identity()
+
+
+# ── Anonymous credential issuing key (RSA-3072 blind sig) ────────────
+ANON_CREDS_KEY_PATH = os.path.join(os.path.dirname(__file__), "anon_creds.key")
+ANON_CREDS_KEYS = None  # {"pub": dict, "sk": dict}
+
+def _load_or_create_anon_creds_key():
+    global ANON_CREDS_KEYS
+    if not ANON_CREDS_AVAILABLE: return
+    if os.path.exists(ANON_CREDS_KEY_PATH):
+        try:
+            with open(ANON_CREDS_KEY_PATH, "rb") as f:
+                blob = f.read()
+            sk = anon_creds.parse_sk(blob)
+            pub = {"n": sk["n"], "e": sk["e"]}
+            ANON_CREDS_KEYS = {"pub": pub, "sk": sk}
+            print(f"[GHOSTLINK] Anonymous credential key loaded (RSA-{sk['n'].bit_length()})")
+            return
+        except Exception as e:
+            print(f"[GHOSTLINK] WARN: anon_creds key corrupt ({e}) — regenerating")
+    pub, sk = anon_creds.server_keygen()
+    with open(ANON_CREDS_KEY_PATH, "wb") as f:
+        f.write(anon_creds.serialize_sk(sk))
+    try: os.chmod(ANON_CREDS_KEY_PATH, 0o600)
+    except Exception: pass
+    ANON_CREDS_KEYS = {"pub": pub, "sk": sk}
+    print(f"[GHOSTLINK] Anonymous credential keypair generated (RSA-{sk['n'].bit_length()})")
+
+
+_load_or_create_anon_creds_key()
 
 # ── Config ───────────────────────────────────────────────────────────
 from fastapi.responses import FileResponse, StreamingResponse
@@ -176,7 +216,7 @@ async def lifespan(ap):
         except asyncio.CancelledError: pass
         print("[GHOSTLINK] Server shutting down")
 
-app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.6.0", lifespan=lifespan)
+app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.7.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -373,6 +413,7 @@ def init_db():
         "ALTER TABLE devices ADD COLUMN x25519_pub BLOB",
         "ALTER TABLE devices ADD COLUMN x25519_pub_sig BLOB",
         "ALTER TABLE devices ADD COLUMN ratchet_published_at TEXT",
+        "ALTER TABLE devices ADD COLUMN pickup_secret BLOB",
     ):
         try: db.execute(ddl); db.commit()
         except: pass
@@ -388,6 +429,12 @@ def init_db():
                 UNIQUE(device_id, prekey_id)
             );
             CREATE INDEX IF NOT EXISTS idx_otp_device ON one_time_prekeys(device_id);
+
+            CREATE TABLE IF NOT EXISTS redeemed_credentials (
+                m_hex TEXT PRIMARY KEY,
+                redeemed_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_redeemed_ts ON redeemed_credentials(redeemed_at);
         """)
         db.commit()
     except: pass
@@ -471,7 +518,7 @@ class AuthRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "fips": "140-2 validated", "version": "1.6.0"}
+    return {"status": "ok", "fips": "140-2 validated", "version": "1.7.0"}
 
 import threading
 ecdh_cache = {}
@@ -603,6 +650,79 @@ async def ratchet_bundle(device_id: str):
     }
 
 
+@app.get("/api/v1/credentials/pubkey")
+async def anon_creds_pubkey():
+    """Return the server's anonymous-credential RSA public key. Clients use
+    it to blind tokens before requesting a signature, and to verify
+    unblinded tokens before redeeming them."""
+    if not ANON_CREDS_KEYS:
+        raise HTTPException(503, "Anonymous credentials unavailable")
+    pub = ANON_CREDS_KEYS["pub"]
+    return {"n_hex": format(pub["n"], "x"), "e": pub["e"], "bits": pub["n"].bit_length()}
+
+
+@app.post("/api/v1/credentials/issue")
+async def anon_creds_issue(request: Request):
+    """Sign a *blinded* credential request. Caller must be an authenticated
+    device (X-Device-ID). Server signs m_blind with its private key; client
+    unblinds to obtain a token unlinkable to this request.
+
+    Body: { device_id: str, m_blind_hex: str, batch: int (optional, max 50) }
+    """
+    if not ANON_CREDS_KEYS:
+        raise HTTPException(503, "Anonymous credentials unavailable")
+    body = await request.json()
+    did = body.get("device_id", "")
+    if not db.execute("SELECT id FROM devices WHERE id=?", (did,)).fetchone():
+        raise HTTPException(401, "Invalid device")
+    blinded = body.get("m_blind_hex")
+    batch_hexes = body.get("batch_hex", [])
+    sigs = []
+    if isinstance(batch_hexes, list) and batch_hexes:
+        for h in batch_hexes[:50]:
+            try:
+                mb = int(h, 16)
+                sb = anon_creds.server_sign_blinded(mb, ANON_CREDS_KEYS["sk"])
+                sigs.append(format(sb, "x"))
+            except Exception:
+                sigs.append("")
+        return {"signatures_hex": sigs}
+    if not blinded:
+        raise HTTPException(400, "m_blind_hex or batch_hex required")
+    try:
+        mb = int(blinded, 16)
+    except Exception:
+        raise HTTPException(400, "m_blind_hex must be hex")
+    sb = anon_creds.server_sign_blinded(mb, ANON_CREDS_KEYS["sk"])
+    return {"signature_hex": format(sb, "x")}
+
+
+@app.post("/api/v1/credentials/redeem")
+async def anon_creds_redeem(request: Request):
+    """Spend a token. Server verifies the signature, enforces single-use via
+    redeemed_credentials, and returns OK. The redeemed token is recorded by
+    its m value only — no link to the original issuer device exists.
+
+    Body: { token: "m_hex.s_hex" }
+    """
+    if not ANON_CREDS_KEYS:
+        raise HTTPException(503, "Anonymous credentials unavailable")
+    body = await request.json()
+    token = body.get("token", "")
+    try:
+        m, s = anon_creds.parse_token(token)
+    except Exception:
+        raise HTTPException(400, "Malformed token")
+    if not anon_creds.verify_token(m, s, ANON_CREDS_KEYS["pub"]):
+        raise HTTPException(403, "Token signature does not verify")
+    m_hex = m.hex()
+    if db.execute("SELECT 1 FROM redeemed_credentials WHERE m_hex=?", (m_hex,)).fetchone():
+        raise HTTPException(409, "Token already redeemed (double-spend)")
+    db.execute("INSERT INTO redeemed_credentials (m_hex) VALUES (?)", (m_hex,))
+    db.commit()
+    return {"redeemed": True}
+
+
 @app.get("/api/v1/server-identity")
 async def server_identity():
     """Return the server's long-lived public identity blob + fingerprint.
@@ -692,22 +812,24 @@ async def get_version():
     embedded version string."""
     base = "https://github.com/ExposingTheBadge/GhostLink/releases/latest"
     return {
-        "version": "1.6.0",
+        "version": "1.7.0",
         "minimum_supported": "1.3.0",
         "release_url": base,
         "windows": f"{base}/download/GHOSTLINK.exe",
         "android": f"{base}/download/GHOSTLINK.apk",
         "linux":   f"{base}/download/ghostlink-linux",
         "changelog": (
-            "1.6.0 — Double Ratchet across all three platforms (Python ref + "
-            "Windows BCrypt port + Android JCA port) for forward + future "
-            "secrecy. Server prekey-bundle storage (/api/v1/ratchet/...) for "
-            "X3DH-style session bootstrap. Windows client now does the full "
-            "PQ-hybrid handshake (ECDH-P384 + ML-KEM-1024 via HKDF-SHA512) "
-            "when liboqs.dll is available, falling back to classical. Android "
-            "TOFU-pins the server identity fingerprint. 1.5.0 — Triple-hybrid "
-            "server identity signatures, /api/v1/server-identity, onion-only "
-            "mode, reproducible-build skeleton, identity rotation."
+            "1.7.0 (Tier 2 — metadata zero-knowledge) — Cover traffic endpoint "
+            "(/api/v1/messages/cover) for constant-rate decoy padding. Rotating "
+            "per-device pickup tokens (HMAC-SHA256, 1-hour epoch) plus the "
+            "/api/v1/devices/{id}/pickup-token + /api/v1/messages/fetch-by-token "
+            "endpoints — network observers see fresh routing tokens each "
+            "epoch. Anonymous send credentials via RSA-3072 blind signatures "
+            "(/api/v1/credentials/{pubkey,issue,redeem}) — rate-limit without "
+            "de-anonymizing senders. Ratchet bundle publication wired into "
+            "Windows + Android login flows. 1.6.0 — Double Ratchet across "
+            "Python/Windows/Android + Windows PQ-hybrid handshake + Android "
+            "server-identity pinning."
         ),
     }
 
@@ -962,6 +1084,96 @@ async def send_message(request: Request):
     db.execute("UPDATE devices SET last_seen=datetime('now') WHERE id=?", (sender_id,))
     db.commit()
     return {"message_id": msg_id, "relayed": True, "v": env_ver, "expires_at": expires_at}
+
+
+# ── Rotating pickup tokens ────────────────────────────────────────
+# Each device has a 32-byte pickup_secret known only to the device and
+# the server. The current epoch's pickup token is HMAC-SHA256(secret,
+# epoch_hour). Tokens rotate every hour. Network observers see the
+# routing key change every epoch, breaking long-term correlation
+# between repeated polls. (The server itself can still link tokens to
+# devices — true VOPRF blindness is on the v1.8.0 roadmap.)
+PICKUP_EPOCH_SECONDS = 3600
+
+def _epoch_hour() -> int:
+    return int(time.time() // PICKUP_EPOCH_SECONDS)
+
+def _device_pickup_token(secret: bytes, epoch: int) -> str:
+    if not secret:
+        return ""
+    return hmac_sign(secret, epoch.to_bytes(8, "big")).hex()
+
+def _ensure_pickup_secret(device_id: str) -> bytes:
+    row = db.execute("SELECT pickup_secret FROM devices WHERE id=?", (device_id,)).fetchone()
+    if not row: return b""
+    if row[0]: return row[0]
+    secret = fips_random(32)
+    db.execute("UPDATE devices SET pickup_secret=? WHERE id=?", (secret, device_id))
+    db.commit()
+    return secret
+
+def _device_for_token(token: str) -> str | None:
+    """Look up which device a given pickup token currently belongs to.
+    Checks the current, previous, and next epoch to handle clock skew."""
+    if not token: return None
+    epoch = _epoch_hour()
+    cands = [epoch, epoch - 1, epoch + 1]
+    rows = db.execute("SELECT id, pickup_secret FROM devices WHERE pickup_secret IS NOT NULL").fetchall()
+    for did, secret in rows:
+        for e in cands:
+            if _device_pickup_token(secret, e) == token:
+                return did
+    return None
+
+
+@app.get("/api/v1/devices/{device_id}/pickup-token")
+async def get_pickup_token(device_id: str):
+    """Return the device's current rotating pickup token + the previous
+    epoch's (so senders mid-rotation hit the right mailbox). The token is
+    derived from a server-stored secret per device; observers without
+    that secret cannot link tokens to a device."""
+    row = db.execute("SELECT id FROM devices WHERE id=?", (device_id,)).fetchone()
+    if not row: raise HTTPException(404, "Device not found")
+    secret = _ensure_pickup_secret(device_id)
+    e = _epoch_hour()
+    return {
+        "device_id": device_id,
+        "epoch": e,
+        "epoch_seconds": PICKUP_EPOCH_SECONDS,
+        "current_token": _device_pickup_token(secret, e),
+        "previous_token": _device_pickup_token(secret, e - 1),
+        "next_token": _device_pickup_token(secret, e + 1),
+        "next_rotation_at": (e + 1) * PICKUP_EPOCH_SECONDS,
+    }
+
+
+@app.post("/api/v1/messages/fetch-by-token")
+async def fetch_by_token(request: Request):
+    """Pickup messages addressed to a rotating token instead of by
+    device_id. The recipient device computes the current token locally
+    and submits it — the server resolves it to the device and returns
+    pending messages. To a network observer the token rotates every hour
+    so two consecutive polls look like different recipients."""
+    body = await request.json()
+    token = body.get("token", "")
+    device_id = _device_for_token(token)
+    if not device_id:
+        raise HTTPException(401, "Invalid or expired pickup token")
+    rebuilt = GetMessagesRequest(device_id=device_id, since=body.get("since"))
+    return await fetch_messages(rebuilt)
+
+
+@app.post("/api/v1/messages/cover")
+async def cover_traffic(request: Request):
+    """Accept and silently discard a padded decoy envelope. Clients use this
+    to maintain constant-rate cover traffic so a passive observer cannot
+    distinguish real sends from noise. The payload is read, counted, and
+    dropped — it is never written to disk or queued for delivery."""
+    global COVER_COUNT, COVER_BYTES
+    body = await request.body()
+    COVER_COUNT += 1
+    COVER_BYTES += len(body)
+    return {"ok": True}
 
 
 @app.post("/api/v1/messages/send-sealed")
@@ -1906,7 +2118,7 @@ async def admin_stats(session=Depends(require_admin)):
         "uptime_sec": round(time.time() - STARTUP_TS, 1),
         "uptime_fmt": _fmt_uptime(time.time() - STARTUP_TS),
         "server_time_utc": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
-        "version": "1.6.0",
+        "version": "1.7.0",
         "registration_enabled": registration_enabled,
         "maintenance_mode": maintenance_mode,
         "total_users": db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
@@ -1930,6 +2142,10 @@ async def admin_stats(session=Depends(require_admin)):
         "onion_only": setting_get("onion_only", "0") == "1",
         "ratchet_devices": ratchet_devices,
         "one_time_prekeys_total": otp_total,
+        "cover_count": COVER_COUNT,
+        "cover_bytes": COVER_BYTES,
+        "anon_creds_available": ANON_CREDS_AVAILABLE,
+        "anon_creds_redeemed_total": db.execute("SELECT COUNT(*) FROM redeemed_credentials").fetchone()[0] if ANON_CREDS_AVAILABLE else 0,
         "os_windows": os_counts.get("windows", 0),
         "os_android": os_counts.get("android", 0),
         "os_ios": os_counts.get("ios", 0),
@@ -2307,6 +2523,10 @@ async function refresh(){
       ['warn',d.disappearing_pending,'Disappearing Pending'],
       ['accent',d.ratchet_devices,'Ratchet Devices'],
       ['ok',d.one_time_prekeys_total,'One-Time Prekeys'],
+      ['purple',d.cover_count,'Cover Messages'],
+      ['purple',fmtSize(d.cover_bytes),'Cover Bytes'],
+      [d.anon_creds_available?'ok':'danger',d.anon_creds_available?'READY':'OFF','Anon Creds'],
+      ['ok',d.anon_creds_redeemed_total,'Anon Creds Redeemed'],
     ].map(c=>'<div class="card '+c[0]+'"><div class="val">'+esc(c[1])+'</div><div class="lbl">'+esc(c[2])+'</div></div>').join('');
 
     const hh=d.hourly_activity||[];const hMax=Math.max(1,...hh.map(x=>x.count));

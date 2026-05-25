@@ -6,10 +6,13 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "1.6.0"
+#define CLIENT_VERSION "1.7.0"
 
 extern "C" {
 #include "client.h"
+extern "C" {
+#include "ratchet.h"
+}
 }
 
 /* ===================================================================
@@ -589,6 +592,15 @@ private:
             strcpy(scSave.platform, "windows");
             storage_save_config(&scSave);
             storage_save_keypair(scSave.id, &scSave.identity_key);
+
+            /* Publish our ratchet bundle. Generates one long-term X25519
+               identity + 32 one-time prekeys, stores the privs locally,
+               and uploads the pubs to /api/v1/ratchet/publish-key so peers
+               can bootstrap a Double Ratchet conversation with us. Best-
+               effort — failure is non-fatal for v1.7 (clients fall back
+               to the v1 envelope flow). */
+            publishRatchetBundle(did);
+
             m_registered = true;
             QWidget *old = m_stack->currentWidget();
             buildChatUI();
@@ -868,6 +880,55 @@ private:
         if (pinned.isEmpty()) { savePinnedFingerprint(fp); return 1; }
         if (pinned != fp) return -1;
         return 0;
+    }
+
+    /* ── Ratchet bundle publication (forward-secrecy bootstrap) ──── */
+    QString ratchetKeyDir() {
+        QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (base.isEmpty()) base = QDir::tempPath();
+        QString dir = base + "/GHOSTLINK/ratchet";
+        QDir().mkpath(dir);
+        return dir;
+    }
+    bool publishRatchetBundle(const QString &deviceId) {
+        QFile idFile(ratchetKeyDir() + "/identity.x25519");
+        if (idFile.exists()) return true;  /* already published */
+
+        BYTE idPriv[32], idPub[32];
+        if (!ratchet_x25519_keygen(idPriv, idPub)) return false;
+
+        /* Persist our keypair (priv || pub) for future use. */
+        if (!idFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+        idFile.write(reinterpret_cast<const char*>(idPriv), 32);
+        idFile.write(reinterpret_cast<const char*>(idPub),  32);
+        idFile.close();
+        idFile.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+
+        /* Generate a batch of 32 one-time prekeys. */
+        QJsonArray otps;
+        QFile otpFile(ratchetKeyDir() + "/one_time_prekeys.bin");
+        if (!otpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+        for (int i = 0; i < 32; i++) {
+            BYTE pkPriv[32], pkPub[32];
+            if (!ratchet_x25519_keygen(pkPriv, pkPub)) { otpFile.close(); return false; }
+            /* Store priv keyed by prekey_id so we can retrieve when consumed. */
+            otpFile.write(reinterpret_cast<const char*>(&i), 4);
+            otpFile.write(reinterpret_cast<const char*>(pkPriv), 32);
+            QJsonObject one;
+            one["prekey_id"] = i;
+            one["pub"] = QString::fromUtf8(crypto_hex_encode(pkPub, 32));
+            otps.append(one);
+        }
+        otpFile.close();
+        otpFile.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+
+        QByteArray body = jsonBody({
+            {"device_id", deviceId},
+            {"x25519_pub", QString::fromUtf8(crypto_hex_encode(idPub, 32))},
+            {"one_time_prekeys", otps},
+        });
+        QByteArray resp = httpPost("/api/v1/ratchet/publish-key", body);
+        return !jsonStr(resp, "published").isEmpty();
     }
 
     /* ── Image attachment storage ───────────────────────────────── */

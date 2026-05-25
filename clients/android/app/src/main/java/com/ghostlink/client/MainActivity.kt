@@ -94,6 +94,44 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Generate + persist this device's long-term X25519 ratchet identity
+     *  and a batch of one-time prekeys, then upload the pubs to the server.
+     *  Subsequent peers can fetch the bundle to bootstrap a Double Ratchet
+     *  session. Idempotent — skipped if we already have an identity file. */
+    private suspend fun publishRatchetBundle(deviceId: String) {
+        try {
+            val dir = java.io.File(getApplication<Application>().filesDir, "ratchet")
+            dir.mkdirs()
+            val idFile = java.io.File(dir, "identity.x25519")
+            if (idFile.exists()) return
+
+            val (idPriv, idPub) = Ratchet.x25519Keygen()
+            idFile.writeBytes(idPriv + idPub)
+
+            val otpFile = java.io.File(dir, "one_time_prekeys.bin")
+            val otps = org.json.JSONArray()
+            otpFile.outputStream().use { os ->
+                for (i in 0 until 32) {
+                    val (pkPriv, pkPub) = Ratchet.x25519Keygen()
+                    os.write(byteArrayOf((i and 0xff).toByte(), 0, 0, 0))
+                    os.write(pkPriv)
+                    otps.put(JSONObject().apply {
+                        put("prekey_id", i)
+                        put("pub", pkPub.toHex())
+                    })
+                }
+            }
+
+            withContext(Dispatchers.IO) {
+                NetworkClient.post("/api/v1/ratchet/publish-key", JSONObject().apply {
+                    put("device_id", deviceId)
+                    put("x25519_pub", idPub.toHex())
+                    put("one_time_prekeys", otps)
+                })
+            }
+        } catch (_: Throwable) { /* non-fatal */ }
+    }
+
     private fun startHeartbeat() {
         viewModelScope.launch {
             while (isRegistered) {
@@ -171,6 +209,7 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
                 if (did.isNotEmpty()) {
                     deviceID = did; username = u; savedPassword = p; isRegistered = true
                     prefs.edit().putString("device_id", did).putString("username", u).putString("password", p).apply()
+                    publishRatchetBundle(did)
                     startHeartbeat()
                 } else {
                     onError(authR.optString("detail", "Server rejected"))
