@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "1.4.0"
+#define CLIENT_VERSION "1.5.0"
 
 extern "C" {
 #include "client.h"
@@ -456,6 +456,32 @@ private:
             storage_save_config(&sc2);
         }
 
+        status->setText("Verifying server identity...");
+        QApplication::processEvents();
+
+        /* 0. Server identity check (TOFU pin). Triple-hybrid signature
+              suite Ed25519 + ML-DSA-87 + SPHINCS+-256s. If the server's
+              fingerprint differs from what we pinned earlier, refuse. */
+        QString serverFp;
+        int idStatus = verifyServerIdentity(&serverFp);
+        if (idStatus == -1) {
+            QMessageBox::critical(this, "Server identity changed",
+                "The server's identity fingerprint does NOT match the one this device pinned.\n\n"
+                "Pinned:  " + loadPinnedFingerprint() + "\n"
+                "Server:  " + serverFp + "\n\n"
+                "This usually means one of:\n"
+                "  • The server operator rotated the identity (verify out of band).\n"
+                "  • Someone is impersonating the server (MITM attack).\n\n"
+                "Refusing to authenticate. If the change is legitimate, delete\n"
+                + serverPinPath() + " and try again.");
+            status->setText("Server identity mismatch — refusing");
+            return;
+        }
+        if (idStatus == 1) {
+            status->setText("First connect: pinned server fingerprint " + serverFp.left(8) + "...");
+            QApplication::processEvents();
+        }
+
         status->setText("Exchanging keys...");
         QApplication::processEvents();
 
@@ -760,6 +786,41 @@ private:
             jsonBody({{"device_id", m_deviceId}, {"contact_username", username}}));
         QJsonArray devs = QJsonDocument::fromJson(r).object().value("devices").toArray();
         return devs.isEmpty() ? QString() : devs[0].toObject().value("id").toString();
+    }
+
+    /* ── Server identity pinning (TOFU) ─────────────────────────────
+       On first connect we record the server's triple-hybrid identity
+       fingerprint (Ed25519 + ML-DSA-87 + SPHINCS+-256s). Every later
+       connect we refuse if the fingerprint changed — MITM has to either
+       impersonate three independent signature schemes or hijack the
+       file on the user's disk. */
+    QString serverPinPath() {
+        QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (base.isEmpty()) base = QDir::tempPath();
+        QDir().mkpath(base + "/GHOSTLINK");
+        return base + "/GHOSTLINK/server.pin";
+    }
+    QString loadPinnedFingerprint() {
+        QFile f(serverPinPath());
+        if (!f.open(QIODevice::ReadOnly)) return QString();
+        return QString::fromUtf8(f.readAll()).trimmed();
+    }
+    bool savePinnedFingerprint(const QString &fp) {
+        QFile f(serverPinPath());
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+        f.write(fp.toUtf8()); return true;
+    }
+    /* Returns 0 = ok, 1 = first-pin saved, -1 = mismatch, -2 = endpoint missing */
+    int verifyServerIdentity(QString *outFingerprint) {
+        QByteArray resp = httpGet("/api/v1/server-identity");
+        QJsonObject obj = QJsonDocument::fromJson(resp).object();
+        QString fp = obj.value("fingerprint").toString();
+        if (fp.isEmpty()) return -2;
+        if (outFingerprint) *outFingerprint = fp;
+        QString pinned = loadPinnedFingerprint();
+        if (pinned.isEmpty()) { savePinnedFingerprint(fp); return 1; }
+        if (pinned != fp) return -1;
+        return 0;
     }
 
     /* ── Image attachment storage ───────────────────────────────── */

@@ -1,0 +1,12 @@
+# GHOSTLINK server dependencies — pinned for reproducible builds.
+# Hashes must match what's installed in the local dev environment.
+# Regenerate with: pip-compile --generate-hashes requirements-server.in
+#
+# This is a placeholder; the actual hash-locked file is generated as part
+# of each release (see BUILD-REPRODUCIBILITY.md).
+fastapi
+uvicorn[standard]
+pydantic
+cryptography
+liboqs-python
+argon2-cffi

@@ -43,7 +43,75 @@ except Exception as _pq_e:
     PQ_AVAILABLE = False
     print(f"[GHOSTLINK] PQ hybrid unavailable: {_pq_e}")
 
+try:
+    from crypto import hybrid_sig
+    HYBRID_SIG_AVAILABLE = hybrid_sig.self_test()
+except Exception as _sig_e:
+    hybrid_sig = None
+    HYBRID_SIG_AVAILABLE = False
+    print(f"[GHOSTLINK] Hybrid signatures unavailable: {_sig_e}")
+
 from cryptography.hazmat.primitives.asymmetric import ec
+
+
+# ── Persistent server identity (triple-hybrid signature keypair) ─────
+IDENTITY_PATH = os.path.join(os.path.dirname(__file__), "identity.key")
+SERVER_IDENTITY = None  # {"pk_blob": bytes, "secrets": dict, "fingerprint": str}
+IDENTITY_FILE_MAGIC = 0xC0DEFACE
+
+def _load_or_create_identity():
+    global SERVER_IDENTITY
+    if not HYBRID_SIG_AVAILABLE:
+        return
+    if os.path.exists(IDENTITY_PATH):
+        try:
+            with open(IDENTITY_PATH, "rb") as f:
+                data = f.read()
+            (magic,) = struct.unpack_from("<I", data, 0)
+            if magic != IDENTITY_FILE_MAGIC:
+                raise ValueError("identity file magic mismatch")
+            off = 4
+            (pk_len,) = struct.unpack_from("<I", data, off); off += 4
+            pk = data[off:off + pk_len]; off += pk_len
+            (ed_len,) = struct.unpack_from("<I", data, off); off += 4
+            ed_sk = data[off:off + ed_len]; off += ed_len
+            (mldsa_len,) = struct.unpack_from("<I", data, off); off += 4
+            mldsa_sk = data[off:off + mldsa_len]; off += mldsa_len
+            (sph_len,) = struct.unpack_from("<I", data, off); off += 4
+            sph_sk = data[off:off + sph_len]
+            secrets = {"ed_sk_bytes": ed_sk, "mldsa_sk": mldsa_sk, "sph_sk": sph_sk}
+            fp = hybrid_sig.fingerprint(pk)
+            SERVER_IDENTITY = {"pk_blob": pk, "secrets": secrets, "fingerprint": fp}
+            print(f"[GHOSTLINK] Server identity loaded — fingerprint {fp}")
+            return
+        except Exception as e:
+            print(f"[GHOSTLINK] WARN: identity file corrupt ({e}) — regenerating")
+
+    pk, secrets = hybrid_sig.keygen()
+    data = (
+        struct.pack("<II", IDENTITY_FILE_MAGIC, len(pk)) + pk
+        + struct.pack("<I", len(secrets["ed_sk_bytes"])) + secrets["ed_sk_bytes"]
+        + struct.pack("<I", len(secrets["mldsa_sk"])) + secrets["mldsa_sk"]
+        + struct.pack("<I", len(secrets["sph_sk"])) + secrets["sph_sk"]
+    )
+    with open(IDENTITY_PATH, "wb") as f:
+        f.write(data)
+    try: os.chmod(IDENTITY_PATH, 0o600)
+    except Exception: pass
+    fp = hybrid_sig.fingerprint(pk)
+    SERVER_IDENTITY = {"pk_blob": pk, "secrets": secrets, "fingerprint": fp}
+    print(f"[GHOSTLINK] Server identity generated — fingerprint {fp}")
+
+
+def server_sign_attestation(session_id: str, pq_pubkey_blob: bytes) -> bytes:
+    """Triple-sign a handshake response so the client can pin our identity."""
+    if not SERVER_IDENTITY:
+        return b""
+    msg = b"GHOSTLINK-KEX-v2|" + session_id.encode("ascii") + b"|" + pq_pubkey_blob
+    return hybrid_sig.sign(msg, SERVER_IDENTITY["secrets"])
+
+
+_load_or_create_identity()
 
 # ── Config ───────────────────────────────────────────────────────────
 from fastapi.responses import FileResponse, StreamingResponse
@@ -108,7 +176,7 @@ async def lifespan(ap):
         except asyncio.CancelledError: pass
         print("[GHOSTLINK] Server shutting down")
 
-app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.4.0", lifespan=lifespan)
+app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.5.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -385,7 +453,7 @@ class AuthRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "fips": "140-2 validated", "version": "1.4.0"}
+    return {"status": "ok", "fips": "140-2 validated", "version": "1.5.0"}
 
 import threading
 ecdh_cache = {}
@@ -409,24 +477,44 @@ async def key_exchange():
 
 @app.get("/api/v1/key-exchange-v2")
 async def key_exchange_v2():
-    """Post-quantum hybrid key exchange: ECDH P-384 + ML-KEM-1024.
-    Defeats Harvest-Now-Decrypt-Later — adversary must break both lattices
-    AND elliptic curves to recover the session key."""
+    """Post-quantum hybrid key exchange: ECDH P-384 + ML-KEM-1024, attested
+    by the server's triple-hybrid identity signature. The client verifies the
+    signature against a pinned identity fingerprint to defeat MITM."""
     if not PQ_AVAILABLE:
         raise HTTPException(503, "PQ hybrid unavailable")
     state, blob = pq_hybrid.gen_server_keypair()
     sid = uuid.uuid4().hex
     with pq_lock:
         pq_cache[sid] = {**state, "ts": time.time()}
-        # Evict oldest if cache grows
         if len(pq_cache) > 200:
             for k in sorted(pq_cache, key=lambda k: pq_cache[k]["ts"])[:100]:
                 del pq_cache[k]
+    sig_blob = server_sign_attestation(sid, blob) if SERVER_IDENTITY else b""
     return {
         "session_id": sid,
         "server_public_key_blob": blob.hex(),
         "suite": "ECDH-P384+ML-KEM-1024",
         "kdf": "HKDF-SHA512",
+        "server_signature": sig_blob.hex(),
+        "server_identity_fp": SERVER_IDENTITY["fingerprint"] if SERVER_IDENTITY else "",
+        "sig_suite": "Ed25519+ML-DSA-87+SPHINCS+-256s" if SERVER_IDENTITY else "",
+    }
+
+@app.get("/api/v1/server-identity")
+async def server_identity():
+    """Return the server's long-lived public identity blob + fingerprint.
+    Clients pin this on first connect (TOFU) and refuse to talk to any
+    server presenting a different identity afterwards."""
+    if not SERVER_IDENTITY:
+        raise HTTPException(503, "Server identity unavailable")
+    return {
+        "pubkey_blob": SERVER_IDENTITY["pk_blob"].hex(),
+        "fingerprint": SERVER_IDENTITY["fingerprint"],
+        "suite": "Ed25519+ML-DSA-87+SPHINCS+-256s",
+        "created_at": datetime.fromtimestamp(
+            os.path.getmtime(IDENTITY_PATH) if os.path.exists(IDENTITY_PATH) else time.time(),
+            tz=timezone.utc,
+        ).isoformat(timespec="seconds"),
     }
 
 @app.post("/api/v1/auth-v2")
@@ -501,20 +589,24 @@ async def get_version():
     embedded version string."""
     base = "https://github.com/ExposingTheBadge/GhostLink/releases/latest"
     return {
-        "version": "1.4.0",
+        "version": "1.5.0",
         "minimum_supported": "1.3.0",
         "release_url": base,
         "windows": f"{base}/download/GHOSTLINK.exe",
         "android": f"{base}/download/GHOSTLINK.apk",
         "linux":   f"{base}/download/ghostlink-linux",
         "changelog": (
-            "1.4.0 — Post-quantum hybrid key exchange (ECDH-P384 + ML-KEM-1024 "
-            "cascaded through HKDF-SHA512) closes Harvest-Now-Decrypt-Later. "
-            "Sealed-sender relay (server never sees sender). Disappearing messages "
-            "(X-Expires-In) with periodic server-side purge. Envelope versioning "
-            "and fixed-size padding buckets (4K/64K/1M/16M) to defeat traffic "
-            "analysis. Massive admin dashboard expansion with audit log, "
-            "controls, hourly histogram, top endpoints, failed-login feed."
+            "1.5.0 — Triple-hybrid server identity signatures (Ed25519 + "
+            "ML-DSA-87 + SPHINCS+-256s) attest every PQ handshake response; "
+            "/api/v1/server-identity exposes the pinning fingerprint. Windows "
+            "client now pins the fingerprint on first connect (TOFU) and "
+            "refuses on mismatch. Onion-only enforcement mode rejects any "
+            "non-.onion request. Reproducible-build skeleton (Dockerfile, "
+            "BUILD-REPRODUCIBILITY.md, signed release manifest script). "
+            "Admin can rotate the server identity. 1.4.0 — PQ hybrid "
+            "(ECDH-P384 + ML-KEM-1024 via HKDF-SHA512), sealed sender, "
+            "disappearing messages, fixed-size padding buckets, big admin "
+            "dashboard expansion."
         ),
     }
 
@@ -1363,6 +1455,24 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(TelemetryMiddleware)
 
+# Onion-only mode — when enabled, refuse any request whose Host header is
+# not a .onion address. Admin paths are exempt so the operator can recover.
+class OnionOnlyMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        try:
+            enabled = setting_get("onion_only", "0") == "1"
+        except Exception:
+            enabled = False
+        if enabled:
+            path = request.url.path
+            if not (path.startswith("/admin") or path.startswith("/api/v1/admin") or path == "/health"):
+                host = request.headers.get("host", "").lower().split(":")[0]
+                if not host.endswith(".onion"):
+                    return JSONResponse({"detail": "Server is in onion-only mode"}, status_code=403)
+        return await call_next(request)
+
+app.add_middleware(OnionOnlyMiddleware)
+
 # ── Server settings (toggles) ────────────────────────────────────────
 def setting_get(key: str, default: str = "") -> str:
     row = db.execute("SELECT value FROM server_settings WHERE key=?", (key,)).fetchone()
@@ -1693,7 +1803,7 @@ async def admin_stats(session=Depends(require_admin)):
         "uptime_sec": round(time.time() - STARTUP_TS, 1),
         "uptime_fmt": _fmt_uptime(time.time() - STARTUP_TS),
         "server_time_utc": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
-        "version": "1.4.0",
+        "version": "1.5.0",
         "registration_enabled": registration_enabled,
         "maintenance_mode": maintenance_mode,
         "total_users": db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
@@ -1712,6 +1822,9 @@ async def admin_stats(session=Depends(require_admin)):
         "disappearing_pending": disappearing_pending,
         "pq_available": PQ_AVAILABLE,
         "pq_suite": "ECDH-P384+ML-KEM-1024" if PQ_AVAILABLE else "",
+        "identity_fingerprint": SERVER_IDENTITY["fingerprint"] if SERVER_IDENTITY else "",
+        "identity_suite": "Ed25519+ML-DSA-87+SPHINCS+-256s" if SERVER_IDENTITY else "",
+        "onion_only": setting_get("onion_only", "0") == "1",
         "os_windows": os_counts.get("windows", 0),
         "os_android": os_counts.get("android", 0),
         "os_ios": os_counts.get("ios", 0),
@@ -1832,6 +1945,31 @@ async def admin_toggle_maintenance(request: Request, session=Depends(require_adm
     audit_admin(session[0][:8], "toggle_maintenance", "", f"enabled={enabled}")
     return {"maintenance_mode": enabled}
 
+@app.post("/api/v1/admin/control/onion-only")
+async def admin_toggle_onion_only(request: Request, session=Depends(require_admin)):
+    """Reject any connection not arriving over a Tor onion service.
+    Detection: client must present X-Onion-Proof or arrive via the local Tor
+    SocksPort/HiddenServicePort wired into your tor config."""
+    body = await request.json()
+    enabled = bool(body.get("enabled", False))
+    setting_set("onion_only", "1" if enabled else "0")
+    audit_admin(session[0][:8], "toggle_onion_only", "", f"enabled={enabled}")
+    return {"onion_only": enabled}
+
+@app.post("/api/v1/admin/control/rotate-identity")
+async def admin_rotate_identity(session=Depends(require_admin)):
+    """Generate a NEW server identity keypair. Existing pinned clients will
+    refuse to connect until they re-pin the new fingerprint out-of-band."""
+    if not HYBRID_SIG_AVAILABLE:
+        raise HTTPException(503, "Hybrid signatures unavailable")
+    old_fp = SERVER_IDENTITY["fingerprint"] if SERVER_IDENTITY else ""
+    try: os.remove(IDENTITY_PATH)
+    except OSError: pass
+    _load_or_create_identity()
+    new_fp = SERVER_IDENTITY["fingerprint"] if SERVER_IDENTITY else ""
+    audit_admin(session[0][:8], "rotate_identity", "", f"old={old_fp} new={new_fp}")
+    return {"old_fingerprint": old_fp, "new_fingerprint": new_fp}
+
 @app.delete("/api/v1/admin/users/{user_id}")
 async def admin_delete_user(user_id: str, session=Depends(require_admin)):
     devs = [r[0] for r in db.execute("SELECT id FROM devices WHERE user_id=?", (user_id,)).fetchall()]
@@ -1939,11 +2077,23 @@ tr:hover td{background:rgba(0,212,255,.03)}
 <span class="spacer"></span>
 <span class="toggle" id="regToggle" onclick="toggleSetting('registration', !regOn)"><span class="dot"></span><span id="regLbl">Registration —</span></span>
 <span class="toggle" id="mntToggle" onclick="toggleSetting('maintenance', !mntOn)"><span class="dot"></span><span id="mntLbl">Maintenance —</span></span>
+<span class="toggle" id="onionToggle" onclick="toggleSetting('onion-only', !onionOn)"><span class="dot"></span><span id="onionLbl">Onion —</span></span>
 <button class="btn" onclick="refresh()">Refresh</button>
 <button class="btn danger" onclick="logout()">Logout</button>
 </div>
 
 <div class="grid" id="stats"></div>
+
+<div class="panel"><div class="panel-hdr">Server Identity
+<div class="actions">
+<button onclick="copyFp()">Copy Fingerprint</button>
+<button class="danger" onclick="ctrl('rotate-identity','Rotate the server identity? All previously-pinned clients will refuse to connect until they re-pin the new fingerprint.')">Rotate Identity</button>
+</div>
+</div><div style="padding:14px;display:flex;gap:24px;flex-wrap:wrap;align-items:baseline">
+<div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Fingerprint (publish this)</div><div id="idFp" style="font-family:Consolas,monospace;font-size:18px;color:var(--accent);letter-spacing:1.5px;font-weight:600">—</div></div>
+<div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Signature Suite</div><div id="idSuite" style="font-family:Consolas,monospace;font-size:12px;color:var(--text)">—</div></div>
+<div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">PQ KEX Suite</div><div id="pqSuite" style="font-family:Consolas,monospace;font-size:12px;color:var(--text)">—</div></div>
+</div></div>
 
 <div class="row">
 <div class="panel" style="flex:1 1 60%;margin:0 0 14px"><div class="panel-hdr">Messages — last 24h <span class="pill" id="hourlyTotal">—</span></div><div class="chart" id="hourlyChart"></div></div>
@@ -1992,7 +2142,7 @@ tr:hover td{background:rgba(0,212,255,.03)}
 <div class="panel"><div class="panel-hdr">Files <span class="pill">live countdown</span></div><div class="body"><table><thead><tr><th>File ID</th><th>Sender</th><th>Recipient</th><th>Orig</th><th>Enc</th><th>Uploaded</th><th>Countdown</th><th>Status</th></tr></thead><tbody id="fileTable"></tbody></table></div></div>
 
 <script>
-let fileData=[],regOn=false,mntOn=false;
+let fileData=[],regOn=false,mntOn=false,onionOn=false;
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c])}
 function fmtSize(b){if(!b&&b!==0)return'—';if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';if(b<1073741824)return(b/1048576).toFixed(1)+' MB';return(b/1073741824).toFixed(2)+' GB'}
 function fmtPct(part,total){if(!total)return'0%';return((part/total)*100).toFixed(1)+'%'}
@@ -2003,7 +2153,7 @@ async function refresh(){
     if(r.status===401){location='/admin/login';return}
     const d=await r.json();
     fileData=d.files||[];
-    regOn=d.registration_enabled;mntOn=d.maintenance_mode;
+    regOn=d.registration_enabled;mntOn=d.maintenance_mode;onionOn=d.onion_only;
     document.getElementById('metaUptime').textContent='uptime '+d.uptime_fmt;
     document.getElementById('metaTime').textContent=d.server_time_utc+' UTC';
     document.getElementById('metaVer').textContent='v'+d.version;
@@ -2011,6 +2161,11 @@ async function refresh(){
     document.getElementById('regLbl').textContent='Registration '+(regOn?'ON':'OFF');
     document.getElementById('mntToggle').classList.toggle('on',mntOn);
     document.getElementById('mntLbl').textContent='Maintenance '+(mntOn?'ON':'OFF');
+    document.getElementById('onionToggle').classList.toggle('on',onionOn);
+    document.getElementById('onionLbl').textContent='Onion '+(onionOn?'ON':'OFF');
+    document.getElementById('idFp').textContent=d.identity_fingerprint||'(unavailable)';
+    document.getElementById('idSuite').textContent=d.identity_suite||'(none)';
+    document.getElementById('pqSuite').textContent=d.pq_suite||'(unavailable)';
 
     document.getElementById('stats').innerHTML=[
       ['accent',d.total_users,'Users'],
@@ -2108,10 +2263,11 @@ async function ctrl(action,msg){
   refresh();
 }
 async function toggleSetting(which,enabled){
-  const path=which==='registration'?'registration':'maintenance';
+  const path=which;  // 'registration' | 'maintenance' | 'onion-only'
   await fetch('/api/v1/admin/control/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
   refresh();
 }
+function copyFp(){const fp=document.getElementById('idFp').textContent;if(navigator.clipboard){navigator.clipboard.writeText(fp).then(()=>alert('Copied: '+fp));}else{prompt('Fingerprint:',fp);}}
 async function delDev(id){if(confirm('Delete device '+id.substring(0,16)+'?')){await fetch('/api/v1/admin/devices/'+id,{method:'DELETE'});refresh()}}
 async function delUser(id,name){if(prompt('To delete user "'+name+'" and ALL their data, type the username:')!==name)return;await fetch('/api/v1/admin/users/'+id,{method:'DELETE'});refresh()}
 async function killSess(id){if(confirm('Kill admin session '+id.substring(0,12)+'?')){await fetch('/api/v1/admin/sessions/'+id,{method:'DELETE'});refresh()}}

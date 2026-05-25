@@ -1,0 +1,31 @@
+# GHOSTLINK Reproducible Server Build
+# ====================================
+# Pinned base, pinned deps, deterministic install. Build with:
+#   docker buildx build --no-cache --output type=docker -f Dockerfile.repro -t ghostlink-server:repro .
+#
+# To verify a release matches source, the user runs the same command and
+# compares the resulting image hash to the one published in RELEASES.md
+# (or, when that ships, to the transparency log).
+FROM python:3.12.6-slim-bookworm@sha256:032c52613401895aa3d418a4c563d2d05f993bc3ecc065c8f4e2280978acd249
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    SOURCE_DATE_EPOCH=1700000000
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential cmake ninja-build git ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/ghostlink
+
+COPY requirements-server.txt /tmp/req.txt
+RUN pip install --require-hashes -r /tmp/req.txt
+
+COPY server/ /opt/ghostlink/server/
+COPY crypto/ /opt/ghostlink/crypto/
+COPY VERSION /opt/ghostlink/VERSION
+
+EXPOSE 58443
+ENV PYTHONPATH=/opt/ghostlink
+CMD ["python", "-m", "server.server"]

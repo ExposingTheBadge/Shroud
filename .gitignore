@@ -37,6 +37,8 @@ server/ghostlink.db
 server/ghostlink.db-shm
 server/ghostlink.db-wal
 server/files/
+server/identity.key
+server/audit.log
 
 # Android build
 clients/android/app/build/
