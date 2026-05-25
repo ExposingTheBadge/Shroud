@@ -158,6 +158,47 @@ char* json_get_string(const char *json, const char *key) {
     return val;
 }
 
+/* ── Generic DPAPI-wrapped blob storage ────────────────────────── */
+BOOL storage_save_blob(const wchar_t *path, const wchar_t *tag,
+                       const BYTE *plain, DWORD plain_len) {
+    DATA_BLOB in = { plain_len, (BYTE*)plain };
+    DATA_BLOB out = {0};
+    if (!CryptProtectData(&in, tag, NULL, NULL, NULL, 0, &out)) return FALSE;
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { LocalFree(out.pbData); return FALSE; }
+    DWORD wrote = 0;
+    BOOL ok = WriteFile(h, out.pbData, out.cbData, &wrote, NULL) && wrote == out.cbData;
+    CloseHandle(h);
+    LocalFree(out.pbData);
+    return ok;
+}
+
+BOOL storage_load_blob(const wchar_t *path, BYTE **plain_out, DWORD *plain_len_out) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, 0, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD sz = GetFileSize(h, NULL);
+    if (sz == INVALID_FILE_SIZE) { CloseHandle(h); return FALSE; }
+    BYTE *buf = (BYTE*)malloc(sz);
+    if (!buf) { CloseHandle(h); return FALSE; }
+    DWORD read = 0;
+    BOOL ok = ReadFile(h, buf, sz, &read, NULL) && read == sz;
+    CloseHandle(h);
+    if (!ok) { free(buf); return FALSE; }
+    DATA_BLOB in = { sz, buf }; DATA_BLOB out = {0};
+    if (!CryptUnprotectData(&in, NULL, NULL, NULL, NULL, 0, &out)) {
+        free(buf); return FALSE;
+    }
+    free(buf);
+    *plain_out = (BYTE*)malloc(out.cbData);
+    if (!*plain_out) { LocalFree(out.pbData); return FALSE; }
+    memcpy(*plain_out, out.pbData, out.cbData);
+    *plain_len_out = out.cbData;
+    LocalFree(out.pbData);
+    return TRUE;
+}
+
 void storage_delete_all(void) {
     /* Delete registry key */
     RegDeleteKeyA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK");

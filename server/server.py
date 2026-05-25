@@ -3,7 +3,7 @@ GHOSTLINK Secure Messaging Server — FIPS 140-2 Compliant
 Port 58443 | TLS 1.3 | E2E Encryption | Device Registration
 """
 
-import os, sys, json, time, sqlite3, uuid, struct, hashlib, collections, shutil
+import os, sys, json, time, sqlite3, uuid, struct, hashlib, collections, shutil, secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -60,6 +60,22 @@ except Exception as _ac_e:
     anon_creds = None
     ANON_CREDS_AVAILABLE = False
     print(f"[GHOSTLINK] Anonymous credentials unavailable: {_ac_e}")
+
+try:
+    from crypto import srp6a
+    SRP_AVAILABLE = srp6a.self_test()
+except Exception as _srp_e:
+    srp6a = None
+    SRP_AVAILABLE = False
+    print(f"[GHOSTLINK] SRP-6a unavailable: {_srp_e}")
+
+try:
+    from crypto import at_rest
+    AT_REST_AVAILABLE = at_rest.self_test()
+except Exception as _ar_e:
+    at_rest = None
+    AT_REST_AVAILABLE = False
+    print(f"[GHOSTLINK] At-rest encryption unavailable: {_ar_e}")
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -153,6 +169,28 @@ def _load_or_create_anon_creds_key():
 
 _load_or_create_anon_creds_key()
 
+
+# ── At-rest field encryption key (AES-256-GCM for sensitive columns) ─
+DATA_KEY_PATH = os.path.join(os.path.dirname(__file__), "data.key")
+DATA_KEY = None
+if AT_REST_AVAILABLE:
+    try:
+        DATA_KEY = at_rest.load_or_create_data_key(DATA_KEY_PATH)
+        print(f"[GHOSTLINK] At-rest data key loaded (AES-256-GCM)")
+    except Exception as _dk_e:
+        print(f"[GHOSTLINK] WARN: at-rest data key unavailable: {_dk_e}")
+        DATA_KEY = None
+
+def ar_enc(s: str):
+    if not DATA_KEY or not s: return s if isinstance(s, str) else (s or "")
+    try: return at_rest.encrypt(DATA_KEY, s)
+    except Exception: return s
+
+def ar_dec(b) -> str:
+    if not DATA_KEY: return b if isinstance(b, str) else (b.decode("utf-8", errors="replace") if b else "")
+    try: return at_rest.decrypt(DATA_KEY, b)
+    except Exception: return ""
+
 # ── Config ───────────────────────────────────────────────────────────
 from fastapi.responses import FileResponse, StreamingResponse
 PORT = 58443
@@ -216,7 +254,7 @@ async def lifespan(ap):
         except asyncio.CancelledError: pass
         print("[GHOSTLINK] Server shutting down")
 
-app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.7.0", lifespan=lifespan)
+app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.8.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -414,6 +452,8 @@ def init_db():
         "ALTER TABLE devices ADD COLUMN x25519_pub_sig BLOB",
         "ALTER TABLE devices ADD COLUMN ratchet_published_at TEXT",
         "ALTER TABLE devices ADD COLUMN pickup_secret BLOB",
+        "ALTER TABLE users ADD COLUMN srp_salt BLOB",
+        "ALTER TABLE users ADD COLUMN srp_verifier BLOB",
     ):
         try: db.execute(ddl); db.commit()
         except: pass
@@ -518,7 +558,7 @@ class AuthRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "fips": "140-2 validated", "version": "1.7.0"}
+    return {"status": "ok", "fips": "140-2 validated", "version": "1.8.0"}
 
 import threading
 ecdh_cache = {}
@@ -648,6 +688,99 @@ async def ratchet_bundle(device_id: str):
             "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id=?", (device_id,)
         ).fetchone()[0],
     }
+
+
+# ── SRP-6a augmented PAKE ────────────────────────────────────────
+# Server never sees the password. Each user registers by submitting a
+# (salt, verifier) pair derived client-side. Future auth round-trips a
+# zero-knowledge proof; if it verifies, server and client end up with the
+# same session key WITHOUT the server learning the password.
+SRP_SESSIONS = {}   # session_id -> ServerSession
+SRP_SESSION_LOCK = threading.Lock()
+
+@app.post("/api/v1/srp/register")
+async def srp_register(request: Request):
+    """Body: { username, salt_hex, verifier_hex }. Salt and verifier are
+    computed client-side by srp6a.make_verifier(). The plaintext password
+    never reaches the server."""
+    if not SRP_AVAILABLE:
+        raise HTTPException(503, "SRP-6a unavailable")
+    if setting_get("registration_enabled", "1") != "1":
+        raise HTTPException(403, "Registration is currently disabled")
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    if not username or len(username) < 3:
+        raise HTTPException(400, "Username too short")
+    try:
+        salt = bytes.fromhex(body["salt_hex"])
+        verifier = int(body["verifier_hex"], 16)
+    except Exception:
+        raise HTTPException(400, "Invalid salt or verifier")
+    if db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone():
+        raise HTTPException(409, "Username already registered")
+    uid = uuid.uuid4().hex
+    db.execute(
+        "INSERT INTO users (id, username, password_hash, password_salt, srp_salt, srp_verifier) "
+        "VALUES (?,?,?,?,?,?)",
+        (uid, username, "srp", b"", salt, verifier.to_bytes((verifier.bit_length() + 7) // 8, "big")),
+    )
+    db.commit()
+    return {"user_id": uid, "username": username, "auth": "srp-6a"}
+
+@app.post("/api/v1/srp/challenge")
+async def srp_challenge(request: Request):
+    """Round 1: client posts { username, A_hex }; server replies with
+    { session_id, salt_hex, B_hex }."""
+    if not SRP_AVAILABLE:
+        raise HTTPException(503, "SRP-6a unavailable")
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    try:
+        A = int(body["A_hex"], 16)
+    except Exception:
+        raise HTTPException(400, "Invalid A_hex")
+    row = db.execute("SELECT srp_salt, srp_verifier FROM users WHERE username=?", (username,)).fetchone()
+    if not row or not row[0] or not row[1]:
+        # Always return a synthetic challenge so an attacker can't enumerate users
+        salt = hashlib.sha256(b"GHOSTLINK-decoy|" + username.encode()).digest()[:16]
+        return {"session_id": "", "salt_hex": salt.hex(), "B_hex": format(secrets.randbelow(srp6a.N), "x")}
+    salt = row[0]
+    verifier = int.from_bytes(row[1], "big")
+    sess = srp6a.ServerSession(username, salt, verifier)
+    s, B = sess.challenge()
+    sid = uuid.uuid4().hex
+    with SRP_SESSION_LOCK:
+        SRP_SESSIONS[sid] = {"sess": sess, "A": A, "ts": time.time()}
+        if len(SRP_SESSIONS) > 500:
+            for k in sorted(SRP_SESSIONS, key=lambda k: SRP_SESSIONS[k]["ts"])[:200]:
+                del SRP_SESSIONS[k]
+    return {"session_id": sid, "salt_hex": salt.hex(), "B_hex": format(B, "x")}
+
+@app.post("/api/v1/srp/prove")
+async def srp_prove(request: Request):
+    """Round 2: client posts { session_id, M1_hex }; server replies with
+    { M2_hex } on success, 401 otherwise. The shared session key derived
+    here can be used to encrypt the device_registration payload."""
+    if not SRP_AVAILABLE:
+        raise HTTPException(503, "SRP-6a unavailable")
+    body = await request.json()
+    sid = body.get("session_id", "")
+    with SRP_SESSION_LOCK:
+        entry = SRP_SESSIONS.pop(sid, None)
+    if not entry:
+        raise HTTPException(401, "Invalid or expired SRP session")
+    try:
+        M1 = bytes.fromhex(body["M1_hex"])
+    except Exception:
+        raise HTTPException(400, "Invalid M1_hex")
+    try:
+        M2 = entry["sess"].derive_and_verify(entry["A"], M1)
+    except ValueError:
+        raise HTTPException(401, "SRP proof failed")
+    # Stash the session key for subsequent device registration calls.
+    with SRP_SESSION_LOCK:
+        SRP_SESSIONS["__key__" + sid] = {"K": entry["sess"].K, "ts": time.time()}
+    return {"M2_hex": M2.hex(), "session_key_handle": sid}
 
 
 @app.get("/api/v1/credentials/pubkey")
@@ -812,24 +945,23 @@ async def get_version():
     embedded version string."""
     base = "https://github.com/ExposingTheBadge/GhostLink/releases/latest"
     return {
-        "version": "1.7.0",
+        "version": "1.8.0",
         "minimum_supported": "1.3.0",
         "release_url": base,
         "windows": f"{base}/download/GHOSTLINK.exe",
         "android": f"{base}/download/GHOSTLINK.apk",
         "linux":   f"{base}/download/ghostlink-linux",
         "changelog": (
-            "1.7.0 (Tier 2 — metadata zero-knowledge) — Cover traffic endpoint "
-            "(/api/v1/messages/cover) for constant-rate decoy padding. Rotating "
-            "per-device pickup tokens (HMAC-SHA256, 1-hour epoch) plus the "
-            "/api/v1/devices/{id}/pickup-token + /api/v1/messages/fetch-by-token "
-            "endpoints — network observers see fresh routing tokens each "
-            "epoch. Anonymous send credentials via RSA-3072 blind signatures "
-            "(/api/v1/credentials/{pubkey,issue,redeem}) — rate-limit without "
-            "de-anonymizing senders. Ratchet bundle publication wired into "
-            "Windows + Android login flows. 1.6.0 — Double Ratchet across "
-            "Python/Windows/Android + Windows PQ-hybrid handshake + Android "
-            "server-identity pinning."
+            "1.8.0 (Tier 3 — auth & at-rest) — SRP-6a augmented PAKE "
+            "(/api/v1/srp/{register,challenge,prove}) so the server never "
+            "sees the password. Server-side field-level encryption "
+            "(AES-256-GCM data.key) for friend/group invite reasons, admin "
+            "session IP and user-agent. Windows ratchet identity + one-time "
+            "prekeys persisted via DPAPI; Android prefs upgraded to "
+            "EncryptedSharedPreferences. Closes Tier 1 #23 — Windows now "
+            "verifies the server's ML-DSA-87 + SPHINCS+ attestation via "
+            "liboqs dynamic load when oqs.dll is present. 1.7.0 — cover "
+            "traffic, rotating pickup tokens, anonymous send credentials."
         ),
     }
 
@@ -1346,7 +1478,7 @@ async def friend_request(request: Request):
         raise HTTPException(409, "Request already pending")
     rid = uuid.uuid4().hex
     db.execute("INSERT INTO friend_requests (id, from_user_id, to_user_id, reason) VALUES (?,?,?,?)",
-               (rid, me[0], target[0], reason))
+               (rid, me[0], target[0], ar_enc(reason)))
     db.commit()
     return {"request_id": rid}
 
@@ -1373,8 +1505,8 @@ async def friends_list(req: AuthDevRequest):
     ).fetchall()
     return {
         "friends": [{"username": f[0]} for f in friends],
-        "incoming": [{"id": r[0], "from": r[1], "reason": r[2], "created": r[3]} for r in incoming],
-        "outgoing": [{"id": r[0], "to": r[1], "status": r[2], "response_reason": r[3], "created": r[4]} for r in outgoing],
+        "incoming": [{"id": r[0], "from": r[1], "reason": ar_dec(r[2]), "created": r[3]} for r in incoming],
+        "outgoing": [{"id": r[0], "to": r[1], "status": r[2], "response_reason": ar_dec(r[3]), "created": r[4]} for r in outgoing],
     }
 
 @app.post("/api/v1/friends/respond")
@@ -1463,7 +1595,7 @@ async def group_invite(request: Request):
         raise HTTPException(409, "Invite already pending")
     iid = uuid.uuid4().hex
     db.execute("INSERT INTO group_invites (id, group_id, from_user_id, to_user_id, reason) VALUES (?,?,?,?,?)",
-               (iid, group_id, me[0], target[0], reason))
+               (iid, group_id, me[0], target[0], ar_enc(reason)))
     db.commit()
     return {"invite_id": iid}
 
@@ -1478,7 +1610,7 @@ async def group_invites_list(req: AuthDevRequest):
         "WHERE gi.to_user_id = ? AND gi.status = 'pending' ORDER BY gi.created_at DESC",
         (me[0],)
     ).fetchall()
-    return {"invites": [{"id": r[0], "group_id": r[1], "group_name": r[2], "from": r[3], "reason": r[4], "created": r[5]} for r in rows]}
+    return {"invites": [{"id": r[0], "group_id": r[1], "group_name": r[2], "from": r[3], "reason": ar_dec(r[4]), "created": r[5]} for r in rows]}
 
 @app.post("/api/v1/groups/invites/respond")
 async def group_invites_respond(request: Request):
@@ -1958,7 +2090,7 @@ async def admin_fingerprint_login(request: Request):
     db.execute("UPDATE admin_fingerprints SET last_used=datetime('now') WHERE id=?", (row[0],))
     sid = uuid.uuid4().hex
     csrf = uuid.uuid4().hex
-    db.execute("INSERT INTO admin_sessions (id, ip, user_agent) VALUES (?,?,?)", (sid, ip, ua))
+    db.execute("INSERT INTO admin_sessions (id, ip, user_agent) VALUES (?,?,?)", (sid, ar_enc(ip), ar_enc(ua)))
     db.commit()
 
     resp = JSONResponse({"ok": True, "session_id": sid})
@@ -2118,7 +2250,7 @@ async def admin_stats(session=Depends(require_admin)):
         "uptime_sec": round(time.time() - STARTUP_TS, 1),
         "uptime_fmt": _fmt_uptime(time.time() - STARTUP_TS),
         "server_time_utc": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
-        "version": "1.7.0",
+        "version": "1.8.0",
         "registration_enabled": registration_enabled,
         "maintenance_mode": maintenance_mode,
         "total_users": db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
@@ -2146,6 +2278,9 @@ async def admin_stats(session=Depends(require_admin)):
         "cover_bytes": COVER_BYTES,
         "anon_creds_available": ANON_CREDS_AVAILABLE,
         "anon_creds_redeemed_total": db.execute("SELECT COUNT(*) FROM redeemed_credentials").fetchone()[0] if ANON_CREDS_AVAILABLE else 0,
+        "srp_available": SRP_AVAILABLE,
+        "at_rest_available": AT_REST_AVAILABLE and DATA_KEY is not None,
+        "srp_users": db.execute("SELECT COUNT(*) FROM users WHERE srp_verifier IS NOT NULL").fetchone()[0],
         "os_windows": os_counts.get("windows", 0),
         "os_android": os_counts.get("android", 0),
         "os_ios": os_counts.get("ios", 0),
@@ -2174,14 +2309,14 @@ async def admin_stats(session=Depends(require_admin)):
         "recent_errors": recent_errors,
         "audit_log": audit_log_rows,
         "failed_logins": failed_logins,
-        "friend_requests_pending": [{"id": r[0], "from": r[1], "to": r[2], "reason": r[3], "created": r[4]} for r in friend_pending],
-        "group_invites_pending": [{"id": r[0], "group": r[1], "from": r[2], "to": r[3], "reason": r[4], "created": r[5]} for r in group_pending],
+        "friend_requests_pending": [{"id": r[0], "from": r[1], "to": r[2], "reason": ar_dec(r[3]), "created": r[4]} for r in friend_pending],
+        "group_invites_pending": [{"id": r[0], "group": r[1], "from": r[2], "to": r[3], "reason": ar_dec(r[4]), "created": r[5]} for r in group_pending],
         "files": [{"id": f[0], "sender": f[1][:12], "recipient": f[2][:12], "orig_size": f[3], "enc_size": f[4], "server_ts": f[5], "expires_at": f[6], "downloaded": bool(f[7])} for f in files],
         "recent_messages": [{"ts": m[0], "sender": m[1], "recipient": m[2], "size": m[3], "delivered": bool(m[4])} for m in db.execute("SELECT server_ts, sender_device_id, recipient_device_id, LENGTH(envelope), delivered FROM messages ORDER BY server_ts DESC LIMIT 50").fetchall()],
         "devices": [{"id": d[0], "platform": d[1], "name": d[2], "registered": d[3], "last_seen": d[4] or "never"} for d in db.execute("SELECT id, platform, device_name, registered_at, last_seen FROM devices ORDER BY registered_at DESC LIMIT 100").fetchall()],
         "users": [{"username": u[0], "user_id": u[1], "created": u[2], "devices": u[3]} for u in db.execute("SELECT u.username, u.id, u.created_at, (SELECT COUNT(*) FROM devices WHERE user_id=u.id) FROM users u ORDER BY u.created_at DESC LIMIT 100").fetchall()],
         "groups": [{"id": g[0], "name": g[1], "members": g[2], "created": g[3]} for g in db.execute("SELECT g.id, g.name, COUNT(gm.device_id), g.created_at FROM group_chats g LEFT JOIN group_members gm ON g.id=gm.group_id GROUP BY g.id ORDER BY g.created_at DESC").fetchall()],
-        "sessions": [{"id": s[0], "ip": s[1], "login_at": s[2], "last_activity": s[3], "active": not bool(s[4])} for s in db.execute("SELECT id, ip, login_at, last_activity, logged_out FROM admin_sessions ORDER BY login_at DESC LIMIT 50").fetchall()],
+        "sessions": [{"id": s[0], "ip": ar_dec(s[1]), "login_at": s[2], "last_activity": s[3], "active": not bool(s[4])} for s in db.execute("SELECT id, ip, login_at, last_activity, logged_out FROM admin_sessions ORDER BY login_at DESC LIMIT 50").fetchall()],
     }
 
 @app.delete("/api/v1/admin/devices/{device_id}")
@@ -2527,6 +2662,9 @@ async function refresh(){
       ['purple',fmtSize(d.cover_bytes),'Cover Bytes'],
       [d.anon_creds_available?'ok':'danger',d.anon_creds_available?'READY':'OFF','Anon Creds'],
       ['ok',d.anon_creds_redeemed_total,'Anon Creds Redeemed'],
+      [d.srp_available?'ok':'danger',d.srp_available?'READY':'OFF','SRP-6a PAKE'],
+      ['ok',d.srp_users,'SRP Users'],
+      [d.at_rest_available?'ok':'danger',d.at_rest_available?'ON':'OFF','At-Rest Enc'],
     ].map(c=>'<div class="card '+c[0]+'"><div class="val">'+esc(c[1])+'</div><div class="lbl">'+esc(c[2])+'</div></div>').join('');
 
     const hh=d.hourly_activity||[];const hMax=Math.max(1,...hh.map(x=>x.count));

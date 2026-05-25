@@ -127,6 +127,18 @@ BOOL   storage_exists(void);
 void   storage_delete_all(void);
 void   app_instance_id(char *out, int outSize);
 
+/* Generic DPAPI-wrapped at-rest storage. The plaintext blob is encrypted
+ * with the current user's master key (CryptProtectData) so a stolen disk
+ * image is useless without the user's Windows credentials.
+ *
+ * `path` is an absolute filesystem path. `tag` is an optional descriptive
+ * label baked into the DPAPI entropy. Returns TRUE on success.
+ *
+ * On load: caller must `free()` *plain_out. */
+BOOL   storage_save_blob(const wchar_t *path, const wchar_t *tag,
+                         const BYTE *plain, DWORD plain_len);
+BOOL   storage_load_blob(const wchar_t *path, BYTE **plain_out, DWORD *plain_len_out);
+
 /* ── JSON helpers ─────────────────────────────────────────────────── */
 char*  json_get_string(const char *json, const char *key);
 

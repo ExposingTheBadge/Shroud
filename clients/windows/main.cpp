@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "1.7.0"
+#define CLIENT_VERSION "1.8.0"
 
 extern "C" {
 #include "client.h"
@@ -915,36 +915,37 @@ private:
         return dir;
     }
     bool publishRatchetBundle(const QString &deviceId) {
-        QFile idFile(ratchetKeyDir() + "/identity.x25519");
-        if (idFile.exists()) return true;  /* already published */
+        /* Idempotent — if the encrypted identity blob already exists we're done. */
+        QString idPath = ratchetKeyDir() + "/identity.x25519";
+        if (QFile::exists(idPath)) return true;
 
         BYTE idPriv[32], idPub[32];
         if (!ratchet_x25519_keygen(idPriv, idPub)) return false;
 
-        /* Persist our keypair (priv || pub) for future use. */
-        if (!idFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
-        idFile.write(reinterpret_cast<const char*>(idPriv), 32);
-        idFile.write(reinterpret_cast<const char*>(idPub),  32);
-        idFile.close();
-        idFile.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+        /* Persist (priv || pub) DPAPI-wrapped so a stolen disk image is
+           useless without the user's Windows credentials. */
+        BYTE idBundle[64];
+        memcpy(idBundle, idPriv, 32);
+        memcpy(idBundle + 32, idPub, 32);
+        std::wstring wIdPath = idPath.toStdWString();
+        if (!storage_save_blob(wIdPath.c_str(), L"GHOSTLINK Ratchet Identity", idBundle, 64)) return false;
 
-        /* Generate a batch of 32 one-time prekeys. */
+        /* Generate 32 one-time prekeys; persist (prekey_id || priv) DPAPI-wrapped. */
         QJsonArray otps;
-        QFile otpFile(ratchetKeyDir() + "/one_time_prekeys.bin");
-        if (!otpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+        BYTE otpBuf[32 * (4 + 32)];
         for (int i = 0; i < 32; i++) {
             BYTE pkPriv[32], pkPub[32];
-            if (!ratchet_x25519_keygen(pkPriv, pkPub)) { otpFile.close(); return false; }
-            /* Store priv keyed by prekey_id so we can retrieve when consumed. */
-            otpFile.write(reinterpret_cast<const char*>(&i), 4);
-            otpFile.write(reinterpret_cast<const char*>(pkPriv), 32);
+            if (!ratchet_x25519_keygen(pkPriv, pkPub)) return false;
+            DWORD off = i * (4 + 32);
+            memcpy(otpBuf + off, &i, 4);
+            memcpy(otpBuf + off + 4, pkPriv, 32);
             QJsonObject one;
             one["prekey_id"] = i;
             one["pub"] = QString::fromUtf8(crypto_hex_encode(pkPub, 32));
             otps.append(one);
         }
-        otpFile.close();
-        otpFile.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+        std::wstring wOtpPath = (ratchetKeyDir() + "/one_time_prekeys.bin").toStdWString();
+        if (!storage_save_blob(wOtpPath.c_str(), L"GHOSTLINK Ratchet OTPs", otpBuf, sizeof(otpBuf))) return false;
 
         QByteArray body = jsonBody({
             {"device_id", deviceId},

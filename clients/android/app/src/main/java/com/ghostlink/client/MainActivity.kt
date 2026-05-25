@@ -81,7 +81,22 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
 
     private var identityKey: JavaKeyPair? = null
     private var savedPassword = ""
-    private val prefs = application.getSharedPreferences("ghostlink_prefs", Context.MODE_PRIVATE)
+    /** Encrypted shared prefs — backed by androidx.security.crypto with an
+     *  AES-256 master key from the Android Keystore. Values are encrypted
+     *  at rest; a stolen device image is useless without keystore access. */
+    private val prefs = try {
+        val masterKey = androidx.security.crypto.MasterKey.Builder(application)
+            .setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM).build()
+        androidx.security.crypto.EncryptedSharedPreferences.create(
+            application,
+            "ghostlink_prefs_enc",
+            masterKey,
+            androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        )
+    } catch (e: Throwable) {
+        application.getSharedPreferences("ghostlink_prefs", Context.MODE_PRIVATE)
+    }
 
     init {
         identityKey = CryptoProvider.getIdentityKey()

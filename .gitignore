@@ -40,6 +40,7 @@ server/files/
 server/identity.key
 server/audit.log
 server/anon_creds.key
+server/data.key
 
 # Android build
 clients/android/app/build/

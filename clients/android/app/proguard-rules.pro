@@ -3,3 +3,10 @@
 -keepclassmembers class com.ghostlink.client.** { *; }
 -dontwarn javax.crypto.**
 -dontwarn java.security.**
+-dontwarn com.google.errorprone.annotations.**
+-dontwarn com.google.api.client.**
+-dontwarn javax.annotation.**
+-dontwarn javax.annotation.concurrent.**
+-dontwarn org.joda.time.**
+-keep class com.google.crypto.tink.** { *; }
+-keep class androidx.security.crypto.** { *; }
