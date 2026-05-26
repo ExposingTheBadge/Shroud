@@ -88,4 +88,11 @@ BOOL ratchet_decrypt(RatchetState *st,
 BOOL ratchet_state_save(const RatchetState *st, const char *path);
 BOOL ratchet_state_load(RatchetState *st, const char *path);
 
+/* Bootstrap shared root key for a session between two devices.
+ * shared = HKDF-SHA512(salt=0, ikm=X25519(my_priv, peer_pub), info=...)
+ * Both sides compute the same 32 bytes (ECDH symmetry). */
+BOOL ratchet_compute_bootstrap(const BYTE my_priv[RATCHET_X25519_LEN],
+                               const BYTE peer_pub[RATCHET_X25519_LEN],
+                               BYTE shared_out[RATCHET_KEY_LEN]);
+
 #endif /* GHOSTLINK_RATCHET_H */

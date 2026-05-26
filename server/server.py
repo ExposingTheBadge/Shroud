@@ -688,6 +688,21 @@ async def ratchet_publish(request: Request):
     return {"published": True, "one_time_prekeys_added": inserted, "one_time_prekeys_remaining": remaining}
 
 
+@app.get("/api/v1/ratchet/identity/{device_id}")
+async def ratchet_identity(device_id: str):
+    """Return just the device's long-term X25519 ratchet identity. Used
+    for static-static-DH bootstrap of a Double Ratchet session. Unlike
+    /bundle, this endpoint never consumes a one-time prekey — it's safe
+    to call on every send."""
+    row = db.execute(
+        "SELECT x25519_pub, ratchet_published_at FROM devices WHERE id=?",
+        (device_id,),
+    ).fetchone()
+    if not row or not row[0]:
+        raise HTTPException(404, "No ratchet identity published")
+    return {"device_id": device_id, "x25519_pub": row[0].hex(), "published_at": row[1]}
+
+
 @app.get("/api/v1/ratchet/bundle/{device_id}")
 async def ratchet_bundle(device_id: str):
     """Return the ratchet bundle for a peer device so a new session can

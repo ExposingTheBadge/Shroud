@@ -402,3 +402,14 @@ BOOL ratchet_state_load(RatchetState *st, const char *path) {
     fclose(f);
     return n == sizeof(*st);
 }
+
+/* Bootstrap shared from a static-static X25519 DH.
+ * Both sides compute the same 32-byte output because DH is symmetric. */
+BOOL ratchet_compute_bootstrap(const BYTE my_priv[32], const BYTE peer_pub[32],
+                                BYTE shared_out[32]) {
+    BYTE dh[32];
+    if (!ratchet_x25519_dh(my_priv, peer_pub, dh)) return FALSE;
+    static const BYTE info[] = "GHOSTLINK-RATCHET-BOOT-v1";
+    BYTE salt[64] = {0};
+    return ratchet_hkdf_sha512(salt, 64, dh, 32, info, sizeof(info) - 1, shared_out, 32);
+}
