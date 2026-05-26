@@ -107,6 +107,7 @@ BOOL   crypto_pq_hybrid_client(const BYTE *server_blob, DWORD server_blob_len,
 BOOL   network_init(void);
 void   network_cleanup(void);
 HttpResponse* network_post(const char *path, const char *json_body);
+HttpResponse* network_post_h(const char *path, const char *json_body, const char *extra_header);
 HttpResponse* network_get(const char *path);
 HttpResponse* network_upload_file(const char *path, const BYTE *data, DWORD data_len,
                                    const char *sender_id, const char *recipient_id,

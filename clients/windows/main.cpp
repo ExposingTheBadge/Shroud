@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "2.0.0"
+#define CLIENT_VERSION "2.1.0"
 
 extern "C" {
 #include "client.h"
@@ -18,54 +18,177 @@ extern "C" {
 /* ===================================================================
  *  THEME — Dark/Light stylesheets
  * =================================================================== */
-static bool gDark = true;
+/* ===================================================================
+ *  Theme palette — PowerShell/Terminal-style. A Theme holds nine colors
+ *  that drive the entire app stylesheet (NOT just the chat). Users can
+ *  pick a named preset or roll their own via QColorDialog. The current
+ *  theme is persisted to HKCU and reloaded on next launch.
+ * =================================================================== */
+struct Theme {
+    QString name;
+    QColor bg;          // window background
+    QColor surface;     // panels, list backgrounds
+    QColor input;       // text-input background
+    QColor border;      // separator lines
+    QColor text;        // primary foreground — applies to ALL labels/inputs/lists
+    QColor dim;         // secondary text (placeholders, status)
+    QColor accent;      // buttons-pressed, selection, focus
+    QColor link;        // hyperlinks and contact names in chat
+    QColor danger;      // destructive actions
+};
 
+static QList<Theme> THEME_PRESETS = {
+    /* Default — GHOSTLINK dark/orange (unchanged from v2.0) */
+    {"GHOSTLINK Dark",       "#1a1a1a", "#222222", "#2d2d2d", "#333333", "#cccccc", "#888888", "#ff8c1e", "#ff8c1e", "#cc3333"},
+    {"GHOSTLINK Light",      "#ffffff", "#f5f5f0", "#f0f0e8", "#dddddd", "#1a1a1a", "#666666", "#ff8c1e", "#cc4400", "#cc0000"},
+    {"Solarized Dark",       "#002b36", "#073642", "#073642", "#586e75", "#93a1a1", "#586e75", "#268bd2", "#b58900", "#dc322f"},
+    {"Solarized Light",      "#fdf6e3", "#eee8d5", "#eee8d5", "#93a1a1", "#586e75", "#839496", "#268bd2", "#b58900", "#dc322f"},
+    {"Nord",                 "#2e3440", "#3b4252", "#434c5e", "#4c566a", "#eceff4", "#88c0d0", "#5e81ac", "#88c0d0", "#bf616a"},
+    {"Dracula",              "#282a36", "#1e1f29", "#44475a", "#44475a", "#f8f8f2", "#6272a4", "#bd93f9", "#8be9fd", "#ff5555"},
+    {"Monokai",              "#272822", "#1e1f1c", "#3e3d32", "#75715e", "#f8f8f2", "#75715e", "#a6e22e", "#66d9ef", "#f92672"},
+    {"One Dark",             "#282c34", "#21252b", "#3e4451", "#3e4451", "#abb2bf", "#7f848e", "#61afef", "#56b6c2", "#e06c75"},
+    {"Tokyo Night",          "#1a1b26", "#16161e", "#24283b", "#414868", "#c0caf5", "#565f89", "#7aa2f7", "#bb9af7", "#f7768e"},
+    {"Gruvbox Dark",         "#282828", "#3c3836", "#504945", "#665c54", "#ebdbb2", "#a89984", "#fe8019", "#83a598", "#fb4934"},
+    {"Cobalt",               "#002240", "#001833", "#001b3a", "#3a4960", "#e0f0ff", "#7fa0c0", "#ffc600", "#ff9d00", "#ff628c"},
+    {"High Contrast",        "#000000", "#0a0a0a", "#101010", "#444444", "#ffffff", "#bbbbbb", "#ffff00", "#00ffff", "#ff5555"},
+};
+
+static bool gDark = true;
+static Theme gTheme = THEME_PRESETS[0];
+
+static QString cN(const QColor &c) { return c.name(QColor::HexRgb); }
+
+QString themeQSS(const Theme &t) {
+    QString s;
+    QString bg = cN(t.bg), su = cN(t.surface), in = cN(t.input), bd = cN(t.border);
+    QString tx = cN(t.text), dm = cN(t.dim), ac = cN(t.accent), lk = cN(t.link);
+    /* On-accent text: pick black or white based on accent luminance.   */
+    int lum = (t.accent.red() * 299 + t.accent.green() * 587 + t.accent.blue() * 114) / 1000;
+    QString onAc = (lum > 160) ? "#1a1a1a" : "#ffffff";
+    s += QString("* { background-color: %1; color: %2; font-family: \"Segoe UI\", \"Segoe UI Emoji\", \"Noto Color Emoji\"; }").arg(bg, tx);
+    s += QString("QMainWindow { background-color: %1; }").arg(bg);
+    s += QString("QMenuBar { background-color: %1; color: %2; border-bottom: 1px solid %3; }").arg(su, tx, bd);
+    s += QString("QMenuBar::item:selected { background-color: %1; color: %2; }").arg(ac, onAc);
+    s += QString("QMenu { background-color: %1; color: %2; border: 1px solid %3; }").arg(su, tx, bd);
+    s += QString("QMenu::item:selected { background-color: %1; color: %2; }").arg(ac, onAc);
+    s += QString("QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox { background-color: %1; color: %2; border: 1px solid %3; padding: 6px; border-radius: 4px; selection-background-color: %4; selection-color: %5; }").arg(in, tx, bd, ac, onAc);
+    s += QString("QSpinBox::up-button, QSpinBox::down-button { background-color: %1; border: 0; width: 16px; }").arg(su);
+    s += QString("QComboBox QAbstractItemView { background-color: %1; color: %2; border: 1px solid %3; selection-background-color: %4; selection-color: %5; }").arg(su, tx, bd, ac, onAc);
+    s += QString("QPushButton { background-color: %1; color: %2; border: 1px solid %3; padding: 6px 16px; border-radius: 4px; }").arg(in, tx, bd);
+    s += QString("QPushButton:hover { background-color: %1; border-color: %2; }").arg(su, ac);
+    s += QString("QPushButton:pressed { background-color: %1; color: %2; }").arg(ac, onAc);
+    s += QString("QPushButton:disabled { background-color: %1; color: %2; }").arg(bg, dm);
+    s += QString("QListWidget { background-color: %1; color: %2; border: 1px solid %3; }").arg(su, tx, bd);
+    s += QString("QListWidget::item:selected { background-color: %1; color: %2; }").arg(ac, onAc);
+    s += QString("QCheckBox, QRadioButton { color: %1; }").arg(tx);
+    s += QString("QGroupBox { color: %1; border: 1px solid %2; border-radius: 4px; margin-top: 8px; padding-top: 16px; }").arg(tx, bd);
+    s += QString("QGroupBox::title { color: %1; }").arg(dm);
+    s += QString("QLabel { color: %1; background: transparent; }").arg(tx);
+    s += QString("QTabWidget::pane { border: 1px solid %1; background-color: %2; }").arg(bd, bg);
+    s += QString("QTabBar::tab { background-color: %1; color: %2; padding: 6px 12px; border: 1px solid %3; }").arg(su, dm, bd);
+    s += QString("QTabBar::tab:selected { background-color: %1; color: %2; border-bottom-color: %1; }").arg(bg, tx);
+    s += QString("QScrollBar:vertical { background: %1; width: 10px; border: 0; }").arg(bg);
+    s += QString("QScrollBar::handle:vertical { background: %1; border-radius: 5px; min-height: 20px; }").arg(bd);
+    s += QString("QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }");
+    s += QString("QStatusBar { background-color: %1; color: %2; border-top: 1px solid %3; }").arg(su, dm, bd);
+    s += QString("QToolTip { background-color: %1; color: %2; border: 1px solid %3; padding: 4px; }").arg(su, tx, bd);
+    return s;
+}
+
+/* Legacy adapter so existing call sites keep working until they're
+ * migrated to themeQSS(gTheme) directly. */
 QString themeCSS(bool dark) {
-    return dark ? QString(
-        "* { background-color: #1a1a1a; color: #cccccc; font-family: \"Segoe UI\"; }"
-        "QMainWindow { background-color: #1a1a1a; }"
-        "QMenuBar { background-color: #222222; color: #cccccc; border-bottom: 1px solid #333; }"
-        "QMenuBar::item:selected { background-color: #ff8c1e; }"
-        "QMenu { background-color: #222222; color: #cccccc; border: 1px solid #333; }"
-        "QMenu::item:selected { background-color: #ff8c1e; }"
-        "QLineEdit, QTextEdit, QPlainTextEdit { background-color: #2d2d2d; color: #cccccc; border: 1px solid #3d3d3d; padding: 6px; border-radius: 4px; }"
-        "QTextEdit { background-color: #1a1a1a; }"
-        "QPushButton { background-color: #2d2d2d; color: #cccccc; border: 1px solid #3d3d3d; padding: 6px 16px; border-radius: 4px; }"
-        "QPushButton:hover { background-color: #3d3d3d; border-color: #555; }"
-        "QPushButton:pressed { background-color: #ff8c1e; }"
-        "QPushButton:disabled { background-color: #1a1a1a; color: #555; }"
-        "QListWidget { background-color: #222222; color: #cccccc; border: 1px solid #333; }"
-        "QListWidget::item:selected { background-color: #ff8c1e; }"
-        "QCheckBox { color: #cccccc; }"
-        "QGroupBox { color: #cccccc; border: 1px solid #333; border-radius: 4px; margin-top: 8px; padding-top: 16px; }"
-        "QGroupBox::title { color: #888; }"
-        "QLabel { color: #cccccc; }"
-        "QScrollBar:vertical { background: #1a1a1a; width: 10px; }"
-        "QScrollBar::handle:vertical { background: #444; border-radius: 5px; min-height: 20px; }"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        "QStatusBar { background-color: #222222; color: #888; border-top: 1px solid #333; }"
-    ) : QString(
-        "* { background-color: #FFFFFF; color: #1a1a1a; font-family: \"Segoe UI\"; }"
-        "QMainWindow { background-color: #FFFFFF; }"
-        "QMenuBar { background-color: #F5F5F0; color: #1a1a1a; border-bottom: 1px solid #ddd; }"
-        "QMenuBar::item:selected { background-color: #ff8c1e; color: white; }"
-        "QMenu { background-color: #F5F5F0; color: #1a1a1a; border: 1px solid #ddd; }"
-        "QMenu::item:selected { background-color: #ff8c1e; color: white; }"
-        "QLineEdit, QTextEdit, QPlainTextEdit { background-color: #F0F0E8; color: #1a1a1a; border: 1px solid #ccc; padding: 6px; border-radius: 4px; }"
-        "QPushButton { background-color: #E8E8E0; color: #1a1a1a; border: 1px solid #ccc; padding: 6px 16px; border-radius: 4px; }"
-        "QPushButton:hover { background-color: #ddd; }"
-        "QPushButton:pressed { background-color: #ff8c1e; color: white; }"
-        "QPushButton:disabled { background-color: #f0f0f0; color: #999; }"
-        "QListWidget { background-color: #F8F8F0; color: #1a1a1a; border: 1px solid #ddd; }"
-        "QListWidget::item:selected { background-color: #ff8c1e; color: white; }"
-        "QCheckBox { color: #1a1a1a; }"
-        "QGroupBox { color: #1a1a1a; border: 1px solid #ddd; border-radius: 4px; margin-top: 8px; padding-top: 16px; }"
-        "QGroupBox::title { color: #666; }"
-        "QScrollBar:vertical { background: #f0f0f0; width: 10px; }"
-        "QScrollBar::handle:vertical { background: #ccc; border-radius: 5px; min-height: 20px; }"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        "QStatusBar { background-color: #F5F5F0; color: #666; border-top: 1px solid #ddd; }"
-    );
+    if (gTheme.name == "GHOSTLINK Dark" || gTheme.name == "GHOSTLINK Light") {
+        gTheme = dark ? THEME_PRESETS[0] : THEME_PRESETS[1];
+    }
+    return themeQSS(gTheme);
+}
+
+/* ── User preferences (theme, disappearing messages, rich text) ─── */
+static bool gDisappearEnabled = false;
+static int  gDisappearSeconds = 60;
+static bool gRichText = true;
+
+/* Minimal Markdown → safe HTML: **bold**, *italic*, `code`, autolinks.
+ * Always escapes < > & first so user text can't inject raw HTML. When
+ * gRichText is false the body is just escaped and returned verbatim. */
+QString mdToHtml(QString s) {
+    s = s.toHtmlEscaped();
+    if (!gRichText) return s;
+    QRegularExpression bold("\\*\\*([^*\\n]+?)\\*\\*");
+    s.replace(bold, "<b>\\1</b>");
+    QRegularExpression italic("(?<![\\w*])\\*([^*\\n]+?)\\*(?!\\w)");
+    s.replace(italic, "<i>\\1</i>");
+    QRegularExpression code("`([^`\\n]+?)`");
+    s.replace(code, "<code style='background:rgba(128,128,128,0.18);padding:0 4px;border-radius:3px'>\\1</code>");
+    QRegularExpression url("(https?://[^\\s<]+)");
+    s.replace(url, QString("<a href=\"\\1\" style='color:%1'>\\1</a>").arg(cN(gTheme.link)));
+    return s;
+}
+
+static void loadUserPrefs() {
+    HKEY hk;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK\\Prefs", 0, KEY_READ, &hk) != ERROR_SUCCESS) return;
+    DWORD val, sz = sizeof(val);
+    char str[128]; DWORD ssz;
+    if (RegQueryValueExA(hk, "Dark", NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gDark = val != 0;
+    if (RegQueryValueExA(hk, "DisappearEnabled", NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gDisappearEnabled = val != 0;
+    if (RegQueryValueExA(hk, "DisappearSec",     NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gDisappearSeconds = (int)val;
+    if (RegQueryValueExA(hk, "RichText",         NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gRichText = val != 0;
+    ssz = sizeof(str);
+    if (RegQueryValueExA(hk, "ThemeName", NULL, NULL, (BYTE*)str, &ssz) == ERROR_SUCCESS) {
+        QString want = QString::fromUtf8(str);
+        for (const Theme &t : THEME_PRESETS) if (t.name == want) { gTheme = t; break; }
+    }
+    /* Custom palette overrides individual colors when set. */
+    auto loadColor = [&](const char *k, QColor &out) {
+        DWORD v, s = sizeof(v);
+        if (RegQueryValueExA(hk, k, NULL, NULL, (BYTE*)&v, &s) == ERROR_SUCCESS && v != 0) {
+            out = QColor::fromRgb((v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff);
+        }
+    };
+    if (gTheme.name == "Custom") {
+        loadColor("Custom_bg", gTheme.bg);
+        loadColor("Custom_surface", gTheme.surface);
+        loadColor("Custom_input", gTheme.input);
+        loadColor("Custom_border", gTheme.border);
+        loadColor("Custom_text", gTheme.text);
+        loadColor("Custom_dim", gTheme.dim);
+        loadColor("Custom_accent", gTheme.accent);
+        loadColor("Custom_link", gTheme.link);
+        loadColor("Custom_danger", gTheme.danger);
+    }
+    RegCloseKey(hk);
+}
+
+static void saveUserPrefs() {
+    HKEY hk;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK\\Prefs", 0, NULL,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hk, NULL) != ERROR_SUCCESS) return;
+    DWORD v;
+    v = gDark ? 1 : 0;                RegSetValueExA(hk, "Dark", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
+    v = gDisappearEnabled ? 1 : 0;    RegSetValueExA(hk, "DisappearEnabled", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
+    v = (DWORD)gDisappearSeconds;     RegSetValueExA(hk, "DisappearSec", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
+    v = gRichText ? 1 : 0;            RegSetValueExA(hk, "RichText", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
+    QByteArray nm = gTheme.name.toUtf8();
+    RegSetValueExA(hk, "ThemeName", 0, REG_SZ, (BYTE*)nm.constData(), nm.size() + 1);
+    auto saveColor = [&](const char *k, const QColor &c) {
+        DWORD pack = (c.red() << 16) | (c.green() << 8) | c.blue();
+        if (pack == 0) pack = 0x000001;  /* avoid collision with sentinel 0 */
+        RegSetValueExA(hk, k, 0, REG_DWORD, (BYTE*)&pack, sizeof(pack));
+    };
+    if (gTheme.name == "Custom") {
+        saveColor("Custom_bg", gTheme.bg);
+        saveColor("Custom_surface", gTheme.surface);
+        saveColor("Custom_input", gTheme.input);
+        saveColor("Custom_border", gTheme.border);
+        saveColor("Custom_text", gTheme.text);
+        saveColor("Custom_dim", gTheme.dim);
+        saveColor("Custom_accent", gTheme.accent);
+        saveColor("Custom_link", gTheme.link);
+        saveColor("Custom_danger", gTheme.danger);
+    }
+    RegCloseKey(hk);
 }
 
 /* ===================================================================
@@ -214,7 +337,8 @@ public:
     GhostlinkWindow() {
         setWindowTitle("GHOSTLINK Secure Messenger");
         resize(880, 620);
-        qApp->setStyleSheet(themeCSS(gDark));
+        loadUserPrefs();
+        qApp->setStyleSheet(themeQSS(gTheme));
 
         /* Block screen-capture / screen-share tools from recording this
            window. WDA_EXCLUDEFROMCAPTURE is Win 10 2004+; degrades to
@@ -292,6 +416,16 @@ private:
     /* Overload that takes a pre-built JSON body. */
     QByteArray httpPost(const char *path, const QByteArray &body) {
         return httpPost(path, body.constData());
+    }
+
+    /* Overload that adds an extra HTTP header (e.g. X-Expires-In for
+     * disappearing messages). header should be a single "Name: Value" line. */
+    QByteArray httpPost(const char *path, const QByteArray &body, const QByteArray &header) {
+        HttpResponse *r = network_post_h(path, body.constData(),
+            header.isEmpty() ? nullptr : header.constData());
+        QByteArray data;
+        if (r && r->len > 0) { data = QByteArray(r->data, (int)r->len); network_free_response(r); }
+        return data;
     }
 
     QByteArray httpGet(const char *path) {
@@ -729,6 +863,12 @@ private:
         m_chatLog->setOpenExternalLinks(false);
         connect(m_chatLog, &QTextBrowser::anchorClicked, this, &GhostlinkWindow::onChatAnchorClicked);
         m_chatLog->setContextMenuPolicy(Qt::CustomContextMenu);
+        /* Ensure emoji glyphs render via Segoe UI Emoji fallback. */
+        {
+            QFont f = m_chatLog->font();
+            f.setFamilies({"Segoe UI", "Segoe UI Emoji", "Noto Color Emoji"});
+            m_chatLog->setFont(f);
+        }
         connect(m_chatLog, &QWidget::customContextMenuRequested, this, &GhostlinkWindow::onChatContextMenu);
         cl->addWidget(m_chatLog, 1);
 
@@ -739,8 +879,27 @@ private:
         /* Input row */
         auto *inputRow = new QHBoxLayout;
         m_attachBtn = new QPushButton("Attach"); inputRow->addWidget(m_attachBtn);
-        m_msgInput = new QLineEdit; m_msgInput->setPlaceholderText("Type a message...");
+        auto *emojiBtnIn = new QPushButton(QString::fromUtf8("\xF0\x9F\x98\x80"));   /* 😀 */
+        emojiBtnIn->setToolTip("Open Windows emoji panel (Win + .)");
+        emojiBtnIn->setFixedWidth(46);
+        connect(emojiBtnIn, &QPushButton::clicked, [this]() {
+            m_msgInput->setFocus();
+            INPUT in[4] = {};
+            in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = VK_LWIN;
+            in[1].type = INPUT_KEYBOARD; in[1].ki.wVk = VK_OEM_PERIOD;
+            in[2].type = INPUT_KEYBOARD; in[2].ki.wVk = VK_OEM_PERIOD; in[2].ki.dwFlags = KEYEVENTF_KEYUP;
+            in[3].type = INPUT_KEYBOARD; in[3].ki.wVk = VK_LWIN;       in[3].ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(4, in, sizeof(INPUT));
+        });
+        inputRow->addWidget(emojiBtnIn);
+        m_msgInput = new QLineEdit; m_msgInput->setPlaceholderText("Type a message...  (Win + . for emoji)");
         m_msgInput->setMinimumHeight(36);
+        /* Force a font with emoji glyphs as fallback so 🎯 etc render in-place. */
+        {
+            QFont f = m_msgInput->font();
+            f.setFamilies({"Segoe UI", "Segoe UI Emoji", "Noto Color Emoji"});
+            m_msgInput->setFont(f);
+        }
         inputRow->addWidget(m_msgInput, 1);
         m_sendBtn = new QPushButton("Send"); inputRow->addWidget(m_sendBtn);
         cl->addLayout(inputRow);
@@ -1429,10 +1588,14 @@ private:
             {"sender_device_id", m_deviceId}, {"recipient_device_id", m_selectedRecip},
             {"envelope", env}
         });
-        httpPost("/api/v1/messages/send", jb);
+        QByteArray expHdr;
+        if (gDisappearEnabled && gDisappearSeconds > 0) {
+            expHdr = QByteArray("X-Expires-In: ") + QByteArray::number(gDisappearSeconds);
+        }
+        httpPost("/api/v1/messages/send", jb, expHdr);
 
         m_chatLog->append(QString("<b>[%1]</b> %2")
-            .arg(m_username.toHtmlEscaped(), body.toHtmlEscaped()));
+            .arg(m_username.toHtmlEscaped(), mdToHtml(body)));
         m_msgInput->clear();
     }
 
@@ -1516,7 +1679,7 @@ private:
             }
             if (!body.isEmpty()) {
                 m_chatLog->append(QString("<b>[%1]</b> %2")
-                    .arg(senderName.toHtmlEscaped(), body.toHtmlEscaped()));
+                    .arg(senderName.toHtmlEscaped(), mdToHtml(body)));
             }
         }
     }
@@ -1607,7 +1770,11 @@ private:
             {"sender_device_id", m_deviceId}, {"recipient_device_id", m_selectedRecip},
             {"envelope", env}
         });
-        httpPost("/api/v1/messages/send", jb);
+        QByteArray expHdr2;
+        if (gDisappearEnabled && gDisappearSeconds > 0) {
+            expHdr2 = QByteArray("X-Expires-In: ") + QByteArray::number(gDisappearSeconds);
+        }
+        httpPost("/api/v1/messages/send", jb, expHdr2);
 
         if (isImage && !localPath.isEmpty()) {
             insertImageBubble(fileId, localPath, m_username);
@@ -1626,30 +1793,170 @@ private:
     void openSettings() {
         QDialog dlg(this);
         dlg.setWindowTitle("GHOSTLINK Settings");
-        dlg.setFixedSize(440, 500);
+        dlg.setFixedSize(620, 560);
         auto *lay = new QVBoxLayout(&dlg);
-
         auto *tabs = new QTabWidget;
-        /* General tab */
-        auto *gen = new QWidget; auto *gl = new QVBoxLayout(gen);
-        auto *dmBox = new QCheckBox("Dark Mode"); dmBox->setChecked(gDark);
-        connect(dmBox, &QCheckBox::toggled, [](bool c) { gDark = c; qApp->setStyleSheet(themeCSS(c)); });
-        gl->addWidget(dmBox);
 
-        auto *accentRow = new QHBoxLayout;
-        accentRow->addWidget(new QLabel("Accent:"));
-        auto *ar = new QLineEdit("255"); ar->setMaximumWidth(50);
-        auto *ag = new QLineEdit("102"); ag->setMaximumWidth(50);
-        auto *ab = new QLineEdit("0"); ab->setMaximumWidth(50);
-        accentRow->addWidget(new QLabel("R:")); accentRow->addWidget(ar);
-        accentRow->addWidget(new QLabel("G:")); accentRow->addWidget(ag);
-        accentRow->addWidget(new QLabel("B:")); accentRow->addWidget(ab);
-        accentRow->addStretch();
-        gl->addLayout(accentRow);
-        gl->addStretch();
-        tabs->addTab(gen, "General");
+        /* ──────────── Appearance tab ──────────── */
+        auto *ap = new QWidget; auto *al = new QVBoxLayout(ap);
 
-        /* Password tab */
+        auto *themeRow = new QHBoxLayout;
+        themeRow->addWidget(new QLabel("Theme:"));
+        auto *themeCombo = new QComboBox;
+        for (const Theme &t : THEME_PRESETS) themeCombo->addItem(t.name);
+        themeCombo->addItem("Custom");
+        int cur = themeCombo->findText(gTheme.name);
+        if (cur < 0) cur = themeCombo->findText("Custom");
+        themeCombo->setCurrentIndex(cur);
+        themeRow->addWidget(themeCombo, 1);
+        al->addLayout(themeRow);
+
+        /* Live swatch row */
+        auto *swatchBox = new QGroupBox("Palette");
+        auto *swatchGrid = new QGridLayout(swatchBox);
+        struct Slot { QString label; QString field; };
+        QList<Slot> swatchSlots = {
+            {"Background", "bg"}, {"Surface", "surface"}, {"Input", "input"},
+            {"Border", "border"}, {"Text", "text"}, {"Dim text", "dim"},
+            {"Accent", "accent"}, {"Link", "link"}, {"Danger", "danger"},
+        };
+        QHash<QString, QPushButton*> swatchBtns;
+        for (int i = 0; i < swatchSlots.size(); i++) {
+            const Slot &s = swatchSlots[i];
+            auto *btn = new QPushButton; btn->setFixedSize(110, 28);
+            swatchBtns[s.field] = btn;
+            swatchGrid->addWidget(new QLabel(s.label), i / 3, (i % 3) * 2);
+            swatchGrid->addWidget(btn, i / 3, (i % 3) * 2 + 1);
+        }
+        al->addWidget(swatchBox);
+
+        auto refreshSwatches = [swatchBtns]() {
+            auto setSwatch = [&](const QString &k, const QColor &c) {
+                QPushButton *b = swatchBtns[k];
+                b->setText(c.name(QColor::HexRgb));
+                b->setStyleSheet(QString("QPushButton { background-color: %1; color: %2; border: 1px solid #555; }")
+                    .arg(c.name(QColor::HexRgb),
+                         (c.red()*299 + c.green()*587 + c.blue()*114) / 1000 > 160 ? "#1a1a1a" : "#ffffff"));
+            };
+            setSwatch("bg", gTheme.bg); setSwatch("surface", gTheme.surface);
+            setSwatch("input", gTheme.input); setSwatch("border", gTheme.border);
+            setSwatch("text", gTheme.text); setSwatch("dim", gTheme.dim);
+            setSwatch("accent", gTheme.accent); setSwatch("link", gTheme.link);
+            setSwatch("danger", gTheme.danger);
+        };
+        refreshSwatches();
+
+        auto applyTheme = [refreshSwatches]() {
+            qApp->setStyleSheet(themeQSS(gTheme));
+            refreshSwatches();
+        };
+
+        connect(themeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            [=](int idx) {
+                QString name = themeCombo->itemText(idx);
+                if (name == "Custom") {
+                    /* keep current colors; user edits via swatch buttons */
+                    gTheme.name = "Custom";
+                } else if (idx >= 0 && idx < THEME_PRESETS.size()) {
+                    gTheme = THEME_PRESETS[idx];
+                }
+                applyTheme();
+            });
+
+        auto openColor = [this, &dlg, themeCombo, applyTheme](QColor *target) {
+            QColor c = QColorDialog::getColor(*target, &dlg, "Pick a color",
+                QColorDialog::ShowAlphaChannel);
+            if (c.isValid()) {
+                *target = c;
+                /* Switch into Custom mode the moment any color is hand-picked. */
+                if (gTheme.name != "Custom") {
+                    gTheme.name = "Custom";
+                    int idx = themeCombo->findText("Custom");
+                    if (idx >= 0) {
+                        QSignalBlocker block(themeCombo);
+                        themeCombo->setCurrentIndex(idx);
+                    }
+                }
+                applyTheme();
+            }
+        };
+        connect(swatchBtns["bg"],      &QPushButton::clicked, [=]() { openColor(&gTheme.bg); });
+        connect(swatchBtns["surface"], &QPushButton::clicked, [=]() { openColor(&gTheme.surface); });
+        connect(swatchBtns["input"],   &QPushButton::clicked, [=]() { openColor(&gTheme.input); });
+        connect(swatchBtns["border"],  &QPushButton::clicked, [=]() { openColor(&gTheme.border); });
+        connect(swatchBtns["text"],    &QPushButton::clicked, [=]() { openColor(&gTheme.text); });
+        connect(swatchBtns["dim"],     &QPushButton::clicked, [=]() { openColor(&gTheme.dim); });
+        connect(swatchBtns["accent"],  &QPushButton::clicked, [=]() { openColor(&gTheme.accent); });
+        connect(swatchBtns["link"],    &QPushButton::clicked, [=]() { openColor(&gTheme.link); });
+        connect(swatchBtns["danger"],  &QPushButton::clicked, [=]() { openColor(&gTheme.danger); });
+
+        auto *resetRow = new QHBoxLayout;
+        auto *resetBtn = new QPushButton("Reset to default");
+        connect(resetBtn, &QPushButton::clicked, [=]() {
+            gTheme = THEME_PRESETS[0];
+            QSignalBlocker block(themeCombo);
+            themeCombo->setCurrentIndex(0);
+            applyTheme();
+        });
+        resetRow->addStretch(); resetRow->addWidget(resetBtn);
+        al->addLayout(resetRow);
+        al->addStretch();
+        tabs->addTab(ap, "Appearance");
+
+        /* ──────────── Messages tab ──────────── */
+        auto *ms = new QWidget; auto *mlv = new QVBoxLayout(ms);
+
+        auto *disBox = new QGroupBox("Disappearing messages");
+        auto *disLayout = new QVBoxLayout(disBox);
+        auto *disChk = new QCheckBox("Enable — outgoing messages auto-delete after the timer");
+        disChk->setChecked(gDisappearEnabled);
+        disLayout->addWidget(disChk);
+        auto *timerRow = new QHBoxLayout;
+        auto *minSpin = new QSpinBox; minSpin->setRange(0, 1440); minSpin->setSuffix(" min");
+        auto *secSpin = new QSpinBox; secSpin->setRange(0, 59);   secSpin->setSuffix(" sec");
+        minSpin->setValue(gDisappearSeconds / 60);
+        secSpin->setValue(gDisappearSeconds % 60);
+        minSpin->setEnabled(gDisappearEnabled);
+        secSpin->setEnabled(gDisappearEnabled);
+        timerRow->addWidget(new QLabel("After:"));
+        timerRow->addWidget(minSpin);
+        timerRow->addWidget(secSpin);
+        timerRow->addStretch();
+        disLayout->addLayout(timerRow);
+        connect(disChk, &QCheckBox::toggled, [=](bool c) {
+            gDisappearEnabled = c;
+            minSpin->setEnabled(c); secSpin->setEnabled(c);
+        });
+        auto syncSecs = [=]() {
+            gDisappearSeconds = minSpin->value() * 60 + secSpin->value();
+            if (gDisappearSeconds <= 0) gDisappearSeconds = 30;
+        };
+        connect(minSpin, QOverload<int>::of(&QSpinBox::valueChanged), syncSecs);
+        connect(secSpin, QOverload<int>::of(&QSpinBox::valueChanged), syncSecs);
+        mlv->addWidget(disBox);
+
+        auto *rtBox = new QGroupBox("Composition");
+        auto *rtL = new QVBoxLayout(rtBox);
+        auto *rtChk = new QCheckBox("Render Markdown (**bold**, *italic*, `code`, links) in received messages");
+        rtChk->setChecked(gRichText);
+        connect(rtChk, &QCheckBox::toggled, [](bool c) { gRichText = c; });
+        rtL->addWidget(rtChk);
+        rtL->addWidget(new QLabel("Tip: press Win + .  to open Windows' emoji panel while typing."));
+        auto *emojiBtn = new QPushButton("Open emoji panel now");
+        connect(emojiBtn, &QPushButton::clicked, [this]() {
+            INPUT in[4] = {};
+            in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = VK_LWIN;
+            in[1].type = INPUT_KEYBOARD; in[1].ki.wVk = VK_OEM_PERIOD;
+            in[2].type = INPUT_KEYBOARD; in[2].ki.wVk = VK_OEM_PERIOD; in[2].ki.dwFlags = KEYEVENTF_KEYUP;
+            in[3].type = INPUT_KEYBOARD; in[3].ki.wVk = VK_LWIN;       in[3].ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(4, in, sizeof(INPUT));
+        });
+        rtL->addWidget(emojiBtn);
+        mlv->addWidget(rtBox);
+        mlv->addStretch();
+        tabs->addTab(ms, "Messages");
+
+        /* ──────────── Password tab ──────────── */
         auto *pw = new QWidget; auto *pl = new QVBoxLayout(pw);
         auto *oldPw = new QLineEdit; oldPw->setEchoMode(QLineEdit::Password); oldPw->setPlaceholderText("Current password");
         auto *newPw = new QLineEdit; newPw->setEchoMode(QLineEdit::Password); newPw->setPlaceholderText("New password (12+ chars)");
@@ -1672,11 +1979,100 @@ private:
         pl->addWidget(chBtn); pl->addStretch();
         tabs->addTab(pw, "Password");
 
-        /* Danger tab */
-        auto *dz = new QWidget; auto *dl = new QVBoxLayout(dz);
-        dl->addWidget(new QLabel("Permanently destroy all data and the application:"));
+        /* ──────────── Help tab ──────────── */
+        auto *hp = new QWidget; auto *hl = new QVBoxLayout(hp);
+        auto *help = new QTextBrowser;
+        help->setOpenExternalLinks(true);
+        QString lk = cN(gTheme.link);
+        help->setHtml(QString(R"HTMLDOC(
+<h2 style='color:%1'>GHOSTLINK — Quick Reference</h2>
+
+<h3 style='color:%1'>How conversations work</h3>
+<p>Every message you send is encrypted on your device <b>before</b> it ever
+touches the server. GHOSTLINK uses post-quantum hybrid handshakes
+(ECDH&nbsp;P-384 &nbsp;+&nbsp; ML-KEM-1024) when liboqs.dll is available, and
+falls back to classical ECDH otherwise. Sealed-sender, disappearing
+messages, and rotating pickup tokens hide message metadata from the
+server as well.</p>
+
+<h3 style='color:%1'>Verifying you're talking to the right person</h3>
+<ul>
+<li><b>Right-click any contact</b> in the sidebar → <i>Verify safety
+number…</i>. A 30-digit number appears. Read it out to your contact in
+person, on a phone call, or any trusted channel. Same number on both
+sides → no man-in-the-middle. Different number → do not trust the
+conversation, and rotate the server's identity if you administer it.</li>
+<li>The server itself is pinned by fingerprint the first time you log
+in. If the server's fingerprint changes you'll see a critical alert and
+the client will refuse to authenticate.</li>
+</ul>
+
+<h3 style='color:%1'>Disappearing messages</h3>
+<p>Open <b>Settings → Messages</b>. Tick <i>Enable</i> and pick how long
+a message lives. Outgoing messages carry an <code>X-Expires-In</code>
+header; the server's background sweep deletes them after the timer.
+Default is OFF. Setting the timer to zero disables the feature even if
+the checkbox stays on.</p>
+
+<h3 style='color:%1'>Emoji + rich text</h3>
+<p>Use <b>Win + .</b> (period) to open Windows' emoji panel while
+typing. With <i>Render Markdown</i> enabled, received messages support
+<code>**bold**</code>, <code>*italic*</code>, <code>`code`</code>, and
+clickable links.</p>
+
+<h3 style='color:%1'>Theme</h3>
+<p><b>Settings → Appearance</b>. Pick from twelve presets including
+GHOSTLINK&nbsp;Dark, Solarized, Nord, Dracula, Monokai, One Dark, Tokyo
+Night, Gruvbox, Cobalt, and High Contrast. Click any swatch to override
+a single color — the theme switches to <i>Custom</i> automatically and
+remembers your edits.</p>
+
+<h3 style='color:%1'>Linking a second device</h3>
+<p>The flow uses an ephemeral X25519 handshake with the server acting
+only as a relay. The new device shows a short code; the existing device
+scans/types it; both derive a shared key and the existing device
+uploads its identity bundle encrypted to that shared key. 5-minute TTL;
+the payload is auto-purged after pickup.</p>
+
+<h3 style='color:%1'>Panic + self-destruct</h3>
+<p>Five wrong-password proofs against your account in a row will trigger
+the server-side cascade wipe: devices, messages, files, prekeys,
+friend graph. There is no recovery. If you suspect coercion, you can
+also call the panic endpoint manually — the server returns a generic
+200 either way so a coercer can't tell whether it succeeded.</p>
+
+<h3 style='color:%1'>Files &amp; images</h3>
+<p>Drop or attach any file. Encrypted client-side with AES-256-GCM, the
+key derived from the sender's public-key blob so the recipient can
+decrypt without any extra handshake. Images appear inline; click for
+full-screen view. Either sender or recipient can delete an image — the
+delete cascades to the server.</p>
+
+<h3 style='color:%1'>Troubleshooting</h3>
+<ul>
+<li><b>Key exchange failed</b> — server is unreachable. Check that the
+server is running and reachable on port 58443.</li>
+<li><b>Key derivation failed</b> — fixed in v2.0.0+. Update the client.</li>
+<li><b>Server identity changed</b> — either the operator rotated the
+identity (verify out of band) or you're being MITM'd. Delete the pin file
+at <code>%APPDATA%\GHOSTLINK\server.pin</code> and try again only if
+you've confirmed the rotation is legitimate.</li>
+<li><b>Server is in onion-only mode</b> — the operator restricted
+connections to Tor hidden services. Connect via the .onion address.</li>
+</ul>
+
+<h3 style='color:%1'>More</h3>
+<p>Source &amp; releases: <a href='https://github.com/ExposingTheBadge/GhostLink'>github.com/ExposingTheBadge/GhostLink</a></p>
+)HTMLDOC").arg(lk));
+        hl->addWidget(help);
+        tabs->addTab(hp, "Help");
+
+        /* ──────────── Danger tab ──────────── */
+        auto *dz = new QWidget; auto *dlay = new QVBoxLayout(dz);
+        dlay->addWidget(new QLabel("Permanently destroy all data and the application:"));
         auto *nukeBtn = new QPushButton("NUKE MY DATA");
-        nukeBtn->setStyleSheet("QPushButton { background-color: #cc0000; color: white; font-weight: bold; }");
+        QString dgr = cN(gTheme.danger);
+        nukeBtn->setStyleSheet(QString("QPushButton { background-color: %1; color: white; font-weight: bold; }").arg(dgr));
         connect(nukeBtn, &QPushButton::clicked, [&dlg]() {
             if (QMessageBox::question(&dlg, "Confirm Nuke",
                 "Delete ALL data and the GHOSTLINK executable?\nThis is IRREVERSIBLE.",
@@ -1685,13 +2081,15 @@ private:
                 QApplication::quit();
             }
         });
-        dl->addWidget(nukeBtn); dl->addStretch();
+        dlay->addWidget(nukeBtn); dlay->addStretch();
         tabs->addTab(dz, "Danger");
 
         lay->addWidget(tabs);
-        auto *closeBtn = new QPushButton("Close"); connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+        auto *closeBtn = new QPushButton("Close & save");
+        connect(closeBtn, &QPushButton::clicked, [&dlg]() { saveUserPrefs(); dlg.accept(); });
         lay->addWidget(closeBtn);
         dlg.exec();
+        saveUserPrefs();   /* save again even if window is X'd */
     }
 };
 

@@ -31,7 +31,7 @@ void network_cleanup(void) {
     hSession = NULL;
 }
 
-HttpResponse* network_post(const char *path, const char *json_body) {
+HttpResponse* network_post_h(const char *path, const char *json_body, const char *extra_header) {
     if (!hSession) return NULL;
 
     WCHAR url[512];
@@ -54,8 +54,15 @@ HttpResponse* network_post(const char *path, const char *json_body) {
         SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
 
-    /* Set JSON content type */
-    LPCWSTR headers = L"Content-Type: application/json\r\n";
+    /* Set JSON content type + optional caller-supplied extras like X-Expires-In. */
+    WCHAR headers[1024];
+    if (extra_header && *extra_header) {
+        WCHAR wextra[512];
+        MultiByteToWideChar(CP_UTF8, 0, extra_header, -1, wextra, 512);
+        wsprintf(headers, L"Content-Type: application/json\r\n%s\r\n", wextra);
+    } else {
+        wcscpy(headers, L"Content-Type: application/json\r\n");
+    }
     DWORD bodyLen = (DWORD)strlen(json_body);
 
     if (!WinHttpSendRequest(hRequest, headers, -1, (LPVOID)json_body, bodyLen, bodyLen, 0)) {
@@ -89,6 +96,10 @@ HttpResponse* network_post(const char *path, const char *json_body) {
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
     return r;
+}
+
+HttpResponse* network_post(const char *path, const char *json_body) {
+    return network_post_h(path, json_body, NULL);
 }
 
 HttpResponse* network_get(const char *path) {

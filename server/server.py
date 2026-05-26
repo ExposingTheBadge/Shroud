@@ -265,7 +265,7 @@ async def lifespan(ap):
         except asyncio.CancelledError: pass
         print("[GHOSTLINK] Server shutting down")
 
-app = FastAPI(title="GHOSTLINK Secure Messaging", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="GHOSTLINK Secure Messaging", version="2.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -590,7 +590,7 @@ class AuthRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "fips": "140-2 validated", "version": "2.0.0"}
+    return {"status": "ok", "fips": "140-2 validated", "version": "2.1.0"}
 
 import threading
 ecdh_cache = {}
@@ -1225,14 +1225,28 @@ async def get_version():
     embedded version string."""
     base = "https://github.com/ExposingTheBadge/GhostLink/releases/latest"
     return {
-        "version": "2.0.0",
+        "version": "2.1.0",
         "minimum_supported": "1.3.0",
         "release_url": base,
         "windows": f"{base}/download/GHOSTLINK.exe",
         "android": f"{base}/download/GHOSTLINK.apk",
         "linux":   f"{base}/download/ghostlink-linux",
         "changelog": (
-            "2.0.0 — Per-contact safety numbers (SHA-512 over sorted "
+            "2.1.0 — Windows: new theme picker with 12 presets "
+            "(GHOSTLINK Dark/Light, Solarized Dark/Light, Nord, Dracula, "
+            "Monokai, One Dark, Tokyo Night, Gruvbox, Cobalt, High "
+            "Contrast) plus full Custom mode with per-color pickers — "
+            "applies globally to every widget, not just the chat. "
+            "Disappearing messages now user-configurable: Settings → "
+            "Messages → Enable + minutes/seconds spinners (default OFF); "
+            "outgoing messages carry X-Expires-In and the server sweeper "
+            "deletes them at expiry. Real Help tab with documentation "
+            "for verification, theming, panic, troubleshooting. Emoji "
+            "via Windows Win+. panel + Segoe UI Emoji font fallback in "
+            "chat. Markdown rich text: **bold**, *italic*, `code`, "
+            "auto-linked URLs render in received messages. Cross-"
+            "provider ECDH regression fix (carried over from earlier "
+            "v2.0 patch). 2.0.0 — Per-contact safety numbers (SHA-512 over sorted "
             "X25519 pubkeys, 30 visible decimal digits). Windows: right-"
             "click contact → Verify safety number. Android: shield icon "
             "on chat top bar. TreeKEM core (crypto/treekem.py) + server "
@@ -2533,7 +2547,7 @@ async def admin_stats(session=Depends(require_admin)):
         "uptime_sec": round(time.time() - STARTUP_TS, 1),
         "uptime_fmt": _fmt_uptime(time.time() - STARTUP_TS),
         "server_time_utc": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
-        "version": "2.0.0",
+        "version": "2.1.0",
         "registration_enabled": registration_enabled,
         "maintenance_mode": maintenance_mode,
         "total_users": db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
