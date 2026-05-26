@@ -89,19 +89,37 @@ void crypto_free_keypair(KeyPair *kp) {
 /* ── ECDH Shared Secret → AES-256 Key via SHA-256 KDF ──────────────── */
 BOOL crypto_derive_shared_secret(NCRYPT_KEY_HANDLE my_priv, PublicKey *peer_pub,
                                   BYTE shared_key[AES_KEY_LEN]) {
-    NCRYPT_PROV_HANDLE hProv = NULL;
-    NCRYPT_KEY_HANDLE hPeerKey = NULL;
-    NCRYPT_SECRET_HANDLE hSecret = NULL;
+    NCRYPT_PROV_HANDLE hProv = 0;
+    NCRYPT_KEY_HANDLE hPeerKey = 0;
+    NCRYPT_SECRET_HANDLE hSecret = 0;
     BYTE derived[64];
     DWORD derivedLen = sizeof(derived);
 
-    SECURITY_STATUS s = NCryptOpenStorageProvider(&hProv, MS_KEY_STORAGE_PROVIDER, 0);
-    if (!BCRYPT_SUCCESS(s)) return FALSE;
+    /* Import the peer key into the SAME provider that owns my_priv.
+     * Mixing MS_PLATFORM_CRYPTO_PROVIDER (TPM) with MS_KEY_STORAGE_PROVIDER
+     * (software) causes NCryptSecretAgreement to fail with NTE_PERM —
+     * which is exactly the regression that started showing up once
+     * crypto_generate_keypair began preferring the TPM backend in 1.9. */
+    DWORD provBytes = 0;
+    SECURITY_STATUS s = NCryptGetProperty(my_priv, NCRYPT_PROVIDER_HANDLE_PROPERTY,
+                                          (PUCHAR)&hProv, sizeof(hProv), &provBytes, 0);
+    if (!BCRYPT_SUCCESS(s) || !hProv) {
+        if (!BCRYPT_SUCCESS(NCryptOpenStorageProvider(&hProv, MS_KEY_STORAGE_PROVIDER, 0)))
+            return FALSE;
+    }
 
-    s = NCryptImportKey(hProv, NULL, BCRYPT_ECCPUBLIC_BLOB, NULL,
+    s = NCryptImportKey(hProv, 0, BCRYPT_ECCPUBLIC_BLOB, NULL,
                         &hPeerKey, peer_pub->data, peer_pub->len, 0);
-    NCryptFreeObject(hProv);
-    if (!BCRYPT_SUCCESS(s)) return FALSE;
+    if (!BCRYPT_SUCCESS(s)) {
+        /* Last-ditch: import under software provider and try anyway. */
+        NCRYPT_PROV_HANDLE swProv = 0;
+        if (BCRYPT_SUCCESS(NCryptOpenStorageProvider(&swProv, MS_KEY_STORAGE_PROVIDER, 0))) {
+            s = NCryptImportKey(swProv, 0, BCRYPT_ECCPUBLIC_BLOB, NULL,
+                                &hPeerKey, peer_pub->data, peer_pub->len, 0);
+            NCryptFreeObject(swProv);
+        }
+        if (!BCRYPT_SUCCESS(s)) return FALSE;
+    }
 
     s = NCryptSecretAgreement(my_priv, hPeerKey, &hSecret, 0);
     NCryptDeleteKey(hPeerKey, 0);
@@ -377,14 +395,20 @@ BOOL crypto_pq_hybrid_client(const BYTE *server_blob, DWORD server_blob_len,
     ph->cbKey = 48;
     memcpy(peer_blob + 8, server_ec_xy, PQ_EC_LEN);
 
-    NCRYPT_PROV_HANDLE prov = NULL;
-    if (!BCRYPT_SUCCESS(NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0))) {
-        crypto_free_keypair(&kp); return FALSE;
+    /* Use the SAME provider that owns kp.handle — otherwise
+     * NCryptSecretAgreement fails when kp came from the TPM. */
+    NCRYPT_PROV_HANDLE prov = 0;
+    DWORD provBytes = 0;
+    SECURITY_STATUS s = NCryptGetProperty(kp.handle, NCRYPT_PROVIDER_HANDLE_PROPERTY,
+                                          (PUCHAR)&prov, sizeof(prov), &provBytes, 0);
+    if (!BCRYPT_SUCCESS(s) || !prov) {
+        if (!BCRYPT_SUCCESS(NCryptOpenStorageProvider(&prov, MS_KEY_STORAGE_PROVIDER, 0))) {
+            crypto_free_keypair(&kp); return FALSE;
+        }
     }
     NCRYPT_KEY_HANDLE peer_key = 0;
-    SECURITY_STATUS s = NCryptImportKey(prov, 0, BCRYPT_ECCPUBLIC_BLOB, NULL, &peer_key,
-                                        peer_blob, sizeof(peer_blob), 0);
-    NCryptFreeObject(prov);
+    s = NCryptImportKey(prov, 0, BCRYPT_ECCPUBLIC_BLOB, NULL, &peer_key,
+                        peer_blob, sizeof(peer_blob), 0);
     if (!BCRYPT_SUCCESS(s)) { crypto_free_keypair(&kp); return FALSE; }
 
     /* 3. Compute raw ECDH shared (48 bytes). */
