@@ -17,6 +17,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
@@ -113,6 +114,28 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
         if (sid.isNotEmpty() && su.isNotEmpty() && sp.isNotEmpty() && identityKey != null) {
             deviceID = sid; username = su; savedPassword = sp; isRegistered = true
             startHeartbeat()
+        }
+    }
+
+    /** Compute the per-contact safety number for the currently-selected
+     *  recipient. Fetches their ratchet bundle, loads our own X25519 pub
+     *  from local files, and runs SafetyNumber.compute on the pair. */
+    fun computeSafetyNumber(onResult: (String?) -> Unit) {
+        val recip = selectedRecipient
+        if (recip.isBlank()) { onResult(null); return }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val bundle = NetworkClient.get("/api/v1/ratchet/bundle/$recip")
+                val theirHex = bundle.optString("x25519_pub", "")
+                if (theirHex.isBlank()) { withContext(Dispatchers.Main) { onResult(null) }; return@launch }
+                val theirPub = theirHex.hexToBytes()
+                val idFile = java.io.File(java.io.File(getApplication<Application>().filesDir, "ratchet"), "identity.x25519")
+                if (!idFile.exists() || idFile.length() < 64) { withContext(Dispatchers.Main) { onResult(null) }; return@launch }
+                val bytes = idFile.readBytes()
+                val myPub = bytes.copyOfRange(32, 64)
+                val fp = SafetyNumber.compute(myPub, theirPub)
+                withContext(Dispatchers.Main) { onResult(fp) }
+            } catch (_: Throwable) { withContext(Dispatchers.Main) { onResult(null) } }
         }
     }
 
@@ -444,6 +467,32 @@ fun ChatScreen(vm: GhostlinkVM) {
     var searchQ by remember { mutableStateOf("") }
     var fullscreenMsg by remember { mutableStateOf<Msg?>(null) }
     var pendingDelete by remember { mutableStateOf<Msg?>(null) }
+    var safetyNumber by remember { mutableStateOf<String?>(null) }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+
+    safetyNumber?.let { number ->
+        AlertDialog(
+            onDismissRequest = { safetyNumber = null },
+            confirmButton = { TextButton(onClick = { safetyNumber = null }) { Text("OK") } },
+            title = { Text("Safety number") },
+            text = {
+                Column {
+                    Text(
+                        text = number,
+                        fontSize = 24.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(vertical = 12.dp),
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    )
+                    Text(
+                        "Compare this number with the other person in person, over a phone call, or any other trusted channel. If both sides see the same number, the connection is free of MITM.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+        )
+    }
 
     val pickImage = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -459,6 +508,10 @@ fun ChatScreen(vm: GhostlinkVM) {
                 title = { Text("GHOSTLINK", color = MaterialTheme.colorScheme.primary) },
                 actions = {
                     Text(vm.username, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    IconButton(
+                        onClick = { vm.computeSafetyNumber { fp -> safetyNumber = fp } },
+                        enabled = vm.selectedRecipient.isNotBlank(),
+                    ) { Icon(Icons.Filled.Lock, "Verify safety number") }
                     IconButton(onClick = { vm.ownDevices(); tab = 0; showSide = true }) { Icon(Icons.Filled.Search, "Contacts") }
                     IconButton(onClick = { vm.loadGroups(); tab = 2; showSide = true }) { Icon(Icons.Filled.Share, "Groups") }
                 },

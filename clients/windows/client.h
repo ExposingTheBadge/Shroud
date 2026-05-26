@@ -173,6 +173,19 @@ BOOL ghostlink_verify_server_sig(const BYTE *pk_blob, DWORD pk_blob_len,
                                   const BYTE *sig_blob, DWORD sig_blob_len,
                                   const BYTE *message, DWORD message_len);
 
+/* Ed25519 verify is deferred — see notes in commit history. The
+ * existing oqs_sig path verifies ML-DSA-87 + SPHINCS+-256s; the
+ * Ed25519 component is covered by the fingerprint pin + the new
+ * per-contact safety number UI shipped in v2.0. */
+
+/* Safety number: stable per-pair fingerprint of two X25519 identity
+ * pubkeys. SHA-512 over sorted([a,b]); take 30 bytes, emit six
+ * 5-digit groups (30 visible digits). Same string is computed on both
+ * sides — users compare out-of-band to defeat MITM. Returns the
+ * formatted string ("12345 67890 12345 67890 12345 67890"). Caller
+ * frees the result.  Returns NULL on failure. */
+char* safety_number_compute(const BYTE my_pub[32], const BYTE their_pub[32]);
+
 /* ── TPM 2.0 API ──────────────────────────────────────────────────── */
 BOOL   tpm_detect(void);
 BOOL   tpm_is_available(void);

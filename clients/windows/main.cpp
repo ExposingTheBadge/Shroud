@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "1.9.0"
+#define CLIENT_VERSION "2.0.0"
 
 extern "C" {
 #include "client.h"
@@ -771,6 +771,8 @@ private:
             themeBtn->setText(gDark ? "Light Mode" : "Dark Mode");
         });
         connect(m_sideList, &QListWidget::itemDoubleClicked, this, &GhostlinkWindow::sideSelect);
+        m_sideList->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(m_sideList, &QListWidget::customContextMenuRequested, this, &GhostlinkWindow::onContactContextMenu);
         connect(m_sendBtn, &QPushButton::clicked, this, &GhostlinkWindow::sendMessage);
         connect(m_attachBtn, &QPushButton::clicked, this, &GhostlinkWindow::attachFile);
         connect(m_msgInput, &QLineEdit::returnPressed, this, &GhostlinkWindow::sendMessage);
@@ -1321,6 +1323,67 @@ private:
             m_selectedRecip = did;
             m_toField->setText(text);
         }
+    }
+
+    /* Right-click on a contact → "Verify safety number".
+     * Pulls the contact's X25519 ratchet identity from the server,
+     * combines with ours, and shows the 30-digit number. Users compare
+     * out-of-band to defeat MITM. */
+    void onContactContextMenu(const QPoint &pos) {
+        QListWidgetItem *item = m_sideList->itemAt(pos);
+        if (!item || m_tabGroups) return;
+        QString uname = item->text();
+
+        QMenu menu(this);
+        QAction *verify = menu.addAction("Verify safety number…");
+        QAction *chosen = menu.exec(m_sideList->mapToGlobal(pos));
+        if (chosen != verify) return;
+
+        QString did = resolveUsernameToDevice(uname);
+        if (did.isEmpty()) {
+            QMessageBox::information(this, "Safety number",
+                "That contact isn't online — try again when their device is reachable.");
+            return;
+        }
+        QByteArray b = httpGet(QString("/api/v1/ratchet/bundle/%1").arg(did).toUtf8().constData());
+        QString theirPubHex = jsonStr(b, "x25519_pub");
+        if (theirPubHex.isEmpty()) {
+            QMessageBox::information(this, "Safety number",
+                "That contact hasn't published a ratchet bundle yet (pre-v1.6 client).");
+            return;
+        }
+        QByteArray theirPub = QByteArray::fromHex(theirPubHex.toUtf8());
+
+        /* Read our own X25519 pub from the DPAPI-wrapped identity blob. */
+        std::wstring wIdPath = (ratchetKeyDir() + "/identity.x25519").toStdWString();
+        BYTE *plain = NULL; DWORD plainLen = 0;
+        if (!storage_load_blob(wIdPath.c_str(), &plain, &plainLen) || plainLen < 64) {
+            QMessageBox::warning(this, "Safety number",
+                "Your local ratchet identity isn't readable. Re-login to regenerate.");
+            return;
+        }
+        BYTE myPub[32]; memcpy(myPub, plain + 32, 32);
+        free(plain);
+
+        char *fp = safety_number_compute(myPub, (const BYTE*)theirPub.constData());
+        QString number = fp ? QString::fromUtf8(fp) : "(unavailable)";
+        free(fp);
+
+        QString html = QString(
+            "<div style='font-family:Consolas,monospace;text-align:center'>"
+            "<div style='font-size:28px;letter-spacing:2px;margin:14px 0;color:#ff8c1e'>%1</div>"
+            "<div style='color:#888;font-size:11px;max-width:380px'>"
+            "Compare this number with %2 in person, over a phone call, or any other "
+            "trusted channel. If both sides see the SAME number, the connection is "
+            "free of MITM. If they differ, do not trust this conversation.</div></div>"
+        ).arg(number, uname);
+
+        QMessageBox box(this);
+        box.setWindowTitle(QString("Safety number for %1").arg(uname));
+        box.setTextFormat(Qt::RichText);
+        box.setText(html);
+        box.setStandardButtons(QMessageBox::Ok);
+        box.exec();
     }
 
     /* ===============================================================

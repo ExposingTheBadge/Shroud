@@ -284,6 +284,55 @@ BOOL crypto_decrypt_file_data(const BYTE *key, const BYTE *input, DWORD input_le
     return crypto_aes_gcm_decrypt(key, nonce, input + 12, ct_len, input + 12 + ct_len, *output);
 }
 
+/* ── Safety number (per-contact pair fingerprint) ──────────────────
+ * Same wire formula as Signal-style numeric fingerprints:
+ *   1. Sort the two 32-byte pubkeys lexicographically.
+ *   2. Prepend a 1-byte protocol-version tag (= 1).
+ *   3. SHA-512 the result, take the first 30 bytes.
+ *   4. Emit 6 groups of 5 decimal digits, each from a 5-byte big-endian
+ *      slice mod 100000.
+ */
+char* safety_number_compute(const BYTE my_pub[32], const BYTE their_pub[32]) {
+    /* Sort */
+    const BYTE *a = my_pub;
+    const BYTE *b = their_pub;
+    if (memcmp(my_pub, their_pub, 32) > 0) { a = their_pub; b = my_pub; }
+
+    /* SHA-512 with version tag */
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA512_ALGORITHM, NULL, 0)))
+        return NULL;
+    BCRYPT_HASH_HANDLE h = NULL;
+    if (!BCRYPT_SUCCESS(BCryptCreateHash(hAlg, &h, NULL, 0, NULL, 0, 0))) {
+        BCryptCloseAlgorithmProvider(hAlg, 0); return NULL;
+    }
+    BYTE ver = 1;
+    BCryptHashData(h, &ver, 1, 0);
+    BCryptHashData(h, (PUCHAR)a, 32, 0);
+    BCryptHashData(h, (PUCHAR)b, 32, 0);
+    BYTE digest[64];
+    BOOL ok = BCRYPT_SUCCESS(BCryptFinishHash(h, digest, 64, 0));
+    BCryptDestroyHash(h);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    if (!ok) return NULL;
+
+    /* 6 groups of 5 digits = 35 chars (5 digits + 5 spaces + NUL) */
+    char *out = (char*)malloc(35);
+    if (!out) return NULL;
+    char *p = out;
+    for (int g = 0; g < 6; g++) {
+        unsigned long long v = 0;
+        for (int i = 0; i < 5; i++) v = (v << 8) | digest[g * 5 + i];
+        unsigned int n = (unsigned int)(v % 100000ULL);
+        if (g > 0) *p++ = ' ';
+        sprintf(p, "%05u", n);
+        p += 5;
+    }
+    *p = 0;
+    return out;
+}
+
+
 /* ── PQ Hybrid Client KEX (ECDH-P384 + ML-KEM-1024) ──────────────────
  * Mirrors crypto/pq_hybrid.py:client_encapsulate. Server blob layout:
  *   4B 'PKG2' | 4B ec_len(96) | 96B ec_xy | 4B kem_len(1568) | 1568B kem_pk

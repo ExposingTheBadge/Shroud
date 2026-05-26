@@ -20,7 +20,7 @@ COVER_BYTES = 0           # bytes received as cover (post-padding)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Header, Cookie, Depends
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -76,6 +76,14 @@ except Exception as _ar_e:
     at_rest = None
     AT_REST_AVAILABLE = False
     print(f"[GHOSTLINK] At-rest encryption unavailable: {_ar_e}")
+
+try:
+    from crypto import treekem
+    TREEKEM_AVAILABLE = treekem.self_test()
+except Exception as _tk_e:
+    treekem = None
+    TREEKEM_AVAILABLE = False
+    print(f"[GHOSTLINK] TreeKEM unavailable: {_tk_e}")
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -208,6 +216,9 @@ async def _expiry_sweeper():
             n_msg = db.execute("SELECT COUNT(*) FROM messages WHERE expires_at IS NOT NULL AND expires_at < datetime('now')").fetchone()[0]
             if n_msg:
                 db.execute("DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at < datetime('now')")
+            # Expired device-link sessions (also wipes any payload that never
+            # got picked up — payloads contain identity material).
+            db.execute("DELETE FROM device_link_sessions WHERE expires_at < datetime('now')")
             # Expired files
             file_rows = db.execute(
                 "SELECT id, storage_name FROM file_transfers WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
@@ -254,7 +265,7 @@ async def lifespan(ap):
         except asyncio.CancelledError: pass
         print("[GHOSTLINK] Server shutting down")
 
-app = FastAPI(title="GHOSTLINK Secure Messaging", version="1.9.0", lifespan=lifespan)
+app = FastAPI(title="GHOSTLINK Secure Messaging", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -475,6 +486,27 @@ def init_db():
                 redeemed_at TEXT DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS idx_redeemed_ts ON redeemed_credentials(redeemed_at);
+
+            CREATE TABLE IF NOT EXISTS treekem_state (
+                group_id TEXT PRIMARY KEY,
+                epoch INTEGER NOT NULL,
+                depth INTEGER NOT NULL,
+                members_json TEXT NOT NULL,
+                public_path_json TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS device_link_sessions (
+                link_id TEXT PRIMARY KEY,
+                primary_device_id TEXT NOT NULL,
+                primary_pubkey BLOB NOT NULL,
+                secondary_pubkey BLOB,
+                encrypted_payload BLOB,
+                created_at TEXT DEFAULT (datetime('now')),
+                expires_at TEXT NOT NULL,
+                consumed INTEGER DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_link_expires ON device_link_sessions(expires_at);
         """)
         db.commit()
     except: pass
@@ -558,7 +590,7 @@ class AuthRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "fips": "140-2 validated", "version": "1.9.0"}
+    return {"status": "ok", "fips": "140-2 validated", "version": "2.0.0"}
 
 import threading
 ecdh_cache = {}
@@ -859,6 +891,178 @@ async def panic_wipe(request: Request):
         return {"wiped": False}
 
 
+# ── Multi-device linking (sealed-Sesame style) ──────────────────
+# Lets a logged-in user attach a second device without retyping the
+# password and without the server seeing identity material. Flow:
+#   1. Primary: POST /devices/link/init → server returns link_id + TTL.
+#      Primary uploads its ephemeral X25519 pubkey for the new device
+#      to encrypt back to.
+#   2. New device scans/paste link_id, GET /devices/link/{id} → gets
+#      primary_pubkey. Generates its own X25519 ephemeral, posts to
+#      /devices/link/{id}/secondary so primary can encrypt to it.
+#   3. Primary polls /devices/link/{id}, sees secondary_pubkey, derives
+#      shared via X25519, encrypts the identity bundle (ratchet keys,
+#      conversation state) and uploads via /devices/link/{id}/payload.
+#   4. Secondary GETs /devices/link/{id}/payload, decrypts, imports.
+#      Server marks session consumed; payload is purged.
+# Server only sees ephemeral pubkeys + opaque ciphertext. 5-minute TTL.
+LINK_TTL_SEC = 300
+
+@app.post("/api/v1/devices/link/init")
+async def device_link_init(request: Request):
+    body = await request.json()
+    primary = body.get("device_id", "")
+    if not db.execute("SELECT id FROM devices WHERE id=?", (primary,)).fetchone():
+        raise HTTPException(401, "Invalid device")
+    try:
+        pub = bytes.fromhex(body.get("primary_pubkey_hex", ""))
+        if len(pub) != 32: raise ValueError("must be 32 bytes")
+    except Exception:
+        raise HTTPException(400, "Invalid primary_pubkey_hex")
+    link_id = secrets.token_hex(16)
+    expires = (datetime.now(tz=timezone.utc) + timedelta(seconds=LINK_TTL_SEC)).strftime("%Y-%m-%d %H:%M:%S")
+    db.execute(
+        "INSERT INTO device_link_sessions (link_id, primary_device_id, primary_pubkey, expires_at) "
+        "VALUES (?,?,?,?)",
+        (link_id, primary, pub, expires),
+    )
+    db.commit()
+    return {"link_id": link_id, "expires_at": expires, "ttl_seconds": LINK_TTL_SEC}
+
+
+@app.get("/api/v1/devices/link/{link_id}")
+async def device_link_lookup(link_id: str):
+    row = db.execute(
+        "SELECT primary_pubkey, secondary_pubkey, encrypted_payload, expires_at, consumed "
+        "FROM device_link_sessions WHERE link_id=?", (link_id,)
+    ).fetchone()
+    if not row: raise HTTPException(404, "Unknown link")
+    if row[4]: raise HTTPException(410, "Link already consumed")
+    return {
+        "link_id": link_id,
+        "primary_pubkey_hex": row[0].hex(),
+        "secondary_pubkey_hex": row[1].hex() if row[1] else None,
+        "payload_ready": row[2] is not None,
+        "expires_at": row[3],
+    }
+
+
+@app.post("/api/v1/devices/link/{link_id}/secondary")
+async def device_link_secondary(link_id: str, request: Request):
+    body = await request.json()
+    row = db.execute("SELECT consumed FROM device_link_sessions WHERE link_id=?", (link_id,)).fetchone()
+    if not row: raise HTTPException(404, "Unknown link")
+    if row[0]: raise HTTPException(410, "Already consumed")
+    try:
+        pub = bytes.fromhex(body.get("secondary_pubkey_hex", ""))
+        if len(pub) != 32: raise ValueError("must be 32 bytes")
+    except Exception:
+        raise HTTPException(400, "Invalid secondary_pubkey_hex")
+    db.execute("UPDATE device_link_sessions SET secondary_pubkey=? WHERE link_id=?", (pub, link_id))
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/v1/devices/link/{link_id}/payload")
+async def device_link_payload_put(link_id: str, request: Request):
+    """Primary uploads the encrypted identity bundle."""
+    row = db.execute(
+        "SELECT primary_device_id, consumed FROM device_link_sessions WHERE link_id=?", (link_id,)
+    ).fetchone()
+    if not row: raise HTTPException(404, "Unknown link")
+    if row[1]: raise HTTPException(410, "Already consumed")
+    primary = row[0]
+    body = await request.body()
+    if not body or len(body) > 1024 * 1024:
+        raise HTTPException(400, "Payload empty or too large")
+    db.execute("UPDATE device_link_sessions SET encrypted_payload=? WHERE link_id=?", (body, link_id))
+    db.commit()
+    audit_admin(primary[:8], "device_link_payload_upload", link_id, f"bytes={len(body)}")
+    return {"ok": True, "bytes": len(body)}
+
+
+@app.get("/api/v1/devices/link/{link_id}/payload")
+async def device_link_payload_get(link_id: str):
+    """Secondary fetches the encrypted bundle, then session is consumed."""
+    row = db.execute(
+        "SELECT encrypted_payload, consumed FROM device_link_sessions WHERE link_id=?", (link_id,)
+    ).fetchone()
+    if not row: raise HTTPException(404, "Unknown link")
+    if row[1]: raise HTTPException(410, "Already consumed")
+    if not row[0]: raise HTTPException(425, "Payload not yet uploaded")
+    payload = row[0]
+    db.execute("UPDATE device_link_sessions SET consumed=1, encrypted_payload=NULL WHERE link_id=?", (link_id,))
+    db.commit()
+    return Response(content=payload, media_type="application/octet-stream")
+
+
+# ── TreeKEM group state ──────────────────────────────────────────
+# Stores only PUBLIC tree state per group: current epoch, member list,
+# and the public X25519 keys along the tree. Private path material lives
+# only on each member's device — the server is metadata-only.
+@app.post("/api/v1/groups/{group_id}/treekem/init")
+async def treekem_init(group_id: str, request: Request):
+    """Creator initializes a fresh tree state for the group. Body:
+    { device_id, epoch, depth, members: [...], public_path: [...] }"""
+    if not TREEKEM_AVAILABLE:
+        raise HTTPException(503, "TreeKEM unavailable")
+    body = await request.json()
+    auth_by_device(body.get("device_id", ""))
+    if not db.execute("SELECT id FROM group_chats WHERE id=?", (group_id,)).fetchone():
+        raise HTTPException(404, "Group not found")
+    db.execute(
+        "INSERT OR REPLACE INTO treekem_state (group_id, epoch, depth, members_json, public_path_json) "
+        "VALUES (?,?,?,?,?)",
+        (group_id, int(body.get("epoch", 0)), int(body.get("depth", 1)),
+         json.dumps(body.get("members", [])), json.dumps(body.get("public_path", []))),
+    )
+    db.commit()
+    return {"ok": True, "epoch": body.get("epoch", 0)}
+
+
+@app.get("/api/v1/groups/{group_id}/treekem/state")
+async def treekem_state(group_id: str):
+    """Return the current public tree state so members can derive the
+    epoch root secret locally."""
+    row = db.execute(
+        "SELECT epoch, depth, members_json, public_path_json, updated_at FROM treekem_state WHERE group_id=?",
+        (group_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "No tree state for that group")
+    return {
+        "group_id": group_id,
+        "epoch": row[0],
+        "depth": row[1],
+        "members": json.loads(row[2]),
+        "public_path": json.loads(row[3]),
+        "updated_at": row[4],
+    }
+
+
+@app.post("/api/v1/groups/{group_id}/treekem/commit")
+async def treekem_commit(group_id: str, request: Request):
+    """Apply a member's path update. Body: { device_id, new_epoch,
+    depth, members, public_path }. Server enforces monotonic epoch."""
+    if not TREEKEM_AVAILABLE:
+        raise HTTPException(503, "TreeKEM unavailable")
+    body = await request.json()
+    auth_by_device(body.get("device_id", ""))
+    row = db.execute("SELECT epoch FROM treekem_state WHERE group_id=?", (group_id,)).fetchone()
+    cur_epoch = row[0] if row else -1
+    new_epoch = int(body.get("new_epoch", cur_epoch + 1))
+    if new_epoch <= cur_epoch:
+        raise HTTPException(409, f"Stale commit: new_epoch={new_epoch} cur_epoch={cur_epoch}")
+    db.execute(
+        "INSERT OR REPLACE INTO treekem_state (group_id, epoch, depth, members_json, public_path_json, updated_at) "
+        "VALUES (?,?,?,?,?,datetime('now'))",
+        (group_id, new_epoch, int(body.get("depth", 1)),
+         json.dumps(body.get("members", [])), json.dumps(body.get("public_path", []))),
+    )
+    db.commit()
+    return {"ok": True, "epoch": new_epoch}
+
+
 @app.get("/api/v1/credentials/pubkey")
 async def anon_creds_pubkey():
     """Return the server's anonymous-credential RSA public key. Clients use
@@ -1021,25 +1225,26 @@ async def get_version():
     embedded version string."""
     base = "https://github.com/ExposingTheBadge/GhostLink/releases/latest"
     return {
-        "version": "1.9.0",
+        "version": "2.0.0",
         "minimum_supported": "1.3.0",
         "release_url": base,
         "windows": f"{base}/download/GHOSTLINK.exe",
         "android": f"{base}/download/GHOSTLINK.apk",
         "linux":   f"{base}/download/ghostlink-linux",
         "changelog": (
-            "1.9.0 (Tier 4 — endpoint hardening) — Windows identity keys "
-            "now generated inside the TPM via MS Platform Crypto Provider "
-            "(software fallback if no TPM). Screen-capture protection: "
-            "WDA_EXCLUDEFROMCAPTURE on Windows, FLAG_SECURE on Android — "
-            "screenshots/screen-share record a black frame. Panic wipe "
-            "endpoint POST /api/v1/panic instantly purges the calling "
-            "user's account + devices + messages + files + prekeys (200 "
-            "either way so a coercing observer can't tell). SRP self-"
-            "destruct: 5 consecutive failed proofs triggers _wipe_user_"
-            "cascade for that account. 1.8.0 — SRP-6a PAKE + field-level "
-            "encryption + Windows DPAPI ratchet keys + Android encrypted "
-            "shared prefs + Windows server-sig verification."
+            "2.0.0 — Per-contact safety numbers (SHA-512 over sorted "
+            "X25519 pubkeys, 30 visible decimal digits). Windows: right-"
+            "click contact → Verify safety number. Android: shield icon "
+            "on chat top bar. TreeKEM core (crypto/treekem.py) + server "
+            "endpoints /api/v1/groups/{id}/treekem/{init,state,commit} "
+            "for O(log n) group rekey. Multi-device sealed-Sesame "
+            "linking: /api/v1/devices/link/{init,id,secondary,payload} "
+            "lets a logged-in user attach a new device via QR/short code "
+            "without retyping the password. Server sees ephemeral X25519 "
+            "pubkeys + opaque ciphertext only; 5-minute TTL; payload "
+            "auto-purged after pickup. Pure-C Ed25519 verifier deferred "
+            "to v2.1 — current attestation path verifies ML-DSA-87 + "
+            "SPHINCS+ and the Ed25519 leg is covered by fingerprint pin."
         ),
     }
 
@@ -2328,7 +2533,7 @@ async def admin_stats(session=Depends(require_admin)):
         "uptime_sec": round(time.time() - STARTUP_TS, 1),
         "uptime_fmt": _fmt_uptime(time.time() - STARTUP_TS),
         "server_time_utc": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
-        "version": "1.9.0",
+        "version": "2.0.0",
         "registration_enabled": registration_enabled,
         "maintenance_mode": maintenance_mode,
         "total_users": db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
@@ -2359,6 +2564,8 @@ async def admin_stats(session=Depends(require_admin)):
         "srp_available": SRP_AVAILABLE,
         "at_rest_available": AT_REST_AVAILABLE and DATA_KEY is not None,
         "srp_users": db.execute("SELECT COUNT(*) FROM users WHERE srp_verifier IS NOT NULL").fetchone()[0],
+        "treekem_groups": db.execute("SELECT COUNT(*) FROM treekem_state").fetchone()[0],
+        "device_link_active": db.execute("SELECT COUNT(*) FROM device_link_sessions WHERE consumed=0 AND expires_at > datetime('now')").fetchone()[0],
         "os_windows": os_counts.get("windows", 0),
         "os_android": os_counts.get("android", 0),
         "os_ios": os_counts.get("ios", 0),
@@ -2743,6 +2950,8 @@ async function refresh(){
       [d.srp_available?'ok':'danger',d.srp_available?'READY':'OFF','SRP-6a PAKE'],
       ['ok',d.srp_users,'SRP Users'],
       [d.at_rest_available?'ok':'danger',d.at_rest_available?'ON':'OFF','At-Rest Enc'],
+      ['purple',d.treekem_groups,'TreeKEM Groups'],
+      ['accent',d.device_link_active,'Active Device Links'],
     ].map(c=>'<div class="card '+c[0]+'"><div class="val">'+esc(c[1])+'</div><div class="lbl">'+esc(c[2])+'</div></div>').join('');
 
     const hh=d.hourly_activity||[];const hMax=Math.max(1,...hh.map(x=>x.count));

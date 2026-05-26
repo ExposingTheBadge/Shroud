@@ -238,3 +238,41 @@ object Ratchet {
 
 private fun ByteArray?.contentEquals(other: ByteArray): Boolean =
     this != null && this.size == other.size && this.indices.all { this[it] == other[it] }
+
+/**
+ * Safety number for out-of-band verification (Signal-style).
+ *
+ * Both sides compute SHA-512(version || sorted(a, b)) over the two
+ * X25519 identity pubkeys, take 30 bytes, and emit 6 groups of 5
+ * decimal digits. Users compare in person, on a phone call, etc. to
+ * defeat MITM — same number on both ends means no impersonation.
+ */
+object SafetyNumber {
+    fun compute(myPub: ByteArray, theirPub: ByteArray): String {
+        require(myPub.size == 32 && theirPub.size == 32)
+        val (a, b) = if (lessOrEqual(myPub, theirPub)) myPub to theirPub else theirPub to myPub
+        val md = java.security.MessageDigest.getInstance("SHA-512")
+        md.update(1)        // protocol version
+        md.update(a)
+        md.update(b)
+        val digest = md.digest()
+        val sb = StringBuilder()
+        for (g in 0 until 6) {
+            var v = 0L
+            for (i in 0 until 5) v = (v shl 8) or (digest[g * 5 + i].toLong() and 0xff)
+            if (g > 0) sb.append(' ')
+            sb.append("%05d".format(v % 100_000L))
+        }
+        return sb.toString()
+    }
+
+    private fun lessOrEqual(a: ByteArray, b: ByteArray): Boolean {
+        for (i in a.indices) {
+            val ai = a[i].toInt() and 0xff
+            val bi = b[i].toInt() and 0xff
+            if (ai < bi) return true
+            if (ai > bi) return false
+        }
+        return true
+    }
+}
