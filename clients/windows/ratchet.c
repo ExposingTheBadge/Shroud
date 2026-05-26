@@ -404,7 +404,9 @@ BOOL ratchet_state_load(RatchetState *st, const char *path) {
 }
 
 /* Bootstrap shared from a static-static X25519 DH.
- * Both sides compute the same 32-byte output because DH is symmetric. */
+ * Both sides compute the same 32-byte output because DH is symmetric.
+ * Legacy — kept so v1.6-era peers still bootstrap. New code should
+ * call ratchet_x3dh_alice / ratchet_x3dh_bob. */
 BOOL ratchet_compute_bootstrap(const BYTE my_priv[32], const BYTE peer_pub[32],
                                 BYTE shared_out[32]) {
     BYTE dh[32];
@@ -412,4 +414,63 @@ BOOL ratchet_compute_bootstrap(const BYTE my_priv[32], const BYTE peer_pub[32],
     static const BYTE info[] = "GHOSTLINK-RATCHET-BOOT-v1";
     BYTE salt[64] = {0};
     return ratchet_hkdf_sha512(salt, 64, dh, 32, info, sizeof(info) - 1, shared_out, 32);
+}
+
+/* ── X3DH ───────────────────────────────────────────────────────────
+ * Derives the session root key as
+ *   SK = HKDF-SHA512(0, F || DH1 || DH2 [|| DH3 || DH4], "GHOSTLINK-X3DH-v1")
+ * where F is 32 bytes of 0xFF (Signal-style domain-separation prefix
+ * that prevents the X3DH output from colliding with raw DH output of any
+ * other protocol). DH3/DH4 are only included when a one-time prekey is
+ * available; otherwise we degrade gracefully to a 2-DH handshake. */
+
+static const BYTE X3DH_INFO[] = "GHOSTLINK-X3DH-v1";
+#define X3DH_KM_MAX (32 + 32 * 4)
+
+static BOOL x3dh_finalize(const BYTE *km, DWORD km_len, BYTE sk_out[32]) {
+    BYTE salt[64] = {0};
+    return ratchet_hkdf_sha512(salt, 64, km, km_len,
+                               X3DH_INFO, sizeof(X3DH_INFO) - 1, sk_out, 32);
+}
+
+BOOL ratchet_x3dh_alice(const BYTE my_ik_priv[32],
+                        const BYTE my_ek_priv[32],
+                        const BYTE peer_ik_pub[32],
+                        const BYTE peer_opk_pub[32],
+                        BYTE sk_out[32]) {
+    BYTE km[X3DH_KM_MAX];
+    memset(km, 0xFF, 32);
+    if (!ratchet_x25519_dh(my_ik_priv, peer_ik_pub, km + 32))  return FALSE;  /* DH1 */
+    if (!ratchet_x25519_dh(my_ek_priv, peer_ik_pub, km + 64))  return FALSE;  /* DH2 */
+    DWORD km_len = 32 + 64;
+    if (peer_opk_pub) {
+        if (!ratchet_x25519_dh(my_ek_priv, peer_opk_pub, km + 96))  return FALSE;  /* DH3 */
+        if (!ratchet_x25519_dh(my_ik_priv, peer_opk_pub, km + 128)) return FALSE;  /* DH4 */
+        km_len = 32 + 128;
+    }
+    BOOL ok = x3dh_finalize(km, km_len, sk_out);
+    SecureZeroMemory(km, sizeof(km));
+    return ok;
+}
+
+BOOL ratchet_x3dh_bob(const BYTE my_ik_priv[32],
+                      const BYTE my_opk_priv[32],
+                      const BYTE peer_ik_pub[32],
+                      const BYTE peer_ek_pub[32],
+                      BYTE sk_out[32]) {
+    BYTE km[X3DH_KM_MAX];
+    memset(km, 0xFF, 32);
+    /* Note the swapped arguments vs Alice — ECDH symmetry ensures the
+     * shared values are identical. */
+    if (!ratchet_x25519_dh(my_ik_priv, peer_ik_pub, km + 32))  return FALSE;  /* DH1 */
+    if (!ratchet_x25519_dh(my_ik_priv, peer_ek_pub, km + 64))  return FALSE;  /* DH2 */
+    DWORD km_len = 32 + 64;
+    if (my_opk_priv) {
+        if (!ratchet_x25519_dh(my_opk_priv, peer_ek_pub, km + 96))  return FALSE;  /* DH3 */
+        if (!ratchet_x25519_dh(my_opk_priv, peer_ik_pub, km + 128)) return FALSE;  /* DH4 */
+        km_len = 32 + 128;
+    }
+    BOOL ok = x3dh_finalize(km, km_len, sk_out);
+    SecureZeroMemory(km, sizeof(km));
+    return ok;
 }

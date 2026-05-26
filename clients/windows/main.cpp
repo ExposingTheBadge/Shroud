@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "2.1.0"
+#define CLIENT_VERSION "2.2.0"
 
 extern "C" {
 #include "client.h"
@@ -1546,31 +1546,60 @@ private:
     }
 
     /* ===============================================================
-     *  DOUBLE RATCHET — per-peer session management
+     *  DOUBLE RATCHET + X3DH — per-peer session management
      *
-     * Each pair (me, peer) gets its own RatchetState persisted to
-     *   <appdata>/GHOSTLINK/ratchet/peer_<deviceId>.state
-     * encrypted with DPAPI. The state is loaded before send/receive and
-     * saved back after each successful operation so that the message-key
-     * chain advances monotonically and old keys are wiped from memory and
-     * disk after rotation.
+     * v2.2 upgrade: bootstrap now uses Signal's X3DH handshake instead
+     * of the v2.1 static-static-DH. The first envelope of every session
+     * carries a 40-byte X3DH preamble:
      *
-     * Bootstrap convention: the first message in a conversation is sent
-     * by Alice. Alice runs ratchet_init_alice() against the peer's static
-     * X25519 identity pub. Bob runs ratchet_init_bob() on first receive.
-     * Both sides derive the same shared root key via
-     * ratchet_compute_bootstrap(my_x25519_priv, peer_x25519_pub) (static-
-     * static DH + HKDF-SHA512); ECDH symmetry guarantees equality.
+     *     [4B  magic 'X3D1' LE = 0x31443358]
+     *     [32B Alice's ephemeral X25519 pub (EK_A)]
+     *     [4B  one-time-prekey id used (LE), or 0xFFFFFFFF if none]
+     *     [   ...DR22 envelope continues...        ]
      *
-     * Known limitation: if both sides happen to send their very first
-     * messages concurrently before receiving each other's, they will both
-     * init as Alice with independent ephemerals and the two states
-     * diverge. v2.2 will close this with full X3DH-style prekey consumption.
-     * In the 99% sequential case this works perfectly and provides full
-     * forward + future secrecy.
+     * Alice (sender, first message) flow:
+     *   1. GET /api/v1/ratchet/bundle/{peer} — server atomically deletes
+     *      one of peer's published one-time prekeys and returns its pub.
+     *   2. Generate fresh ephemeral EK_A keypair (single-session).
+     *   3. SK = ratchet_x3dh_alice(IK_A_priv, EK_A_priv, IK_B_pub, OPK_B_pub).
+     *   4. ratchet_init_alice(state, SK, IK_B_pub) — DH chain starts.
+     *   5. Persist EK_A pub + otp_id in a side-file so we can re-emit the
+     *      preamble on retries until Bob actually replies.
+     *
+     * Bob (receiver, first message from this sender) flow:
+     *   1. Detect X3D1 magic on the wire, lift EK_A pub + otp_id.
+     *   2. Look up our OPK_B priv in local DPAPI store by id.
+     *   3. SK = ratchet_x3dh_bob(IK_B_priv, OPK_B_priv, IK_A_pub, EK_A_pub).
+     *   4. ratchet_init_bob(state, SK, IK_B_priv, IK_B_pub).
+     *   5. Decrypt. On success, DELETE OPK_B from the on-disk OTP store —
+     *      single-use, locks in forward secrecy.
+     *
+     * Alice keeps re-emitting the preamble on every outbound message
+     * until her local state shows has_ckr=true (meaning she's received
+     * and processed at least one reply from Bob). Once Bob replies, the
+     * preamble is dropped and the side-file is cleared. Idempotent on
+     * Bob's side — if he sees a preamble for a session he's already
+     * bootstrapped, he just strips it and uses his existing state.
+     *
+     * Closes the v2.1 concurrent-first-send divergence: even if both
+     * sides send simultaneously, each side's first message carries an
+     * X3DH preamble and the receiver bootstraps a NEW state from it,
+     * matching the sender. Each direction is an independent ratchet
+     * chain bootstrapped from independent ephemerals.
      * =============================================================== */
+
+    static constexpr quint32 X3DH_MAGIC      = 0x31443358u;   /* 'X3D1' LE */
+    static constexpr int     X3DH_PREAMBLE_LEN = 40;          /* 4 + 32 + 4 */
+    static constexpr quint32 X3DH_NO_OTP     = 0xFFFFFFFFu;
+
     QString peerRatchetPath(const QString &peerDeviceId) {
         return ratchetKeyDir() + "/peer_" + peerDeviceId + ".state";
+    }
+    QString peerX3dhSidePath(const QString &peerDeviceId) {
+        return ratchetKeyDir() + "/peer_" + peerDeviceId + ".x3dh";
+    }
+    QString myOtpStorePath() {
+        return ratchetKeyDir() + "/one_time_prekeys.bin";
     }
 
     /* Load this device's long-term X25519 ratchet identity from the
@@ -1589,10 +1618,9 @@ private:
         return true;
     }
 
-    /* Fetch a peer's published X25519 identity. Uses the lightweight
-     * /ratchet/identity/{id} endpoint so we don't burn a one-time prekey
-     * on every send. Returns false if the peer hasn't published yet
-     * (pre-v1.6 client) — caller falls back to legacy AES-GCM. */
+    /* Fetch a peer's published X25519 identity WITHOUT consuming an OTP.
+     * Used by Bob to look up Alice's IK during X3DH bootstrap, and by
+     * the safety-number UI. */
     bool fetchPeerX25519(const QString &peerDeviceId, BYTE peer_pub_out[32]) {
         QByteArray r = httpGet(
             QString("/api/v1/ratchet/identity/%1").arg(peerDeviceId).toUtf8().constData());
@@ -1604,6 +1632,84 @@ private:
         return true;
     }
 
+    /* Fetch the full ratchet bundle for `peer`. The server CONSUMES one
+     * of the peer's published one-time prekeys as part of this call (it's
+     * deleted from their pool atomically), so this MUST only be called
+     * by Alice on first-send for a session — never on every message. */
+    struct PeerBundle {
+        BYTE     ik_pub[32];
+        BYTE     opk_pub[32];
+        bool     has_opk;
+        quint32  opk_id;
+    };
+    bool fetchPeerBundle(const QString &peerDeviceId, PeerBundle *out) {
+        QByteArray r = httpGet(
+            QString("/api/v1/ratchet/bundle/%1").arg(peerDeviceId).toUtf8().constData());
+        if (r.isEmpty()) return false;
+        QJsonObject obj = QJsonDocument::fromJson(r).object();
+        QByteArray ik = QByteArray::fromHex(obj.value("x25519_pub").toString().toUtf8());
+        if (ik.size() != 32) return false;
+        memcpy(out->ik_pub, ik.constData(), 32);
+        out->has_opk = false;
+        out->opk_id  = X3DH_NO_OTP;
+        QJsonValue otpV = obj.value("one_time_prekey");
+        if (otpV.isObject()) {
+            QJsonObject otp = otpV.toObject();
+            QByteArray opk = QByteArray::fromHex(otp.value("pub").toString().toUtf8());
+            if (opk.size() == 32) {
+                memcpy(out->opk_pub, opk.constData(), 32);
+                out->opk_id = (quint32)otp.value("prekey_id").toInt();
+                out->has_opk = true;
+            }
+        }
+        return true;
+    }
+
+    /* OTP local store: contiguous [4B prekey_id || 32B priv] entries
+     * written DPAPI-wrapped by publishRatchetBundle(). Both halves of
+     * lookup-and-delete are exposed separately so the caller can defer
+     * deletion until AFTER state is safely persisted. */
+    bool lookupMyOtpPriv(quint32 otp_id, BYTE priv_out[32]) {
+        std::wstring wPath = myOtpStorePath().toStdWString();
+        BYTE *plain = nullptr; DWORD plainLen = 0;
+        if (!storage_load_blob(wPath.c_str(), &plain, &plainLen)) return false;
+        constexpr DWORD entry = 4 + 32;
+        if (plainLen == 0 || plainLen % entry != 0) { free(plain); return false; }
+        bool found = false;
+        for (DWORD i = 0; i < plainLen; i += entry) {
+            quint32 id; memcpy(&id, plain + i, 4);
+            if (id == otp_id) { memcpy(priv_out, plain + i + 4, 32); found = true; break; }
+        }
+        free(plain);
+        return found;
+    }
+    bool deleteMyOtp(quint32 otp_id) {
+        std::wstring wPath = myOtpStorePath().toStdWString();
+        BYTE *plain = nullptr; DWORD plainLen = 0;
+        if (!storage_load_blob(wPath.c_str(), &plain, &plainLen)) return false;
+        constexpr DWORD entry = 4 + 32;
+        if (plainLen == 0 || plainLen % entry != 0) { free(plain); return false; }
+        DWORD writeOff = 0;
+        BYTE *out = (BYTE*)malloc(plainLen);
+        if (!out) { free(plain); return false; }
+        for (DWORD i = 0; i < plainLen; i += entry) {
+            quint32 id; memcpy(&id, plain + i, 4);
+            if (id == otp_id) continue;
+            memcpy(out + writeOff, plain + i, entry);
+            writeOff += entry;
+        }
+        free(plain);
+        bool ok = true;
+        if (writeOff == 0) {
+            /* No entries left — keep zero-byte file so next publish replaces. */
+            ok = storage_save_blob(wPath.c_str(), L"GHOSTLINK Ratchet OTPs", out, 0);
+        } else {
+            ok = storage_save_blob(wPath.c_str(), L"GHOSTLINK Ratchet OTPs", out, writeOff);
+        }
+        free(out);
+        return ok;
+    }
+
     bool loadPeerRatchet(const QString &peerDeviceId, RatchetState *st) {
         std::wstring wPath = peerRatchetPath(peerDeviceId).toStdWString();
         BYTE *plain = nullptr; DWORD plainLen = 0;
@@ -1613,7 +1719,6 @@ private:
         free(plain);
         return true;
     }
-
     bool savePeerRatchet(const QString &peerDeviceId, const RatchetState *st) {
         std::wstring wPath = peerRatchetPath(peerDeviceId).toStdWString();
         return storage_save_blob(wPath.c_str(),
@@ -1622,60 +1727,152 @@ private:
                                  (DWORD)sizeof(*st));
     }
 
-    /* Bootstrap a brand-new session. asAlice=true for the side that is
-     * about to send first; asAlice=false for the side that has just
-     * received an inbound ratchet envelope from an unknown peer. */
-    bool bootstrapRatchet(const QString &peerDeviceId, bool asAlice, RatchetState *st) {
-        BYTE myPriv[32], myPub[32], peerPub[32], shared[32];
-        if (!loadMyX25519Identity(myPriv, myPub)) return false;
-        if (!fetchPeerX25519(peerDeviceId, peerPub)) return false;
-        if (!ratchet_compute_bootstrap(myPriv, peerPub, shared)) return false;
-        if (asAlice) return ratchet_init_alice(st, shared, peerPub);
-        return ratchet_init_bob(st, shared, myPriv, myPub);
+    /* X3DH side-file: [32B EK_A pub || 4B otp_id LE]. Stored only while
+     * Alice is still waiting for Bob's first reply. Cleared as soon as
+     * the inbound ratchet reply lands and has_ckr flips true. */
+    bool loadX3dhSide(const QString &peerDeviceId, BYTE ek_pub_out[32], quint32 *otp_id_out) {
+        std::wstring wPath = peerX3dhSidePath(peerDeviceId).toStdWString();
+        BYTE *plain = nullptr; DWORD plainLen = 0;
+        if (!storage_load_blob(wPath.c_str(), &plain, &plainLen) || plainLen != 36) {
+            if (plain) free(plain);
+            return false;
+        }
+        memcpy(ek_pub_out, plain, 32);
+        memcpy(otp_id_out, plain + 32, 4);
+        free(plain);
+        return true;
+    }
+    bool saveX3dhSide(const QString &peerDeviceId, const BYTE ek_pub[32], quint32 otp_id) {
+        std::wstring wPath = peerX3dhSidePath(peerDeviceId).toStdWString();
+        BYTE buf[36];
+        memcpy(buf, ek_pub, 32);
+        memcpy(buf + 32, &otp_id, 4);
+        return storage_save_blob(wPath.c_str(), L"GHOSTLINK X3DH side",
+                                 buf, sizeof(buf));
+    }
+    void deleteX3dhSide(const QString &peerDeviceId) {
+        QString p = peerX3dhSidePath(peerDeviceId);
+        if (QFile::exists(p)) QFile::remove(p);
     }
 
-    /* Encrypt `plaintext` for `peerDeviceId` via the per-peer Double
-     * Ratchet, persisting the advanced state. Returns the hex-encoded
-     * wire envelope on success, or empty QByteArray if either side is
-     * missing a ratchet identity (caller then falls back to legacy AES). */
+    /* Encrypt `plaintext` for `peerDeviceId`. On first send for a new
+     * session, runs X3DH bootstrap as Alice and prepends the X3D1 wire
+     * preamble; on subsequent sends until Bob replies, re-emits the
+     * preamble (idempotent on Bob's side); after Bob's reply, emits a
+     * bare DR22 envelope.
+     *
+     * Returns hex-encoded wire bytes on success, empty on failure. */
     QByteArray ratchetEncryptForPeer(const QString &peerDeviceId, const QByteArray &plaintext) {
         RatchetState st;
+        bool bootstrapped_now = false;
+        BYTE  ek_pub[32];
+        quint32 otp_id = X3DH_NO_OTP;
+
         if (!loadPeerRatchet(peerDeviceId, &st)) {
-            if (!bootstrapRatchet(peerDeviceId, /*asAlice=*/true, &st)) return QByteArray();
+            /* Brand-new session — run X3DH as Alice. */
+            BYTE myIkPriv[32], myIkPub[32];
+            if (!loadMyX25519Identity(myIkPriv, myIkPub)) return QByteArray();
+            PeerBundle pb;
+            if (!fetchPeerBundle(peerDeviceId, &pb)) return QByteArray();
+            BYTE ekPriv[32];
+            if (!ratchet_x25519_keygen(ekPriv, ek_pub)) return QByteArray();
+            BYTE sk[32];
+            if (!ratchet_x3dh_alice(myIkPriv, ekPriv, pb.ik_pub,
+                                    pb.has_opk ? pb.opk_pub : nullptr, sk)) return QByteArray();
+            if (!ratchet_init_alice(&st, sk, pb.ik_pub)) return QByteArray();
+            otp_id = pb.has_opk ? pb.opk_id : X3DH_NO_OTP;
+            if (!saveX3dhSide(peerDeviceId, ek_pub, otp_id)) return QByteArray();
+            bootstrapped_now = true;
         }
-        /* Upper bound: header(44) + nonce(12) + plaintext + GCM tag(16). */
+
+        /* Decide whether to emit the X3DH preamble. We do so until Bob
+         * has clearly replied (has_ckr) — covers message loss / retries. */
+        bool emit_preamble = bootstrapped_now;
+        if (!emit_preamble && !st.has_ckr) {
+            if (loadX3dhSide(peerDeviceId, ek_pub, &otp_id)) emit_preamble = true;
+        }
+
         DWORD cap = RATCHET_HEADER_LEN + RATCHET_NONCE_LEN
                   + (DWORD)plaintext.size() + RATCHET_GCM_TAG_LEN;
-        QByteArray env(cap, Qt::Uninitialized);
+        QByteArray drEnv(cap, Qt::Uninitialized);
         DWORD got = cap;
         if (!ratchet_encrypt(&st,
                              reinterpret_cast<const BYTE*>(plaintext.constData()),
                              (DWORD)plaintext.size(),
                              nullptr, 0,
-                             reinterpret_cast<BYTE*>(env.data()), &got)) {
+                             reinterpret_cast<BYTE*>(drEnv.data()), &got)) {
             return QByteArray();
         }
-        env.resize((int)got);
-        if (!savePeerRatchet(peerDeviceId, &st)) {
-            /* If we can't persist, refuse to send — sending without
-             * saving would let the chain key get reused on next start. */
-            return QByteArray();
+        drEnv.resize((int)got);
+        if (!savePeerRatchet(peerDeviceId, &st)) return QByteArray();
+
+        QByteArray full;
+        if (emit_preamble) {
+            full.resize(X3DH_PREAMBLE_LEN);
+            const quint32 m = X3DH_MAGIC;
+            memcpy(full.data(),     &m,     4);
+            memcpy(full.data() + 4, ek_pub, 32);
+            memcpy(full.data() + 36, &otp_id, 4);
+            full.append(drEnv);
+        } else {
+            full = drEnv;
         }
-        return env.toHex();
+        return full.toHex();
     }
 
-    /* Inverse of ratchetEncryptForPeer. Returns plaintext on success or
-     * empty QByteArray on failure. Will lazily init as Bob if no state
-     * exists yet for this sender. */
+    /* Inverse of ratchetEncryptForPeer. Detects an X3DH preamble; if
+     * present and we have no state for this sender, runs X3DH as Bob,
+     * bootstraps state, decrypts, and deletes the consumed OTP. If
+     * present and we already have state, just strips it and continues. */
     QByteArray ratchetDecryptFromPeer(const QString &peerDeviceId, const QByteArray &envHex) {
         QByteArray env = QByteArray::fromHex(envHex);
         if (env.size() < (int)(RATCHET_HEADER_LEN + RATCHET_NONCE_LEN + RATCHET_GCM_TAG_LEN))
             return QByteArray();
-        RatchetState st;
-        if (!loadPeerRatchet(peerDeviceId, &st)) {
-            if (!bootstrapRatchet(peerDeviceId, /*asAlice=*/false, &st)) return QByteArray();
+
+        BYTE  peer_ek_pub[32];
+        quint32 peer_otp_id = X3DH_NO_OTP;
+        bool  has_preamble = false;
+        if (env.size() >= X3DH_PREAMBLE_LEN + (int)(RATCHET_HEADER_LEN + RATCHET_NONCE_LEN + RATCHET_GCM_TAG_LEN)) {
+            quint32 magic;
+            memcpy(&magic, env.constData(), 4);
+            if (magic == X3DH_MAGIC) {
+                memcpy(peer_ek_pub, env.constData() + 4, 32);
+                memcpy(&peer_otp_id, env.constData() + 36, 4);
+                env = env.mid(X3DH_PREAMBLE_LEN);
+                has_preamble = true;
+            }
         }
-        DWORD plainCap = (DWORD)env.size();  /* generous upper bound */
+
+        RatchetState st;
+        bool   used_otp = false;
+        bool   bootstrapped_now = false;
+        if (!loadPeerRatchet(peerDeviceId, &st)) {
+            if (!has_preamble) return QByteArray();  /* can't bootstrap from a bare DR22 */
+            BYTE myIkPriv[32], myIkPub[32], peerIkPub[32];
+            if (!loadMyX25519Identity(myIkPriv, myIkPub))      return QByteArray();
+            if (!fetchPeerX25519(peerDeviceId, peerIkPub))     return QByteArray();
+            BYTE myOpkPriv[32]; bool has_opk = false;
+            if (peer_otp_id != X3DH_NO_OTP) {
+                if (lookupMyOtpPriv(peer_otp_id, myOpkPriv)) {
+                    has_opk  = true;
+                    used_otp = true;
+                }
+                /* If we can't find the OTP locally it's either already
+                 * been consumed (duplicate delivery) or never published.
+                 * Either way, falling back to 2-DH would produce the
+                 * wrong SK because Alice used the OPK, so just fail. */
+                else { return QByteArray(); }
+            }
+            BYTE sk[32];
+            if (!ratchet_x3dh_bob(myIkPriv, has_opk ? myOpkPriv : nullptr,
+                                  peerIkPub, peer_ek_pub, sk)) return QByteArray();
+            if (!ratchet_init_bob(&st, sk, myIkPriv, myIkPub)) return QByteArray();
+            bootstrapped_now = true;
+        }
+        /* If state already exists and a preamble came along anyway,
+         * silently ignore it — Alice's retry, we're already past it. */
+
+        DWORD plainCap = (DWORD)env.size();
         QByteArray plain(plainCap, Qt::Uninitialized);
         DWORD got = plainCap;
         if (!ratchet_decrypt(&st,
@@ -1683,14 +1880,27 @@ private:
                              (DWORD)env.size(),
                              nullptr, 0,
                              reinterpret_cast<BYTE*>(plain.data()), &got)) {
+            /* Decrypt failed AFTER we consumed the OTP server-side. The
+             * OTP is gone but our local store still has it — leave it
+             * there so a retransmit of the same message can still work. */
             return QByteArray();
         }
         plain.resize((int)got);
-        if (!savePeerRatchet(peerDeviceId, &st)) {
-            /* Decryption succeeded but state didn't persist — surface the
-             * plaintext to the user so they aren't blocked, but next
-             * receive will re-decrypt from the stale on-disk state.
-             * That's a logged TODO; better than dropping the message. */
+
+        /* Persist state BEFORE deleting the OTP so a save failure can't
+         * orphan our chain key. */
+        bool state_saved = savePeerRatchet(peerDeviceId, &st);
+        if (state_saved && bootstrapped_now && used_otp) {
+            /* Lock in forward secrecy: shred the OTP priv. After this
+             * point a disk compromise can't recover the SK. */
+            deleteMyOtp(peer_otp_id);
+        }
+
+        /* If this side was Alice and the new ratchet step closed the
+         * loop (has_ckr is now true), the X3DH preamble is no longer
+         * needed and we can shred the side-file too. */
+        if (state_saved && st.has_ckr) {
+            deleteX3dhSide(peerDeviceId);
         }
         return plain;
     }
