@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -416,6 +417,123 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ── Multi-device linking (sealed-Sesame style) ───────────────────
+    // Symmetric to the Windows client (see clients/windows/main.cpp
+    // linkStartPrimary / linkAcceptSecondary). End-to-end encrypted via
+    // ephemeral X25519; server only relays opaque ciphertext.
+    //
+    //   Primary: posts ekP_pub, polls for ekS_pub, then PUTs
+    //            iv ‖ tag ‖ AES-GCM(HKDF(X25519(ekP_priv, ekS_pub))) over
+    //            the snapshot bundle.
+    //   Secondary: parses the link code, posts ekS_pub, polls /payload,
+    //              decrypts, imports.
+    //
+    // The bundle is import-only (username + contact list); it does not
+    // grant credentials — secondary must still register normally before
+    // accepting the code. Credential grant lands in v2.4.
+    var linkCode by mutableStateOf("")              // primary's generated code
+    var linkStatus by mutableStateOf("")            // user-visible status line
+    private var linkPrimaryPriv: ByteArray? = null
+    private var linkPrimaryId: String? = null
+
+    fun generateLinkCode(onError: (String) -> Unit = {}) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val (priv, pub) = Ratchet.x25519Keygen()
+                val r = NetworkClient.post("/api/v1/devices/link/init", JSONObject().apply {
+                    put("device_id", deviceID)
+                    put("primary_pubkey_hex", pub.toHex())
+                })
+                val id = r.optString("link_id", "")
+                if (id.isEmpty()) { withContext(Dispatchers.Main) { onError("Server rejected the link request") }; return@launch }
+                linkPrimaryPriv = priv
+                linkPrimaryId = id
+                withContext(Dispatchers.Main) {
+                    linkCode = "$id:${pub.toHex()}"
+                    linkStatus = "Waiting for the other device to enter this code (5 min)…"
+                }
+                // Poll for secondary pubkey, then ship the bundle.
+                for (tick in 0 until 150) {
+                    delay(2000)
+                    val poll = try { NetworkClient.get("/api/v1/devices/link/$id") } catch (_: Throwable) { continue }
+                    val secHex = poll.optString("secondary_pubkey_hex", "")
+                    if (secHex.isBlank() || secHex == "null") continue
+                    val shared = Ratchet.x25519Dh(priv, secHex.hexToBytes())
+                    val key = Ratchet.hkdfSha512(ByteArray(64), shared, "GHOSTLINK-DEVLINK-v1".toByteArray(), 32)
+                    val keySpec = javax.crypto.spec.SecretKeySpec(key, "AES")
+                    val friendsResp = NetworkClient.post("/api/v1/friends/list", JSONObject().apply { put("device_id", deviceID) })
+                    val bundle = JSONObject().apply {
+                        put("v", 1)
+                        put("username", username)
+                        put("primary_device_id", deviceID)
+                        put("friends", friendsResp.optJSONArray("friends") ?: org.json.JSONArray())
+                        put("note", "GHOSTLINK device-link snapshot. Import-only; does not grant credentials.")
+                    }.toString().toByteArray()
+                    val (iv, ct, tag) = CryptoProvider.encryptAESGCM(keySpec, bundle)
+                    val blob = iv + tag + ct
+                    NetworkClient.postBytes("/api/v1/devices/link/$id/payload", blob)
+                    withContext(Dispatchers.Main) {
+                        linkStatus = "Linked. Sent ${blob.size}-byte encrypted bundle."
+                    }
+                    return@launch
+                }
+                withContext(Dispatchers.Main) { linkStatus = "Link code expired. Generate a new one." }
+            } catch (e: Throwable) {
+                withContext(Dispatchers.Main) { onError(e.message ?: "Link failed") }
+            }
+        }
+    }
+
+    fun acceptLinkCode(code: String, onError: (String) -> Unit = {}) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val sep = code.indexOf(':')
+                if (sep != 32 || code.length != 32 + 1 + 64) {
+                    withContext(Dispatchers.Main) { onError("Expected 32 hex chars, a colon, then 64 hex chars.") }
+                    return@launch
+                }
+                val id = code.substring(0, 32)
+                val primaryPub = code.substring(33).hexToBytes()
+                val (priv, pub) = Ratchet.x25519Keygen()
+                val r = NetworkClient.post("/api/v1/devices/link/$id/secondary", JSONObject().apply {
+                    put("secondary_pubkey_hex", pub.toHex())
+                })
+                if (r.optBoolean("ok", false) != true) {
+                    withContext(Dispatchers.Main) { onError("Server rejected (expired or already consumed)") }
+                    return@launch
+                }
+                withContext(Dispatchers.Main) { linkStatus = "Waiting for the other device to send the bundle…" }
+                for (tick in 0 until 150) {
+                    delay(2000)
+                    val blob = NetworkClient.getBytes("/api/v1/devices/link/$id/payload") ?: continue
+                    if (blob.size < 12 + 16 + 1) continue
+                    val shared = Ratchet.x25519Dh(priv, primaryPub)
+                    val key = Ratchet.hkdfSha512(ByteArray(64), shared, "GHOSTLINK-DEVLINK-v1".toByteArray(), 32)
+                    val keySpec = javax.crypto.spec.SecretKeySpec(key, "AES")
+                    val iv = blob.copyOfRange(0, 12)
+                    val tag = blob.copyOfRange(12, 28)
+                    val ct = blob.copyOfRange(28, blob.size)
+                    val plain = try { CryptoProvider.decryptAESGCM(keySpec, iv, ct, tag) }
+                                catch (_: Throwable) { null }
+                    if (plain == null) {
+                        withContext(Dispatchers.Main) { onError("Decrypt failed — auth tag mismatch") }
+                        return@launch
+                    }
+                    val bundle = JSONObject(String(plain))
+                    val n = bundle.optJSONArray("friends")?.length() ?: 0
+                    val from = bundle.optString("username", "")
+                    withContext(Dispatchers.Main) {
+                        linkStatus = "Imported $n contacts from $from's primary device."
+                    }
+                    return@launch
+                }
+                withContext(Dispatchers.Main) { linkStatus = "Timed out waiting for the bundle." }
+            } catch (e: Throwable) {
+                withContext(Dispatchers.Main) { onError(e.message ?: "Accept failed") }
+            }
+        }
+    }
+
     class Factory(private val app: Application) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = GhostlinkVM(app) as T
@@ -468,7 +586,72 @@ fun ChatScreen(vm: GhostlinkVM) {
     var fullscreenMsg by remember { mutableStateOf<Msg?>(null) }
     var pendingDelete by remember { mutableStateOf<Msg?>(null) }
     var safetyNumber by remember { mutableStateOf<String?>(null) }
+    var showLink by remember { mutableStateOf(false) }
     val ctx = androidx.compose.ui.platform.LocalContext.current
+
+    if (showLink) {
+        var pasted by remember { mutableStateOf("") }
+        var err by remember { mutableStateOf<String?>(null) }
+        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+        AlertDialog(
+            onDismissRequest = { showLink = false },
+            confirmButton = { TextButton(onClick = { showLink = false }) { Text("Close") } },
+            title = { Text("Link another device") },
+            text = {
+                Column {
+                    Text(
+                        "End-to-end encrypted via ephemeral X25519. The server only " +
+                        "relays opaque ciphertext and forgets it after pickup. 5-min TTL.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text("Generate code (on the existing device)", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                    Button(
+                        onClick = { vm.generateLinkCode { msg -> err = msg } },
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    ) { Text("Generate link code") }
+                    if (vm.linkCode.isNotEmpty()) {
+                        OutlinedTextField(
+                            value = vm.linkCode,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Link code") },
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                            singleLine = false,
+                            maxLines = 3,
+                        )
+                        TextButton(
+                            onClick = {
+                                clipboard.setText(androidx.compose.ui.text.AnnotatedString(vm.linkCode))
+                            },
+                            modifier = Modifier.padding(top = 4.dp),
+                        ) { Text("Copy", color = MaterialTheme.colorScheme.primary) }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Text("Accept code (on the new device)", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                    OutlinedTextField(
+                        value = pasted,
+                        onValueChange = { pasted = it },
+                        label = { Text("Paste link code") },
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                        singleLine = false,
+                    )
+                    Button(
+                        onClick = { vm.acceptLinkCode(pasted.trim()) { msg -> err = msg } },
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    ) { Text("Accept code") }
+                    if (vm.linkStatus.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        Text(vm.linkStatus, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                    }
+                    if (err != null) {
+                        Text(err!!, color = MaterialTheme.colorScheme.error, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            },
+        )
+    }
 
     safetyNumber?.let { number ->
         AlertDialog(
@@ -514,6 +697,7 @@ fun ChatScreen(vm: GhostlinkVM) {
                     ) { Icon(Icons.Filled.Lock, "Verify safety number") }
                     IconButton(onClick = { vm.ownDevices(); tab = 0; showSide = true }) { Icon(Icons.Filled.Search, "Contacts") }
                     IconButton(onClick = { vm.loadGroups(); tab = 2; showSide = true }) { Icon(Icons.Filled.Share, "Groups") }
+                    IconButton(onClick = { showLink = true }) { Icon(Icons.Filled.Settings, "Link device") }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
             )

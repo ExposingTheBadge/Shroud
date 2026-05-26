@@ -80,6 +80,47 @@ object NetworkClient {
         JSONObject(resp)
     }
 
+    /** POST raw bytes with arbitrary content-type. Used by the multi-device
+     *  linking flow to ship an opaque AES-GCM ciphertext through the
+     *  server relay. Returns the JSON response body. */
+    suspend fun postBytes(path: String, bytes: ByteArray,
+                          contentType: String = "application/octet-stream"): JSONObject = withContext(Dispatchers.IO) {
+        val url = URL(BASE + path)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            setRequestProperty("Content-Type", contentType)
+            connectTimeout = TIMEOUT
+            readTimeout = TIMEOUT
+            doOutput = true
+            setFixedLengthStreamingMode(bytes.size)
+        }
+        conn.outputStream.use { it.write(bytes) }
+        val resp = BufferedReader(InputStreamReader(
+            if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+        )).readText()
+        conn.disconnect()
+        JSONObject(resp)
+    }
+
+    /** GET raw bytes. Returns null on non-2xx (caller can poll). */
+    suspend fun getBytes(path: String): ByteArray? = withContext(Dispatchers.IO) {
+        val url = URL(BASE + path)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = TIMEOUT
+            readTimeout = TIMEOUT
+        }
+        try {
+            if (conn.responseCode !in 200..299) return@withContext null
+            val data = conn.inputStream.readBytes()
+            conn.disconnect()
+            data
+        } catch (_: Throwable) {
+            try { conn.disconnect() } catch (_: Throwable) {}
+            null
+        }
+    }
+
     /** DELETE a file by id. Server requires X-Device-ID for authorization. */
     suspend fun deleteFile(path: String, deviceId: String): Boolean = withContext(Dispatchers.IO) {
         val url = URL(BASE + path)

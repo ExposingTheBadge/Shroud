@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "2.2.0"
+#define CLIENT_VERSION "2.3.0"
 
 extern "C" {
 #include "client.h"
@@ -109,6 +109,24 @@ static bool gDisappearEnabled = false;
 static int  gDisappearSeconds = 60;
 static bool gRichText = true;
 
+/* Network anonymity (Tor SOCKS5). When gTorEnabled is true every WinHTTP
+ * request goes through gTorProxy (default 127.0.0.1:9050 — stock tor or
+ * tor-expert-bundle). Tor Browser binds 9150 instead, so users running it
+ * as their Tor source need to change the port. The proxy fails closed:
+ * if Tor isn't running the request just errors out, we don't silently
+ * fall back to clearnet. See docs/tor.md for deployment details. */
+static bool    gTorEnabled = false;
+static QString gTorProxy   = "127.0.0.1:9050";
+
+static void applyTorProxy() {
+    if (gTorEnabled) {
+        QByteArray a = ("socks=" + gTorProxy).toUtf8();
+        network_set_proxy(a.constData());
+    } else {
+        network_set_proxy(NULL);
+    }
+}
+
 /* Minimal Markdown → safe HTML: **bold**, *italic*, `code`, autolinks.
  * Always escapes < > & first so user text can't inject raw HTML. When
  * gRichText is false the body is just escaped and returned verbatim. */
@@ -135,6 +153,11 @@ static void loadUserPrefs() {
     if (RegQueryValueExA(hk, "DisappearEnabled", NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gDisappearEnabled = val != 0;
     if (RegQueryValueExA(hk, "DisappearSec",     NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gDisappearSeconds = (int)val;
     if (RegQueryValueExA(hk, "RichText",         NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gRichText = val != 0;
+    if (RegQueryValueExA(hk, "TorEnabled",       NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gTorEnabled = val != 0;
+    char proxyBuf[128]; DWORD pssz = sizeof(proxyBuf);
+    if (RegQueryValueExA(hk, "TorProxy", NULL, NULL, (BYTE*)proxyBuf, &pssz) == ERROR_SUCCESS) {
+        gTorProxy = QString::fromUtf8(proxyBuf);
+    }
     ssz = sizeof(str);
     if (RegQueryValueExA(hk, "ThemeName", NULL, NULL, (BYTE*)str, &ssz) == ERROR_SUCCESS) {
         QString want = QString::fromUtf8(str);
@@ -170,6 +193,9 @@ static void saveUserPrefs() {
     v = gDisappearEnabled ? 1 : 0;    RegSetValueExA(hk, "DisappearEnabled", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
     v = (DWORD)gDisappearSeconds;     RegSetValueExA(hk, "DisappearSec", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
     v = gRichText ? 1 : 0;            RegSetValueExA(hk, "RichText", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
+    v = gTorEnabled ? 1 : 0;          RegSetValueExA(hk, "TorEnabled", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
+    QByteArray tp = gTorProxy.toUtf8();
+    RegSetValueExA(hk, "TorProxy", 0, REG_SZ, (BYTE*)tp.constData(), tp.size() + 1);
     QByteArray nm = gTheme.name.toUtf8();
     RegSetValueExA(hk, "ThemeName", 0, REG_SZ, (BYTE*)nm.constData(), nm.size() + 1);
     auto saveColor = [&](const char *k, const QColor &c) {
@@ -351,6 +377,7 @@ public:
         /* Init crypto + network */
         crypto_init();
         network_init();
+        applyTorProxy();           /* honor saved Tor pref before first request */
         tpm_detect();
         kyber_init();
 
@@ -2184,6 +2211,194 @@ private:
     }
 
     /* ===============================================================
+     *  MULTI-DEVICE LINKING (sealed-Sesame style)
+     *
+     *  Primary's flow:
+     *    1. ratchet_x25519_keygen → (ekP_priv, ekP_pub)
+     *    2. POST /devices/link/init {device_id, primary_pubkey_hex=ekP_pub}
+     *    3. Server returns link_id. Show "link_id:ekP_pub" as the code.
+     *    4. Poll /devices/link/{id} for secondary_pubkey_hex.
+     *    5. When it appears: shared = X25519(ekP_priv, ekS_pub).
+     *       AES-256-GCM-encrypt {username, contacts:[…]} under
+     *       HKDF-SHA512(shared, "GHOSTLINK-DEVLINK-v1"). POST the
+     *       12-byte nonce ‖ 16-byte tag ‖ ciphertext to /payload.
+     *
+     *  Secondary's flow:
+     *    1. User pastes link code; parse link_id, ekP_pub.
+     *    2. ratchet_x25519_keygen → (ekS_priv, ekS_pub).
+     *    3. POST /secondary {secondary_pubkey_hex=ekS_pub}.
+     *    4. Poll /payload until it returns 200 with the blob.
+     *    5. shared = X25519(ekS_priv, ekP_pub); decrypt; import.
+     *
+     *  Server only sees ephemeral pubkeys and an opaque blob; the symmetric
+     *  key never crosses the wire and the payload is wiped after pickup.
+     * =============================================================== */
+    QString  m_linkPrimaryId;
+    BYTE     m_linkPrimaryPriv[32];
+    QTimer  *m_linkPrimaryPoll = nullptr;
+    QString  m_linkSecondaryId;
+    BYTE     m_linkSecondaryPriv[32];
+    BYTE     m_linkSecondaryPeerPub[32];
+    QTimer  *m_linkSecondaryPoll = nullptr;
+
+    static QByteArray hkdfDevlink(const BYTE shared[32]) {
+        BYTE salt[64] = {0};
+        BYTE out[32];
+        static const BYTE info[] = "GHOSTLINK-DEVLINK-v1";
+        if (!ratchet_hkdf_sha512(salt, 64, shared, 32, info, sizeof(info) - 1, out, 32))
+            return QByteArray();
+        return QByteArray((const char*)out, 32);
+    }
+
+    void linkStartPrimary(QPlainTextEdit *codeOut, QLabel *status) {
+        if (m_linkPrimaryPoll) { m_linkPrimaryPoll->stop(); m_linkPrimaryPoll = nullptr; }
+        BYTE pub[32];
+        if (!ratchet_x25519_keygen(m_linkPrimaryPriv, pub)) {
+            status->setText("Could not generate ephemeral key."); return;
+        }
+        char hexbuf[65] = {0};
+        for (int i = 0; i < 32; i++) sprintf(hexbuf + i*2, "%02x", pub[i]);
+        QByteArray body = jsonBody({
+            {"device_id", m_deviceId},
+            {"primary_pubkey_hex", QString::fromUtf8(hexbuf)}
+        });
+        QByteArray r = httpPost("/api/v1/devices/link/init", body);
+        QString linkId = jsonStr(r, "link_id");
+        if (linkId.isEmpty()) {
+            status->setText("Server rejected the link request.");
+            return;
+        }
+        m_linkPrimaryId = linkId;
+        QString code = linkId + ":" + QString::fromUtf8(hexbuf);
+        codeOut->setPlainText(code);
+        status->setText("Waiting for the other device to enter this code (5 min)…");
+
+        m_linkPrimaryPoll = new QTimer(this);
+        m_linkPrimaryPoll->setInterval(2000);
+        int *ticks = new int(0);
+        connect(m_linkPrimaryPoll, &QTimer::timeout, this, [=]() {
+            (*ticks)++;
+            if (*ticks > 150) {  /* 5 min @ 2s */
+                m_linkPrimaryPoll->stop();
+                status->setText("Link code expired. Generate a new one to try again.");
+                delete ticks; return;
+            }
+            QByteArray lr = httpGet(QString("/api/v1/devices/link/%1").arg(m_linkPrimaryId).toUtf8().constData());
+            QString secHex = jsonStr(lr, "secondary_pubkey_hex");
+            if (secHex.isEmpty() || secHex == "null") return;
+            BYTE peer_pub[32];
+            for (int i = 0; i < 32; i++) {
+                bool ok = false; peer_pub[i] = (BYTE)QStringView(secHex).mid(i*2, 2).toUInt(&ok, 16);
+                if (!ok) { status->setText("Other device sent malformed key."); m_linkPrimaryPoll->stop(); delete ticks; return; }
+            }
+            BYTE shared[32];
+            if (!ratchet_x25519_dh(m_linkPrimaryPriv, peer_pub, shared)) {
+                status->setText("ECDH failed."); m_linkPrimaryPoll->stop(); delete ticks; return;
+            }
+            QByteArray key = hkdfDevlink(shared);
+            if (key.size() != 32) {
+                status->setText("Key derivation failed."); m_linkPrimaryPoll->stop(); delete ticks; return;
+            }
+            QByteArray friendsResp = httpPost("/api/v1/friends/list", jsonBody({{"device_id", m_deviceId}}));
+            QJsonObject bundle{
+                {"v", 1},
+                {"username", m_username},
+                {"primary_device_id", m_deviceId},
+                {"friends", QJsonDocument::fromJson(friendsResp).object().value("friends").toArray()},
+                {"note", "GHOSTLINK device-link snapshot. Import-only; does not grant credentials."},
+            };
+            QByteArray plain = QJsonDocument(bundle).toJson(QJsonDocument::Compact);
+            BYTE iv[12]; crypto_random_bytes(iv, 12);
+            QByteArray ct(plain.size(), 0); BYTE tag[16];
+            if (!crypto_aes_gcm_encrypt((const BYTE*)key.constData(),
+                                        (const BYTE*)plain.constData(), (DWORD)plain.size(),
+                                        iv, (BYTE*)ct.data(), tag)) {
+                status->setText("Encrypt failed."); m_linkPrimaryPoll->stop(); delete ticks; return;
+            }
+            QByteArray blob;
+            blob.append((const char*)iv, 12);
+            blob.append((const char*)tag, 16);
+            blob.append(ct);
+            HttpResponse *pr = network_post_bytes(
+                QString("/api/v1/devices/link/%1/payload").arg(m_linkPrimaryId).toUtf8().constData(),
+                (const BYTE*)blob.constData(), (DWORD)blob.size(), "application/octet-stream");
+            if (pr) network_free_response(pr);
+            m_linkPrimaryPoll->stop();
+            status->setText(QString("Linked. Sent %1-byte encrypted bundle. The other device "
+                                    "will pick it up; this code is no longer reusable.").arg(blob.size()));
+            delete ticks;
+        });
+        m_linkPrimaryPoll->start();
+    }
+
+    void linkAcceptSecondary(const QString &code, QLabel *status) {
+        if (m_linkSecondaryPoll) { m_linkSecondaryPoll->stop(); m_linkSecondaryPoll = nullptr; }
+        int sep = code.indexOf(':');
+        if (sep < 0 || sep != 32 || code.size() != 32 + 1 + 64) {
+            status->setText("That doesn't look like a link code. Expected 32 hex chars, a colon, then 64 hex chars.");
+            return;
+        }
+        QString linkId = code.left(32);
+        QString primaryHex = code.mid(33);
+        for (int i = 0; i < 32; i++) {
+            bool ok = false; m_linkSecondaryPeerPub[i] = (BYTE)QStringView(primaryHex).mid(i*2, 2).toUInt(&ok, 16);
+            if (!ok) { status->setText("Malformed primary key in code."); return; }
+        }
+        BYTE pub[32];
+        if (!ratchet_x25519_keygen(m_linkSecondaryPriv, pub)) {
+            status->setText("Could not generate ephemeral key."); return;
+        }
+        char hexbuf[65] = {0};
+        for (int i = 0; i < 32; i++) sprintf(hexbuf + i*2, "%02x", pub[i]);
+        QByteArray body = jsonBody({{"secondary_pubkey_hex", QString::fromUtf8(hexbuf)}});
+        QByteArray r = httpPost(QString("/api/v1/devices/link/%1/secondary").arg(linkId).toUtf8().constData(), body);
+        if (!r.contains("\"ok\":true")) {
+            status->setText("Server rejected the link code (expired or already consumed)."); return;
+        }
+        m_linkSecondaryId = linkId;
+        status->setText("Waiting for the other device to send the bundle…");
+
+        m_linkSecondaryPoll = new QTimer(this);
+        m_linkSecondaryPoll->setInterval(2000);
+        int *ticks = new int(0);
+        connect(m_linkSecondaryPoll, &QTimer::timeout, this, [=]() {
+            (*ticks)++;
+            if (*ticks > 150) {
+                m_linkSecondaryPoll->stop();
+                status->setText("Timed out waiting for the bundle.");
+                delete ticks; return;
+            }
+            BYTE *blob = NULL; DWORD blobLen = 0;
+            network_download_file(
+                QString("/api/v1/devices/link/%1/payload").arg(m_linkSecondaryId).toUtf8().constData(),
+                m_deviceId.toUtf8().constData(), &blob, &blobLen);
+            if (!blob || blobLen < 12 + 16 + 1) { if (blob) free(blob); return; }
+            BYTE shared[32];
+            if (!ratchet_x25519_dh(m_linkSecondaryPriv, m_linkSecondaryPeerPub, shared)) {
+                free(blob); status->setText("ECDH failed."); m_linkSecondaryPoll->stop(); delete ticks; return;
+            }
+            QByteArray key = hkdfDevlink(shared);
+            if (key.size() != 32) { free(blob); status->setText("Key derivation failed."); m_linkSecondaryPoll->stop(); delete ticks; return; }
+            DWORD ctLen = blobLen - 12 - 16;
+            QByteArray plain(ctLen, 0);
+            BOOL ok = crypto_aes_gcm_decrypt((const BYTE*)key.constData(),
+                                             blob, blob + 12, ctLen, blob + 12 + 16,
+                                             (BYTE*)plain.data());
+            free(blob);
+            if (!ok) { status->setText("Bundle decrypt failed (auth tag mismatch)."); m_linkSecondaryPoll->stop(); delete ticks; return; }
+            QJsonObject bundle = QJsonDocument::fromJson(plain).object();
+            int imported = bundle.value("friends").toArray().size();
+            QString fromUser = bundle.value("username").toString();
+            status->setText(QString("Imported %1 contacts from <b>%2</b>'s primary device. "
+                                    "Conversation keys stay device-local for forward secrecy.")
+                            .arg(imported).arg(fromUser.toHtmlEscaped()));
+            m_linkSecondaryPoll->stop();
+            delete ticks;
+        });
+        m_linkSecondaryPoll->start();
+    }
+
+    /* ===============================================================
      *  SETTINGS
      * =============================================================== */
     void openSettings() {
@@ -2351,6 +2566,84 @@ private:
         mlv->addWidget(rtBox);
         mlv->addStretch();
         tabs->addTab(ms, "Messages");
+
+        /* ──────────── Network (Tor) tab ──────────── */
+        auto *nw = new QWidget; auto *nlv = new QVBoxLayout(nw);
+        auto *torBox = new QGroupBox("Tor (SOCKS5)");
+        auto *torLay = new QVBoxLayout(torBox);
+        auto *torChk = new QCheckBox("Route all GHOSTLINK traffic through Tor");
+        torChk->setChecked(gTorEnabled);
+        torLay->addWidget(torChk);
+        auto *torRow = new QHBoxLayout;
+        torRow->addWidget(new QLabel("SOCKS5 endpoint:"));
+        auto *torEdit = new QLineEdit(gTorProxy);
+        torEdit->setPlaceholderText("127.0.0.1:9050");
+        torRow->addWidget(torEdit, 1);
+        torLay->addLayout(torRow);
+        auto *torNote = new QLabel(
+            "Use <b>127.0.0.1:9050</b> for stock tor / tor-expert-bundle, "
+            "<b>127.0.0.1:9150</b> for Tor Browser. The proxy fails closed — "
+            "if Tor isn't running, requests error out instead of falling back "
+            "to clearnet. See <code>docs/tor.md</code> for the full guide."
+        );
+        torNote->setWordWrap(true);
+        torNote->setTextFormat(Qt::RichText);
+        torLay->addWidget(torNote);
+        nlv->addWidget(torBox);
+        nlv->addStretch();
+        auto syncTor = [=]() {
+            gTorEnabled = torChk->isChecked();
+            QString p = torEdit->text().trimmed();
+            if (!p.isEmpty()) gTorProxy = p;
+            applyTorProxy();
+        };
+        connect(torChk, &QCheckBox::toggled, syncTor);
+        connect(torEdit, &QLineEdit::editingFinished, syncTor);
+        tabs->addTab(nw, "Network");
+
+        /* ──────────── Devices (multi-device linking) tab ──────────── */
+        auto *dv = new QWidget; auto *dvL = new QVBoxLayout(dv);
+        auto *linkBox = new QGroupBox("Link another device to this account");
+        auto *linkLay = new QVBoxLayout(linkBox);
+        linkLay->addWidget(new QLabel(
+            "Use this from the device that's already logged in. Generate a code, "
+            "then enter it on the new device. The exchange is end-to-end "
+            "encrypted via ephemeral X25519 — the server only sees opaque "
+            "ciphertext and forgets it once the new device picks it up. "
+            "5-minute TTL."));
+        auto *genBtn  = new QPushButton("Generate link code");
+        linkLay->addWidget(genBtn);
+        auto *codeOut = new QPlainTextEdit;
+        codeOut->setReadOnly(true);
+        codeOut->setMaximumHeight(70);
+        codeOut->setPlaceholderText("Click \"Generate link code\" to start.");
+        linkLay->addWidget(codeOut);
+        auto *linkStatus = new QLabel("");
+        linkStatus->setWordWrap(true);
+        linkLay->addWidget(linkStatus);
+        dvL->addWidget(linkBox);
+
+        auto *acceptBox = new QGroupBox("Accept a link code from another device");
+        auto *acceptLay = new QVBoxLayout(acceptBox);
+        acceptLay->addWidget(new QLabel(
+            "Use this on the new device. Paste the code from the existing "
+            "device — the contact list and friend graph get imported "
+            "automatically. Conversation keys stay local to each device for "
+            "forward secrecy."));
+        auto *codeIn = new QLineEdit;
+        codeIn->setPlaceholderText("Paste link code here");
+        acceptLay->addWidget(codeIn);
+        auto *acceptBtn = new QPushButton("Accept code");
+        acceptLay->addWidget(acceptBtn);
+        auto *acceptStatus = new QLabel("");
+        acceptStatus->setWordWrap(true);
+        acceptLay->addWidget(acceptStatus);
+        dvL->addWidget(acceptBox);
+        dvL->addStretch();
+
+        connect(genBtn,    &QPushButton::clicked, [=]() { linkStartPrimary(codeOut, linkStatus); });
+        connect(acceptBtn, &QPushButton::clicked, [=]() { linkAcceptSecondary(codeIn->text().trimmed(), acceptStatus); });
+        tabs->addTab(dv, "Devices");
 
         /* ──────────── Password tab ──────────── */
         auto *pw = new QWidget; auto *pl = new QVBoxLayout(pw);

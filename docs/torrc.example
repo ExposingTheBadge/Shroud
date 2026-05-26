@@ -1,0 +1,28 @@
+# GHOSTLINK Tor configuration (example)
+# =====================================
+# Drop into /etc/tor/torrc.d/ghostlink.conf and restart tor.
+# See docs/tor.md for the full deployment guide.
+
+# --- Hidden service for the GHOSTLINK server ---------------------------------
+# This publishes a v3 onion address that maps to the locally-bound server.
+# The matching server invocation is:
+#   python -m server.server --bind 127.0.0.1
+HiddenServiceDir /var/lib/tor/ghostlink/
+HiddenServicePort 58443 127.0.0.1:58443
+HiddenServiceVersion 3
+
+# Optional: rate-limit and harden the hidden service.
+# HiddenServiceNonAnonymousMode 0
+# HiddenServiceSingleHopMode 0
+# HiddenServiceEnableIntroDoSDefense 1
+
+# --- SOCKS for local clients (uncomment ONE) ---------------------------------
+# Standalone tor daemon: keep the default 9050.
+# SocksPort 127.0.0.1:9050
+
+# Co-existing with Tor Browser, which binds 9150 — pick a non-clashing port.
+# SocksPort 127.0.0.1:9051
+
+# --- Logs --------------------------------------------------------------------
+# Quiet but not silent. Set to debug only when troubleshooting onion bringup.
+Log notice file /var/log/tor/notices.log

@@ -68,3 +68,10 @@ admin_js_check.js
 chat-transcript.jsonl
 chat-transcript.txt
 dump_chat.py
+
+# Multi-party signing: private keys NEVER cross machines
+release/signers/*.key
+
+# Agent / IDE skill runtime artifacts (per-developer, not project source)
+.agents/
+skills-lock.json

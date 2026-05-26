@@ -100,7 +100,7 @@ object Ratchet {
         return mac.doFinal(data)
     }
 
-    private fun hkdfSha512(salt: ByteArray, ikm: ByteArray, info: ByteArray, outLen: Int): ByteArray {
+    internal fun hkdfSha512(salt: ByteArray, ikm: ByteArray, info: ByteArray, outLen: Int): ByteArray {
         val s = if (salt.isEmpty()) ByteArray(64) else salt
         val prk = hmacSha512(s, ikm)
         val out = ByteArray(outLen)

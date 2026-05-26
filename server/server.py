@@ -208,6 +208,52 @@ os.makedirs(FILE_DIR, exist_ok=True)
 SESSION_TIMEOUT = 3600  # 1 hour
 MAX_DEVICES_PER_USER = 25
 
+# ── Stats persistence ────────────────────────────────────────────────
+# Counters survive restart, recent-error / rolling-latency deques don't.
+# Hydrated once at startup, flushed every 60s + on graceful shutdown.
+def _stats_load():
+    global COVER_COUNT, COVER_BYTES
+    try:
+        rows = db.execute("SELECT name, value FROM server_stats").fetchall()
+    except Exception:
+        return
+    for name, value in rows:
+        try:
+            if name == "req_counts":
+                REQ_COUNTS.update(json.loads(value))
+            elif name == "err_counts":
+                ERR_COUNTS.update(json.loads(value))
+            elif name == "cover_count":
+                COVER_COUNT = int(value)
+            elif name == "cover_bytes":
+                COVER_BYTES = int(value)
+        except Exception as e:
+            print(f"[GHOSTLINK] stats hydrate skipped {name}: {e}")
+
+
+def _stats_flush():
+    try:
+        db.executemany(
+            "INSERT INTO server_stats (name,value,updated_at) VALUES (?,?,datetime('now')) "
+            "ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=datetime('now')",
+            [
+                ("req_counts", json.dumps(dict(REQ_COUNTS))),
+                ("err_counts", json.dumps(dict(ERR_COUNTS))),
+                ("cover_count", str(COVER_COUNT)),
+                ("cover_bytes", str(COVER_BYTES)),
+            ],
+        )
+        db.commit()
+    except Exception as e:
+        print(f"[GHOSTLINK] stats flush error: {e}")
+
+
+async def _stats_flusher():
+    while True:
+        await asyncio.sleep(60)
+        _stats_flush()
+
+
 async def _expiry_sweeper():
     """Periodically purge expired messages and files."""
     while True:
@@ -256,16 +302,21 @@ async def lifespan(ap):
     db.commit()
     if expired:
         print(f"[GHOSTLINK] Cleaned up {len(expired)} expired/downloaded files")
+    _stats_load()
+    print(f"[GHOSTLINK] Stats restored: {sum(REQ_COUNTS.values())} requests, {sum(ERR_COUNTS.values())} errors lifetime")
     sweep_task = asyncio.create_task(_expiry_sweeper())
+    stats_task = asyncio.create_task(_stats_flusher())
     try:
         yield
     finally:
-        sweep_task.cancel()
-        try: await sweep_task
-        except asyncio.CancelledError: pass
-        print("[GHOSTLINK] Server shutting down")
+        for t in (sweep_task, stats_task):
+            t.cancel()
+            try: await t
+            except asyncio.CancelledError: pass
+        _stats_flush()
+        print("[GHOSTLINK] Server shutting down (stats persisted)")
 
-app = FastAPI(title="GHOSTLINK Secure Messaging", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="GHOSTLINK Secure Messaging", version="2.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -427,6 +478,15 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS server_settings (
             key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
+        -- Cumulative counters that survive restart. Recent-error deque and
+        -- rolling latency window deliberately stay in-memory — they're
+        -- bounded and meaningful only for the current run.
+        CREATE TABLE IF NOT EXISTS server_stats (
+            name TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at TEXT DEFAULT (datetime('now'))
         );
@@ -3060,8 +3120,26 @@ refresh();
 </script></body></html>""")
 
 if __name__ == "__main__":
-    import uvicorn
+    import argparse, uvicorn
+    ap = argparse.ArgumentParser(description="GHOSTLINK secure messaging server")
+    ap.add_argument(
+        "--bind",
+        default=os.environ.get("GHOSTLINK_BIND", "0.0.0.0"),
+        help="Interface to listen on. Use 127.0.0.1 for onion-only deployments "
+             "where Tor is the only path into the server (recommended). "
+             "Defaults to 0.0.0.0 for backwards compatibility.",
+    )
+    ap.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("GHOSTLINK_PORT", PORT)),
+        help=f"TCP port to listen on (default {PORT}).",
+    )
+    args = ap.parse_args()
     init_db()
     print(f"[GHOSTLINK] Database initialized")
-    print(f"[GHOSTLINK] Starting on port {PORT}")
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    print(f"[GHOSTLINK] Listening on {args.bind}:{args.port}")
+    if args.bind == "0.0.0.0":
+        print(f"[GHOSTLINK] WARNING: binding to all interfaces. For onion-only "
+              f"deployments pass --bind 127.0.0.1 and let Tor handle external traffic.")
+    uvicorn.run(app, host=args.bind, port=args.port, log_level="info")
