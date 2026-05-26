@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(GHOSTLINK VERSION 2.3.2 LANGUAGES CXX C)
+project(GHOSTLINK VERSION 2.4.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +17,7 @@ set(WIN_MODULES
     kyber1024.c
     ratchet.c
     oqs_sig.c
+    ed25519.c
 )
 
 add_executable(ghostlink

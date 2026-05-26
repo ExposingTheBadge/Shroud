@@ -16,15 +16,75 @@ RECENT_ERRORS = collections.deque(maxlen=100)
 COVER_COUNT = 0           # number of cover messages received since boot
 COVER_BYTES = 0           # bytes received as cover (post-padding)
 
+# v2.4.0 — network transport telemetry. Counted in TelemetryMiddleware
+# from the incoming Host header. .onion endings = onion-routed; anything
+# else = clearnet. Surfaced on the Activity tab.
+ONION_REQ_COUNT = 0
+CLEAR_REQ_COUNT = 0
+
+# Resolved at startup; pulled from the project-root VERSION file when present
+# so the server label, the admin dashboard, and the /api/v1/version endpoint
+# don't drift apart (which they had).
+def _read_server_version() -> str:
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / "VERSION", here / "VERSION"):
+        try:
+            v = cand.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+        except OSError:
+            continue
+    return "2.4.0"
+
+SERVER_VERSION = _read_server_version()
+
+# Where the extracted admin GUI lives (HTML/CSS/JS). Served as StaticFiles
+# under /admin/static and read directly by the /admin* HTML routes.
+ADMIN_DIR = str(Path(__file__).resolve().parent / "admin")
+
 # Add parent to path for crypto imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Header, Cookie, Depends
-from fastapi.responses import JSONResponse, HTMLResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, Response, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Set
 import asyncio
+
+# Live-tail subscribers. The admin dashboard opens /ws/admin and stays
+# connected; whenever something interesting happens (audit-log row, error,
+# failed login, admin session change) publish_event() drops a JSON message
+# to everyone. The set is mutated only from the asyncio event loop, so no
+# lock is needed.
+_WS_ADMIN_SUBS: "Set[WebSocket]" = set()
+
+def publish_event(event_type: str, payload: dict) -> None:
+    """Broadcast a JSON event to all connected admin WebSocket clients.
+
+    Safe to call from anywhere on the FastAPI event-loop thread (request
+    handlers, middleware, audit helpers). Best-effort: closed sockets get
+    pruned silently and exceptions never propagate to the caller.
+    """
+    if not _WS_ADMIN_SUBS:
+        return
+    msg = json.dumps({"type": event_type, "row": payload})
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop on this thread; nothing to do. Worker threads
+        # that want to push live events should hop back to the loop first.
+        return
+
+    async def _send_all() -> None:
+        for sub in list(_WS_ADMIN_SUBS):
+            try:
+                await sub.send_text(msg)
+            except Exception:
+                _WS_ADMIN_SUBS.discard(sub)
+
+    loop.create_task(_send_all())
 
 # Try to import crypto — works when running from project root
 try:
@@ -248,10 +308,50 @@ def _stats_flush():
         print(f"[GHOSTLINK] stats flush error: {e}")
 
 
+def _stats_history_snapshot():
+    """Append a one-row snapshot of the live counters for the sparkline
+    series. Prunes anything older than 14 days so the table can't grow
+    unbounded on a long-lived server.
+    """
+    try:
+        active_devices = db.execute(
+            "SELECT COUNT(*) FROM devices WHERE last_seen > datetime('now','-5 minutes')"
+        ).fetchone()[0]
+        files_dir = 0
+        try:
+            for entry in os.scandir(FILE_DIR):
+                if entry.is_file():
+                    try:
+                        files_dir += entry.stat().st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        file_count = db.execute("SELECT COUNT(*) FROM file_transfers").fetchone()[0]
+        undelivered = db.execute(
+            "SELECT COUNT(*) FROM messages WHERE delivered=0"
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO server_stats_history "
+            "(errors_total, requests_total, active_devices, file_count, "
+            "files_dir_bytes, undelivered, onion_requests, clear_requests) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (sum(ERR_COUNTS.values()), sum(REQ_COUNTS.values()), active_devices,
+             file_count, files_dir, undelivered, ONION_REQ_COUNT, CLEAR_REQ_COUNT),
+        )
+        db.execute(
+            "DELETE FROM server_stats_history WHERE taken_at < datetime('now','-14 days')"
+        )
+        db.commit()
+    except Exception as e:
+        print(f"[GHOSTLINK] stats history snapshot error: {e}")
+
+
 async def _stats_flusher():
     while True:
         await asyncio.sleep(60)
         _stats_flush()
+        _stats_history_snapshot()
 
 
 async def _expiry_sweeper():
@@ -316,7 +416,7 @@ async def lifespan(ap):
         _stats_flush()
         print("[GHOSTLINK] Server shutting down (stats persisted)")
 
-app = FastAPI(title="GHOSTLINK Secure Messaging", version="2.3.0", lifespan=lifespan)
+app = FastAPI(title="GHOSTLINK Secure Messaging", version=SERVER_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -490,6 +590,25 @@ def init_db():
             value TEXT NOT NULL,
             updated_at TEXT DEFAULT (datetime('now'))
         );
+
+        -- v2.4.0 — minute-resolution snapshots for the Activity sparklines.
+        -- A row is appended every 60s by _stats_history_snapshot(). Older
+        -- rows are pruned to 14 days. This is intentionally small and
+        -- bounded; for proper observability ship logs to a real system.
+        CREATE TABLE IF NOT EXISTS server_stats_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            taken_at TEXT NOT NULL DEFAULT (datetime('now')),
+            errors_total INTEGER NOT NULL DEFAULT 0,
+            requests_total INTEGER NOT NULL DEFAULT 0,
+            active_devices INTEGER NOT NULL DEFAULT 0,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            files_dir_bytes INTEGER NOT NULL DEFAULT 0,
+            undelivered INTEGER NOT NULL DEFAULT 0,
+            onion_requests INTEGER NOT NULL DEFAULT 0,
+            clear_requests INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_stats_history_taken_at
+            ON server_stats_history(taken_at);
 
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1300,13 +1419,32 @@ async def get_version():
     embedded version string."""
     base = "https://github.com/ExposingTheBadge/GhostLink/releases/latest"
     return {
-        "version": "2.1.0",
+        "version": SERVER_VERSION,
         "minimum_supported": "1.3.0",
         "release_url": base,
         "windows": f"{base}/download/GHOSTLINK.exe",
         "android": f"{base}/download/GHOSTLINK.apk",
         "linux":   f"{base}/download/ghostlink-linux",
         "changelog": (
+            "2.4.0 — Pure-C Ed25519 verifier closes the third leg of the "
+            "triple-hybrid server attestation (Ed25519 + ML-DSA-87 + "
+            "SPHINCS+ all verified per handshake — no DLL needed for "
+            "Ed25519, just BCrypt for SHA-512). Server-side admin UI "
+            "extracted from inline HTML into a proper static-files app "
+            "under server/admin/ (HTML + JS + CSS, served via "
+            "/admin/static and the existing /admin* routes). Live admin "
+            "WebSocket at /ws/admin broadcasts audit-log rows, errors, "
+            "failed logins, and session changes via publish_event(). "
+            "Onion vs clearnet request telemetry counted from the Host "
+            "header. SERVER_VERSION read from the project VERSION file "
+            "so the label, dashboard, and /api/v1/version can't drift. "
+            "BUILD-REPRODUCIBILITY.md expanded with status table, "
+            "per-component how-tos, transparency-log workflow, multi-sig "
+            "manifest format, and build-from-source-without-trust path. "
+            "2.3.x — Tor onion-service deployment, multi-device linking "
+            "UX, server stats persistence, multi-party release signing. "
+            "2.2.0 — Double Ratchet wired into live send/receive on "
+            "Windows with X3DH prekey consumption. "
             "2.1.0 — Windows: new theme picker with 12 presets "
             "(GHOSTLINK Dark/Light, Solarized Dark/Light, Nord, Dracula, "
             "Monokai, One Dark, Tokyo Night, Gruvbox, Cobalt, High "
@@ -2011,6 +2149,10 @@ async def group_invites_respond(request: Request):
 @app.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
     """Real-time message delivery via WebSocket."""
+    # Route admin WS through the admin handler
+    if device_id == "admin":
+        await _admin_ws_handler(websocket)
+        return
     device = db.execute("SELECT id FROM devices WHERE id = ?", (device_id,)).fetchone()
     if not device:
         await websocket.close(code=4004)
@@ -2202,8 +2344,27 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-        if request.url.path.startswith("/admin"):
-            response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+        if request.url.path.startswith("/admin") or request.url.path == "/ws/admin":
+            # CSP for the v2.4.0 admin GUI:
+            #   - 'self' for the extracted /admin/static/{admin,login,user,device}.{css,js}
+            #   - 'unsafe-inline' kept on style+script because admin.js builds rows
+            #     with inline style="width:..." attrs and onclick="openUser(...)"
+            #     handlers (rewriting all of those to addEventListener is a much
+            #     larger refactor for no real security gain in a same-origin GUI).
+            #   - connect-src lists ws:/wss: so the live-tail WebSocket can open
+            #     (some browsers don't auto-fall back default-src to ws schemes).
+            #   - object/base/frame-ancestors are defense-in-depth.
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "style-src 'self' 'unsafe-inline'; "
+                "script-src 'self' 'unsafe-inline'; "
+                "connect-src 'self' ws: wss:; "
+                "img-src 'self' data:; "
+                "font-src 'self'; "
+                "object-src 'none'; "
+                "base-uri 'self'; "
+                "frame-ancestors 'none'"
+            )
         return response
 
 app.add_middleware(SecurityHeadersMiddleware)
@@ -2239,35 +2400,50 @@ app.add_middleware(RateLimitMiddleware)
 
 # Telemetry middleware — pure in-memory counters for the admin dashboard.
 # Tracks endpoint hit counts, latency, and errors. No PII recorded.
+#
+# v2.4.0: also counts onion vs clearnet requests (from the Host header)
+# and pushes errors live over the admin WebSocket subscribers.
 class TelemetryMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
+        global ONION_REQ_COUNT, CLEAR_REQ_COUNT
         t0 = time.perf_counter()
         path = request.url.path
         REQ_COUNTS[path] += 1
+
+        # Onion vs clearnet split. WebSocket upgrades and the static-asset
+        # mount are excluded so they don't drown out signal from the real
+        # client API. Skip /ws/* and /admin/static/* deliberately.
+        if not (path.startswith("/admin/static") or path.startswith("/ws/")):
+            host = request.headers.get("host", "").lower().split(":")[0]
+            if host.endswith(".onion"):
+                ONION_REQ_COUNT += 1
+            else:
+                CLEAR_REQ_COUNT += 1
+
+        def _record_error(status: int, detail: str) -> dict:
+            row = {
+                "ts": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
+                "path": path, "status": status, "detail": detail[:200],
+            }
+            RECENT_ERRORS.appendleft(row)
+            publish_event("error", row)
+            return row
+
         try:
             response = await call_next(request)
         except HTTPException as he:
             ERR_COUNTS[path] += 1
-            RECENT_ERRORS.appendleft({
-                "ts": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
-                "path": path, "status": he.status_code, "detail": str(he.detail)[:200]
-            })
+            _record_error(he.status_code, str(he.detail))
             raise
         except Exception as e:
             ERR_COUNTS[path] += 1
-            RECENT_ERRORS.appendleft({
-                "ts": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
-                "path": path, "status": 500, "detail": type(e).__name__
-            })
+            _record_error(500, type(e).__name__)
             raise
         ms = (time.perf_counter() - t0) * 1000.0
         REQ_LATENCY.append((path, ms, time.time()))
         if response.status_code >= 400:
             ERR_COUNTS[path] += 1
-            RECENT_ERRORS.appendleft({
-                "ts": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
-                "path": path, "status": response.status_code, "detail": ""
-            })
+            _record_error(response.status_code, "")
         return response
 
 app.add_middleware(TelemetryMiddleware)
@@ -2304,12 +2480,21 @@ def setting_set(key: str, value: str):
     db.commit()
 
 def audit_admin(actor: str, action: str, target: str = "", detail: str = ""):
+    actor_t  = actor[:64]
+    action_t = action[:64]
+    target_t = target[:128]
+    detail_t = detail[:500]
     try:
         db.execute("INSERT INTO audit_log (actor,action,target,detail) VALUES (?,?,?,?)",
-                   (actor[:64], action[:64], target[:128], detail[:500]))
+                   (actor_t, action_t, target_t, detail_t))
         db.commit()
     except Exception:
-        pass
+        return
+    publish_event("audit", {
+        "ts": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
+        "actor": actor_t, "action": action_t,
+        "target": target_t, "detail": detail_t,
+    })
 
 def get_client_info(request: Request) -> tuple:
     ip = request.client.host if request.client else "unknown"
@@ -2364,54 +2549,41 @@ def require_admin(sid: str = Cookie(None, alias="ghostlink_sid")):
         raise HTTPException(401, "Not authenticated")
     return session
 
+# v2.4.0 — CSRF gate for state-changing admin endpoints. Uses the cookie
+# pair set at login (ghostlink_csrf double-submit token). Admin GET routes
+# don't need this; only POST/DELETE control + delete + setting flips do.
+def require_admin_csrf(request: Request, session=Depends(require_admin)):
+    check_csrf(request)
+    return session
+
+# ─── Static assets for the extracted admin GUI (CSS/JS/HTML shells).
+# Unauthenticated by design: the JS and CSS are not secret, and the login
+# page itself needs to load admin assets before there's any session cookie.
+app.mount("/admin/static", StaticFiles(directory=ADMIN_DIR), name="admin_static")
+
 # ── Admin Login Page (Fingerprint Grid) ─────────────────────────────
+def _serve_admin_html(filename: str) -> HTMLResponse:
+    """Read an extracted admin HTML shell off disk. Files live in
+    server/admin/. Kept tiny on purpose — they reference /admin/static/*
+    for CSS and JS. We read on every request so editing the HTML during
+    development doesn't require a restart; the templates are small and
+    the disk cache makes this effectively free.
+    """
+    path = os.path.join(ADMIN_DIR, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+    except OSError:
+        return HTMLResponse(
+            f"<h1>Admin asset missing</h1><p>Could not read {filename} "
+            f"from {ADMIN_DIR}. Reinstall or restore the server/admin/ "
+            "directory.</p>", status_code=500,
+        )
+
+
 @app.get("/admin/login")
 async def admin_login_page():
-    return HTMLResponse(r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GHOSTLINK Admin</title>
-<style>:root{--bg:#0a0e17;--bg2:#111827;--border:#1a2535;--text:#c8d6e5;--dim:#6e7a8a;--accent:#00d4ff;--danger:#ff4757;--green:#2ed573}
-*,*::before,*::after{box-sizing:border-box}body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);font-size:14px;margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
-.card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:28px 22px;width:100%;max-width:700px}
-h1{font-size:20px;margin:0 0 6px;color:var(--accent);letter-spacing:1px;text-align:center}
-.sub{text-align:center;color:var(--dim);margin:0 0 18px;font-size:12px}
-.error{color:var(--danger);text-align:center;margin:8px 0;font-size:12px;display:none}
-.fp-label{font-size:12px;color:var(--dim);margin-bottom:8px;text-align:center;font-weight:500}
-.fp-grid{display:grid;grid-template-columns:repeat(32,1fr);gap:2px;margin-bottom:10px}
-.fp-grid input{width:100%;aspect-ratio:1;text-align:center;font-family:Consolas,monospace;font-size:13px;font-weight:700;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;outline:none;padding:0}
-.fp-grid input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(0,212,255,0.25)}
-.fp-grid input.filled{border-color:var(--accent);background:#0a141a}
-label{display:block;font-size:11px;color:var(--dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px}
-input.text{width:100%;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;margin-bottom:12px;font-family:Consolas,monospace;outline:none}
-input.text:focus{border-color:var(--accent)}
-button{width:100%;padding:12px;background:var(--accent);color:#000;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer}
-button:disabled{opacity:0.4;cursor:default}
-.fp-link{color:var(--dim);font-size:12px;cursor:pointer;text-align:center;margin-top:10px}
-.fp-link:hover{color:var(--text);text-decoration:underline}
-.fp-status{font-size:12px;color:var(--dim);text-align:center;margin-top:6px;min-height:1.2em}
-.ban-warn{font-size:12px;color:var(--danger);text-align:center;margin-top:8px;font-weight:700}
-</style></head><body>
-<div class="card"><h1>GHOSTLINK Admin</h1><p class="sub">3 failed attempts = permanent IP ban</p>
-<div class="error" id="err"></div>
-<div class="fp-label" id="fpLabel">Paste your fingerprint into the grid</div>
-<div class="fp-grid" id="fpGrid"></div>
-<label>Password</label><input type="password" class="text" id="pw" placeholder="Admin password" autocomplete="current-password">
-<button id="fpBtn" disabled>Authenticate</button>
-<button id="setupBtn" style="display:none">Generate Fingerprint</button>
-<p class="fp-status" id="fpStatus"></p>
-<p class="ban-warn" id="banWarn" style="display:none">ACCESS DENIED — Your IP is banned</p>
-</div>
-<script>
-var FP_COLS=32,FP_LENGTH=256;
-var fpGrid=document.getElementById('fpGrid'),inputs=[];
-for(var i=0;i<FP_LENGTH;i++){var inp=document.createElement('input');inp.type='text';inp.maxLength=1;inp.dataset.idx=i;inp.setAttribute('autocomplete','off');inp.setAttribute('spellcheck','false');fpGrid.appendChild(inp);inputs.push(inp)}
-function onPaste(e){e.preventDefault();var t=(e.clipboardData||window.clipboardData).getData('text')||'';t=t.replace(/[\s\n\r\t]/g,'');if(!t)return;var s=parseInt(this.dataset.idx),c=Math.min(t.length,FP_LENGTH-s);for(var i=0;i<c;i++){var idx=s+i;inputs[idx].value=t[i];inputs[idx].classList.add('filled')}var li=Math.min(s+c,FP_LENGTH-1);inputs[li].focus();checkComplete()}
-inputs.forEach(function(inp,idx){inp.addEventListener('paste',onPaste);inp.addEventListener('input',function(){if(this.value.length===1){this.classList.add('filled');var n=inputs[idx+1];if(n){n.focus();n.select()}}else{this.classList.remove('filled')}checkComplete()});inp.addEventListener('keydown',function(e){var p=inputs[idx-1],n=inputs[idx+1];if(e.key==='ArrowLeft'&&p){e.preventDefault();p.focus();p.select()}if(e.key==='ArrowRight'&&n){e.preventDefault();n.focus();n.select()}if(e.key==='Backspace'){if(this.value){this.value='';this.classList.remove('filled');checkComplete()}else if(p){e.preventDefault();p.value='';p.classList.remove('filled');p.focus();checkComplete()}}});inp.addEventListener('focus',function(){this.select()})});
-function getHWID(){var p=[];try{p.push(screen.width+'x'+screen.height)}catch(e){}try{p.push(navigator.hardwareConcurrency||0)}catch(e){}try{p.push(navigator.deviceMemory||0)}catch(e){}try{var c=document.createElement('canvas');var gl=c.getContext('webgl')||c.getContext('experimental-webgl');if(gl){var dbg=gl.getExtension('WEBGL_debug_renderer_info');if(dbg)p.push(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL))}}catch(e){}try{p.push(Intl.DateTimeFormat().resolvedOptions().timeZone)}catch(e){}return p.join('|')}
-function getFingerprintValue(){var v='';for(var i=0;i<FP_LENGTH;i++)v+=inputs[i].value;return v}
-var pwInput=document.getElementById('pw');pwInput.addEventListener('input',checkComplete);
-function checkComplete(){document.getElementById('fpBtn').disabled=getFingerprintValue().length!==FP_LENGTH||!pwInput.value}
-(async function(){try{var r=await fetch('/api/v1/admin/login-status?hwid='+encodeURIComponent(getHWID()));var d=await r.json();if(d.banned){document.getElementById('banWarn').style.display='block';document.getElementById('fpBtn').style.display='none'}if(d.failCount>0){document.getElementById('fpStatus').textContent=d.failCount+' of 3 attempts used — '+(3-d.failCount)+' remaining';document.getElementById('fpStatus').style.color='var(--danger)'}if(d.needsSetup){document.getElementById('fpLabel').textContent='First run — set admin password to generate fingerprint';document.getElementById('fpGrid').style.display='none';document.getElementById('setupBtn').style.display='block';document.getElementById('fpBtn').style.display='none';pwInput.placeholder='Set admin password (12+ chars)';document.getElementById('setupBtn').disabled=false;pwInput.addEventListener('input',function(){document.getElementById('setupBtn').disabled=this.value.length<12})}}catch(e){}})();document.getElementById('setupBtn').addEventListener('click',async function(){var pw=pwInput.value;if(pw.length<12)return;this.disabled=true;document.getElementById('fpStatus').textContent='Generating fingerprint...';try{var r=await fetch('/api/v1/admin/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});var d=await r.json();if(d.ok){document.getElementById('fpStatus').innerHTML='<span style=\"color:var(--green)\">Your fingerprint:</span><br><code style=\"word-break:break-all;font-size:11px\">'+d.fingerprint_id+'</code><br><span style=\"color:var(--danger);font-weight:700\">SAVE THIS — IT CANNOT BE RECOVERED</span><br>Copy it, paste it into the grid, enter your password, and click Authenticate.';document.getElementById('fpGrid').style.display='grid';document.getElementById('setupBtn').style.display='none';document.getElementById('fpBtn').style.display='block';pwInput.placeholder='Admin password';pwInput.value=''}else{document.getElementById('fpStatus').textContent='Setup failed'}}catch(e){document.getElementById('fpStatus').textContent='Connection error'}this.disabled=false})
-document.getElementById('fpBtn').addEventListener('click',async function(){var fp=getFingerprintValue(),pw=pwInput.value;if(fp.length!==FP_LENGTH||!pw)return;document.getElementById('err').style.display='none';this.disabled=true;document.getElementById('fpStatus').textContent='Verifying...';try{var r=await fetch('/api/v1/admin/fingerprint-login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fingerprint_id:fp,password:pw,hwid:getHWID()})});var d=await r.json();if(d.ok){document.getElementById('fpStatus').textContent='Signed in. Redirecting...';location='/admin'}else{document.getElementById('err').textContent=d.error||'Authentication failed';document.getElementById('err').style.display='block';this.disabled=false;document.getElementById('fpStatus').textContent=''}}catch(e){document.getElementById('err').textContent='Connection error';document.getElementById('err').style.display='block';this.disabled=false;document.getElementById('fpStatus').textContent=''}});
-</script></body></html>""")
+    return _serve_admin_html("login.html")
 
 @app.get("/api/v1/admin/login-status")
 async def admin_login_status(request: Request):
@@ -2450,6 +2622,10 @@ async def admin_fingerprint_login(request: Request):
         db.execute("INSERT INTO login_attempts (ip, hwid, fingerprint_id, success) VALUES (?,?,?,?)",
                    (ip, hwid, fp[:32], 0))
         db.commit()
+        publish_event("failed_login", {
+            "ts": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
+            "ip": ip, "hwid": (hwid or "")[:16], "fp": (fp or "")[:8],
+        })
         remaining = MAX_FAILED_ATTEMPTS - db.execute(
             "SELECT COUNT(*) FROM login_attempts WHERE ip=? AND success=0 AND attempted_at > datetime('now', ?)",
             (ip, f'-{BAN_WINDOW_SEC} seconds')
@@ -2466,8 +2642,8 @@ async def admin_fingerprint_login(request: Request):
     db.commit()
 
     resp = JSONResponse({"ok": True, "session_id": sid})
-    resp.set_cookie(key="ghostlink_sid", value=sid, httponly=True, samesite="strict", max_age=SESSION_TIMEOUT_SEC, path="/")
-    resp.set_cookie(key="ghostlink_csrf", value=csrf, httponly=True, samesite="strict", max_age=SESSION_TIMEOUT_SEC, path="/")
+    resp.set_cookie(key="ghostlink_sid", value=sid, httponly=True, samesite="lax", max_age=SESSION_TIMEOUT_SEC, path="/")
+    resp.set_cookie(key="ghostlink_csrf", value=csrf, httponly=True, samesite="lax", max_age=SESSION_TIMEOUT_SEC, path="/")
     return resp
 
 @app.post("/api/v1/admin/setup")
@@ -2490,7 +2666,7 @@ async def admin_initial_setup(request: Request):
     return {"ok": True, "fingerprint_id": fp_id, "note": "Save this fingerprint — it cannot be recovered"}
 
 @app.post("/api/v1/admin/fingerprint-enroll")
-async def admin_fingerprint_enroll(request: Request, session=Depends(require_admin)):
+async def admin_fingerprint_enroll(request: Request, session=Depends(require_admin_csrf)):
     """Generate a new fingerprint."""
     label = (await request.json()).get("label", "Admin")
     fp_id = ''.join(uuid.uuid4().hex for _ in range(8))
@@ -2510,7 +2686,26 @@ async def admin_logout(session=Depends(get_admin_session)):
     resp.delete_cookie("ghostlink_sid", path="/")
     return resp
 
-# ── Admin Dashboard ──────────────────────────────────────────────────
+# ─── Admin Dashboard backend (v2.4.0) ───────────────────────────────
+#
+# The /api/v1/admin/stats endpoint that shipped through v2.3.x rolled
+# every metric and table into one ~30-query payload. v2.4.0 splits that
+# into per-section endpoints so each tab fetches only what it renders:
+#
+#   /api/v1/admin/stats/overview     top bar + headline cards + chart
+#   /api/v1/admin/stats/users        user/friend/group-invite/top-sender tables
+#   /api/v1/admin/stats/devices      device + group tables
+#   /api/v1/admin/stats/crypto       identity, suites, prekey shortages, padding
+#   /api/v1/admin/stats/files        file transfers (live countdown is client-side)
+#   /api/v1/admin/stats/audit        audit log + failed logins + errors + sessions
+#   /api/v1/admin/stats/activity     time-series, recent messages, onion split
+#   /api/v1/admin/stats/badges       tiny counts for inactive-tab badges
+#
+# Plus drill-down endpoints for /admin/user/{id} and /admin/device/{id},
+# control "preview" endpoints that return the impact of destructive
+# actions before they fire, and /ws/admin for live push of audit log
+# rows, errors, and failed logins.
+# ────────────────────────────────────────────────────────────────────
 def _dir_size(path: str) -> int:
     total = 0
     try:
@@ -2530,28 +2725,68 @@ def _fmt_uptime(secs: float) -> str:
     if m: return f"{m}m {s}s"
     return f"{s}s"
 
-@app.get("/api/v1/admin/stats")
-async def admin_stats(session=Depends(require_admin)):
-    files = db.execute("SELECT id, sender_device_id, recipient_device_id, original_size, encrypted_size, server_ts, expires_at, downloaded FROM file_transfers ORDER BY server_ts DESC").fetchall()
-    total_enc_bytes = sum(f[4] for f in files)
-    active_now = db.execute("SELECT COUNT(*) FROM devices WHERE last_seen > datetime('now','-60 seconds')").fetchone()[0]
+def _file_mtime_iso(path: str) -> Optional[str]:
+    try:
+        ts = os.path.getmtime(path)
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec='seconds')
+    except OSError:
+        return None
+
+
+# Padded-envelope bucket boundaries used by the clients (powers-of-2
+# from 256 B up). Keep this in sync with crypto/padding.py — for now
+# we infer bucket purely from envelope length.
+_PAD_BUCKETS = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+
+def _padding_distribution() -> List[dict]:
+    counts = [0] * (len(_PAD_BUCKETS) + 1)
+    try:
+        rows = db.execute("SELECT LENGTH(envelope) FROM messages").fetchall()
+    except Exception:
+        rows = []
+    for (n,) in rows:
+        n = int(n or 0)
+        placed = False
+        for i, b in enumerate(_PAD_BUCKETS):
+            if n <= b:
+                counts[i] += 1; placed = True; break
+        if not placed:
+            counts[-1] += 1
+    out = []
+    for i, b in enumerate(_PAD_BUCKETS):
+        out.append({"bucket": f"≤ {b} B", "count": counts[i]})
+    out.append({"bucket": f"> {_PAD_BUCKETS[-1]} B", "count": counts[-1]})
+    return out
+
+
+def _meta_block() -> dict:
+    """Top-bar fields and the three operator toggles. Cheap, hit on
+    every overview poll."""
+    return {
+        "uptime_sec": round(time.time() - STARTUP_TS, 1),
+        "uptime_fmt": _fmt_uptime(time.time() - STARTUP_TS),
+        "server_time_utc": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
+        "version": SERVER_VERSION,
+        "registration_enabled": setting_get("registration_enabled", "1") == "1",
+        "maintenance_mode":     setting_get("maintenance_mode",     "0") == "1",
+        "onion_only":           setting_get("onion_only",           "0") == "1",
+    }
+
+
+@app.get("/api/v1/admin/stats/overview")
+async def admin_stats_overview(session=Depends(require_admin)):
+    active_now  = db.execute("SELECT COUNT(*) FROM devices WHERE last_seen > datetime('now','-60 seconds')").fetchone()[0]
     active_1min = db.execute("SELECT COUNT(*) FROM devices WHERE last_seen > datetime('now','-5 minutes')").fetchone()[0]
     os_counts = {row[0]: row[1] for row in db.execute("SELECT platform, COUNT(*) FROM devices GROUP BY platform").fetchall()}
     latency = db.execute("SELECT ROUND(AVG(latency_ms),1), MIN(latency_ms), MAX(latency_ms) FROM message_latency WHERE recorded_at > datetime('now','-1 hour')").fetchone()
-
-    # ── Volume / throughput ────────────────────────────────────────
-    msgs_1h = db.execute("SELECT COUNT(*) FROM messages WHERE server_ts > datetime('now','-1 hour')").fetchone()[0]
+    msgs_1h  = db.execute("SELECT COUNT(*) FROM messages WHERE server_ts > datetime('now','-1 hour')").fetchone()[0]
     msgs_24h = db.execute("SELECT COUNT(*) FROM messages WHERE server_ts > datetime('now','-1 day')").fetchone()[0]
-    files_24h = db.execute("SELECT COUNT(*) FROM file_transfers WHERE server_ts > datetime('now','-1 day')").fetchone()[0]
     bytes_24h = db.execute("SELECT COALESCE(SUM(LENGTH(envelope)),0) FROM messages WHERE server_ts > datetime('now','-1 day')").fetchone()[0]
     avg_msg_size = db.execute("SELECT ROUND(AVG(LENGTH(envelope)),0) FROM messages").fetchone()[0] or 0
-    sealed_pending = db.execute("SELECT COUNT(*) FROM messages WHERE sealed=1 AND delivered=0").fetchone()[0]
-    v2_pending = db.execute("SELECT COUNT(*) FROM messages WHERE envelope_version>=2 AND delivered=0").fetchone()[0]
-    disappearing_pending = db.execute("SELECT COUNT(*) FROM messages WHERE expires_at IS NOT NULL AND delivered=0").fetchone()[0]
-    ratchet_devices = db.execute("SELECT COUNT(*) FROM devices WHERE x25519_pub IS NOT NULL").fetchone()[0]
-    otp_total = db.execute("SELECT COUNT(*) FROM one_time_prekeys").fetchone()[0]
+    failed_24h = db.execute("SELECT COUNT(*) FROM login_attempts WHERE success=0 AND attempted_at > datetime('now','-1 day')").fetchone()[0]
+    friend_pending_n = db.execute("SELECT COUNT(*) FROM friend_requests WHERE status='pending'").fetchone()[0]
+    group_pending_n  = db.execute("SELECT COUNT(*) FROM group_invites WHERE status='pending'").fetchone()[0]
 
-    # ── Hourly activity histogram (last 24h, server-local) ────────
     hourly = db.execute(
         "SELECT strftime('%Y-%m-%d %H:00', server_ts) AS hr, COUNT(*) "
         "FROM messages WHERE server_ts > datetime('now','-24 hours') "
@@ -2559,40 +2794,6 @@ async def admin_stats(session=Depends(require_admin)):
     ).fetchall()
     hourly_activity = [{"hour": r[0], "count": r[1]} for r in hourly]
 
-    # ── Security / audit ───────────────────────────────────────────
-    failed_24h = db.execute("SELECT COUNT(*) FROM login_attempts WHERE success=0 AND attempted_at > datetime('now','-1 day')").fetchone()[0]
-    failed_logins = [
-        {"ip": r[0], "hwid": (r[1] or "")[:16], "fp": (r[2] or "")[:8], "ts": r[3]}
-        for r in db.execute("SELECT ip, hwid, fingerprint_id, attempted_at FROM login_attempts WHERE success=0 ORDER BY attempted_at DESC LIMIT 50").fetchall()
-    ]
-    audit_rows = db.execute("SELECT actor, action, target, detail, ts FROM audit_log ORDER BY id DESC LIMIT 100").fetchall()
-    audit_log_rows = [{"actor": a[0], "action": a[1], "target": a[2], "detail": a[3], "ts": a[4]} for a in audit_rows]
-
-    # ── Pending requests / invites ────────────────────────────────
-    friend_pending = db.execute(
-        "SELECT fr.id, uf.username, ut.username, fr.reason, fr.created_at "
-        "FROM friend_requests fr JOIN users uf ON uf.id=fr.from_user_id "
-        "JOIN users ut ON ut.id=fr.to_user_id WHERE fr.status='pending' "
-        "ORDER BY fr.created_at DESC LIMIT 50"
-    ).fetchall()
-    group_pending = db.execute(
-        "SELECT gi.id, g.name, uf.username, ut.username, gi.reason, gi.created_at "
-        "FROM group_invites gi JOIN group_chats g ON g.id=gi.group_id "
-        "JOIN users uf ON uf.id=gi.from_user_id JOIN users ut ON ut.id=gi.to_user_id "
-        "WHERE gi.status='pending' ORDER BY gi.created_at DESC LIMIT 50"
-    ).fetchall()
-
-    # ── Top senders/recipients (24h, anonymized prefix) ───────────
-    top_send = db.execute(
-        "SELECT sender_device_id, COUNT(*) FROM messages WHERE server_ts > datetime('now','-1 day') "
-        "GROUP BY sender_device_id ORDER BY 2 DESC LIMIT 10"
-    ).fetchall()
-    top_recv = db.execute(
-        "SELECT recipient_device_id, COUNT(*) FROM messages WHERE server_ts > datetime('now','-1 day') "
-        "GROUP BY recipient_device_id ORDER BY 2 DESC LIMIT 10"
-    ).fetchall()
-
-    # ── Telemetry (in-memory, since startup) ──────────────────────
     top_endpoints = [
         {"path": p, "count": c, "errors": ERR_COUNTS.get(p, 0)}
         for p, c in REQ_COUNTS.most_common(15)
@@ -2603,9 +2804,7 @@ async def admin_stats(session=Depends(require_admin)):
     if recent_latencies:
         s = sorted(recent_latencies)
         p95_req_ms = round(s[int(len(s)*0.95) - 1], 1) if len(s) > 1 else round(s[0], 1)
-    recent_errors = list(RECENT_ERRORS)[:50]
 
-    # ── Disk / DB ──────────────────────────────────────────────────
     db_size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
     files_dir_size = _dir_size(FILE_DIR)
     try:
@@ -2614,87 +2813,649 @@ async def admin_stats(session=Depends(require_admin)):
     except Exception:
         disk_total = disk_free = 0
 
-    # ── Toggles ────────────────────────────────────────────────────
-    registration_enabled = setting_get("registration_enabled", "1") == "1"
-    maintenance_mode = setting_get("maintenance_mode", "0") == "1"
+    total_req = ONION_REQ_COUNT + CLEAR_REQ_COUNT
+    onion_pct = round((ONION_REQ_COUNT / total_req) * 100, 1) if total_req else 0
 
-    return {
-        "uptime_sec": round(time.time() - STARTUP_TS, 1),
-        "uptime_fmt": _fmt_uptime(time.time() - STARTUP_TS),
-        "server_time_utc": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
-        "version": "2.1.0",
-        "registration_enabled": registration_enabled,
-        "maintenance_mode": maintenance_mode,
-        "total_users": db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
-        "total_devices": db.execute("SELECT COUNT(*) FROM devices").fetchone()[0],
-        "total_messages": db.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
-        "undelivered": db.execute("SELECT COUNT(*) FROM messages WHERE delivered=0").fetchone()[0],
-        "total_groups": db.execute("SELECT COUNT(*) FROM group_chats").fetchone()[0],
+    out = dict(_meta_block())
+    out.update({
+        "total_users":       db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
+        "total_devices":     db.execute("SELECT COUNT(*) FROM devices").fetchone()[0],
+        "total_messages":    db.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
+        "undelivered":       db.execute("SELECT COUNT(*) FROM messages WHERE delivered=0").fetchone()[0],
+        "total_groups":      db.execute("SELECT COUNT(*) FROM group_chats").fetchone()[0],
         "total_friendships": db.execute("SELECT COUNT(*) FROM friendships").fetchone()[0],
-        "active_today": db.execute("SELECT COUNT(*) FROM devices WHERE last_seen > datetime('now','-1 day')").fetchone()[0],
+        "active_today":      db.execute("SELECT COUNT(*) FROM devices WHERE last_seen > datetime('now','-1 day')").fetchone()[0],
         "active_now": active_now,
         "active_1min": active_1min,
-        "msgs_1h": msgs_1h, "msgs_24h": msgs_24h, "files_24h": files_24h,
-        "bytes_24h": bytes_24h, "avg_msg_size": int(avg_msg_size),
-        "sealed_pending": sealed_pending,
-        "v2_pending": v2_pending,
-        "disappearing_pending": disappearing_pending,
-        "pq_available": PQ_AVAILABLE,
-        "pq_suite": "ECDH-P384+ML-KEM-1024" if PQ_AVAILABLE else "",
-        "identity_fingerprint": SERVER_IDENTITY["fingerprint"] if SERVER_IDENTITY else "",
-        "identity_suite": "Ed25519+ML-DSA-87+SPHINCS+-256s" if SERVER_IDENTITY else "",
-        "onion_only": setting_get("onion_only", "0") == "1",
-        "ratchet_devices": ratchet_devices,
-        "one_time_prekeys_total": otp_total,
-        "cover_count": COVER_COUNT,
-        "cover_bytes": COVER_BYTES,
-        "anon_creds_available": ANON_CREDS_AVAILABLE,
-        "anon_creds_redeemed_total": db.execute("SELECT COUNT(*) FROM redeemed_credentials").fetchone()[0] if ANON_CREDS_AVAILABLE else 0,
-        "srp_available": SRP_AVAILABLE,
-        "at_rest_available": AT_REST_AVAILABLE and DATA_KEY is not None,
-        "srp_users": db.execute("SELECT COUNT(*) FROM users WHERE srp_verifier IS NOT NULL").fetchone()[0],
-        "treekem_groups": db.execute("SELECT COUNT(*) FROM treekem_state").fetchone()[0],
-        "device_link_active": db.execute("SELECT COUNT(*) FROM device_link_sessions WHERE consumed=0 AND expires_at > datetime('now')").fetchone()[0],
         "os_windows": os_counts.get("windows", 0),
         "os_android": os_counts.get("android", 0),
-        "os_ios": os_counts.get("ios", 0),
+        "os_ios":     os_counts.get("ios", 0),
+        "msgs_1h": msgs_1h, "msgs_24h": msgs_24h,
+        "bytes_24h": bytes_24h, "avg_msg_size": int(avg_msg_size),
         "avg_latency_ms": latency[0] or 0,
         "min_latency_ms": latency[1] or 0,
         "max_latency_ms": latency[2] or 0,
-        "file_count": len(files),
-        "file_total_bytes": total_enc_bytes,
-        "file_total_gb": round(total_enc_bytes / (1024**3), 4),
+        "avg_req_ms": avg_req_ms,
+        "p95_req_ms": p95_req_ms,
+        "file_count": db.execute("SELECT COUNT(*) FROM file_transfers").fetchone()[0],
+        "file_total_bytes": db.execute("SELECT COALESCE(SUM(encrypted_size),0) FROM file_transfers").fetchone()[0],
         "db_size_bytes": db_size,
         "files_dir_bytes": files_dir_size,
         "disk_free_bytes": disk_free,
         "disk_total_bytes": disk_total,
         "failed_logins_24h": failed_24h,
-        "pending_friend_requests": len(friend_pending),
-        "pending_group_invites": len(group_pending),
+        "pending_friend_requests": friend_pending_n,
+        "pending_group_invites":  group_pending_n,
         "requests_total": sum(REQ_COUNTS.values()),
-        "errors_total": sum(ERR_COUNTS.values()),
-        "avg_req_ms": avg_req_ms,
-        "p95_req_ms": p95_req_ms,
+        "errors_total":   sum(ERR_COUNTS.values()),
         "ecdh_cache_size": len(ecdh_cache),
+        "cover_count": COVER_COUNT,
+        "cover_bytes": COVER_BYTES,
+        "onion_pct": onion_pct,
         "hourly_activity": hourly_activity,
-        "top_senders": [{"id": r[0][:12], "count": r[1]} for r in top_send],
-        "top_recipients": [{"id": r[0][:12], "count": r[1]} for r in top_recv],
         "top_endpoints": top_endpoints,
-        "recent_errors": recent_errors,
-        "audit_log": audit_log_rows,
-        "failed_logins": failed_logins,
-        "friend_requests_pending": [{"id": r[0], "from": r[1], "to": r[2], "reason": ar_dec(r[3]), "created": r[4]} for r in friend_pending],
-        "group_invites_pending": [{"id": r[0], "group": r[1], "from": r[2], "to": r[3], "reason": ar_dec(r[4]), "created": r[5]} for r in group_pending],
-        "files": [{"id": f[0], "sender": f[1][:12], "recipient": f[2][:12], "orig_size": f[3], "enc_size": f[4], "server_ts": f[5], "expires_at": f[6], "downloaded": bool(f[7])} for f in files],
-        "recent_messages": [{"ts": m[0], "sender": m[1], "recipient": m[2], "size": m[3], "delivered": bool(m[4])} for m in db.execute("SELECT server_ts, sender_device_id, recipient_device_id, LENGTH(envelope), delivered FROM messages ORDER BY server_ts DESC LIMIT 50").fetchall()],
-        "devices": [{"id": d[0], "platform": d[1], "name": d[2], "registered": d[3], "last_seen": d[4] or "never"} for d in db.execute("SELECT id, platform, device_name, registered_at, last_seen FROM devices ORDER BY registered_at DESC LIMIT 100").fetchall()],
-        "users": [{"username": u[0], "user_id": u[1], "created": u[2], "devices": u[3]} for u in db.execute("SELECT u.username, u.id, u.created_at, (SELECT COUNT(*) FROM devices WHERE user_id=u.id) FROM users u ORDER BY u.created_at DESC LIMIT 100").fetchall()],
-        "groups": [{"id": g[0], "name": g[1], "members": g[2], "created": g[3]} for g in db.execute("SELECT g.id, g.name, COUNT(gm.device_id), g.created_at FROM group_chats g LEFT JOIN group_members gm ON g.id=gm.group_id GROUP BY g.id ORDER BY g.created_at DESC").fetchall()],
-        "sessions": [{"id": s[0], "ip": ar_dec(s[1]), "login_at": s[2], "last_activity": s[3], "active": not bool(s[4])} for s in db.execute("SELECT id, ip, login_at, last_activity, logged_out FROM admin_sessions ORDER BY login_at DESC LIMIT 50").fetchall()],
+    })
+    return out
+
+
+@app.get("/api/v1/admin/stats/users")
+async def admin_stats_users(session=Depends(require_admin)):
+    users = [
+        {"username": u[0], "user_id": u[1], "created": u[2], "devices": u[3]}
+        for u in db.execute(
+            "SELECT u.username, u.id, u.created_at, "
+            "(SELECT COUNT(*) FROM devices WHERE user_id=u.id) "
+            "FROM users u ORDER BY u.created_at DESC LIMIT 500"
+        ).fetchall()
+    ]
+    friend_pending = db.execute(
+        "SELECT fr.id, uf.username, ut.username, fr.reason, fr.created_at "
+        "FROM friend_requests fr JOIN users uf ON uf.id=fr.from_user_id "
+        "JOIN users ut ON ut.id=fr.to_user_id WHERE fr.status='pending' "
+        "ORDER BY fr.created_at DESC LIMIT 100"
+    ).fetchall()
+    group_pending = db.execute(
+        "SELECT gi.id, g.name, uf.username, ut.username, gi.reason, gi.created_at "
+        "FROM group_invites gi JOIN group_chats g ON g.id=gi.group_id "
+        "JOIN users uf ON uf.id=gi.from_user_id JOIN users ut ON ut.id=gi.to_user_id "
+        "WHERE gi.status='pending' ORDER BY gi.created_at DESC LIMIT 100"
+    ).fetchall()
+    top_send = db.execute(
+        "SELECT sender_device_id, COUNT(*) FROM messages WHERE server_ts > datetime('now','-1 day') "
+        "GROUP BY sender_device_id ORDER BY 2 DESC LIMIT 10"
+    ).fetchall()
+    top_recv = db.execute(
+        "SELECT recipient_device_id, COUNT(*) FROM messages WHERE server_ts > datetime('now','-1 day') "
+        "GROUP BY recipient_device_id ORDER BY 2 DESC LIMIT 10"
+    ).fetchall()
+    return {
+        "users": users,
+        "friend_requests_pending": [
+            {"id": r[0], "from": r[1], "to": r[2], "reason": ar_dec(r[3]), "created": r[4]}
+            for r in friend_pending
+        ],
+        "group_invites_pending": [
+            {"id": r[0], "group": r[1], "from": r[2], "to": r[3], "reason": ar_dec(r[4]), "created": r[5]}
+            for r in group_pending
+        ],
+        "top_senders":    [{"id": r[0][:12], "count": r[1]} for r in top_send],
+        "top_recipients": [{"id": r[0][:12], "count": r[1]} for r in top_recv],
     }
 
+
+@app.get("/api/v1/admin/stats/devices")
+async def admin_stats_devices(session=Depends(require_admin)):
+    devices = [
+        {"id": d[0], "platform": d[1], "name": d[2], "registered": d[3], "last_seen": d[4] or "never"}
+        for d in db.execute(
+            "SELECT id, platform, device_name, registered_at, last_seen "
+            "FROM devices ORDER BY registered_at DESC LIMIT 500"
+        ).fetchall()
+    ]
+    groups = [
+        {"id": g[0], "name": g[1], "members": g[2], "created": g[3]}
+        for g in db.execute(
+            "SELECT g.id, g.name, COUNT(gm.device_id), g.created_at "
+            "FROM group_chats g LEFT JOIN group_members gm ON g.id=gm.group_id "
+            "GROUP BY g.id ORDER BY g.created_at DESC"
+        ).fetchall()
+    ]
+    return {"devices": devices, "groups": groups}
+
+
+@app.get("/api/v1/admin/stats/crypto")
+async def admin_stats_crypto(session=Depends(require_admin)):
+    low_prekey = db.execute(
+        "SELECT d.id, u.username, d.last_seen, "
+        "(SELECT COUNT(*) FROM one_time_prekeys WHERE device_id=d.id) AS pk "
+        "FROM devices d LEFT JOIN users u ON u.id=d.user_id "
+        "WHERE d.x25519_pub IS NOT NULL "
+        "AND (SELECT COUNT(*) FROM one_time_prekeys WHERE device_id=d.id) < 5 "
+        "ORDER BY pk ASC, d.last_seen DESC LIMIT 50"
+    ).fetchall()
+    return {
+        "identity_fingerprint": SERVER_IDENTITY["fingerprint"] if SERVER_IDENTITY else "",
+        "identity_suite": "Ed25519+ML-DSA-87+SPHINCS+-256s" if SERVER_IDENTITY else "",
+        "identity_created_at": _file_mtime_iso(IDENTITY_PATH),
+        "pq_available": PQ_AVAILABLE,
+        "pq_suite": "ECDH-P384+ML-KEM-1024" if PQ_AVAILABLE else "",
+        "anon_creds_available": ANON_CREDS_AVAILABLE,
+        "anon_creds_redeemed_total":
+            db.execute("SELECT COUNT(*) FROM redeemed_credentials").fetchone()[0]
+            if ANON_CREDS_AVAILABLE else 0,
+        "anon_creds_created_at": _file_mtime_iso(ANON_CREDS_KEY_PATH),
+        "srp_available": SRP_AVAILABLE,
+        "srp_users": db.execute("SELECT COUNT(*) FROM users WHERE srp_verifier IS NOT NULL").fetchone()[0],
+        "at_rest_available": AT_REST_AVAILABLE and DATA_KEY is not None,
+        "at_rest_created_at": _file_mtime_iso(DATA_KEY_PATH),
+        "ratchet_devices": db.execute("SELECT COUNT(*) FROM devices WHERE x25519_pub IS NOT NULL").fetchone()[0],
+        "one_time_prekeys_total": db.execute("SELECT COUNT(*) FROM one_time_prekeys").fetchone()[0],
+        "treekem_groups": db.execute("SELECT COUNT(*) FROM treekem_state").fetchone()[0],
+        "device_link_active": db.execute(
+            "SELECT COUNT(*) FROM device_link_sessions "
+            "WHERE consumed=0 AND expires_at > datetime('now')"
+        ).fetchone()[0],
+        "padding_distribution": _padding_distribution(),
+        "low_prekey_devices": [
+            {"device_id": r[0], "username": r[1], "last_seen": r[2], "prekeys": r[3]}
+            for r in low_prekey
+        ],
+    }
+
+
+@app.get("/api/v1/admin/stats/files")
+async def admin_stats_files(session=Depends(require_admin)):
+    files = db.execute(
+        "SELECT id, sender_device_id, recipient_device_id, original_size, "
+        "encrypted_size, server_ts, expires_at, downloaded "
+        "FROM file_transfers ORDER BY server_ts DESC"
+    ).fetchall()
+    return {
+        "files": [
+            {"id": f[0], "sender": f[1][:12], "recipient": f[2][:12],
+             "orig_size": f[3], "enc_size": f[4], "server_ts": f[5],
+             "expires_at": f[6], "downloaded": bool(f[7])}
+            for f in files
+        ],
+    }
+
+
+@app.get("/api/v1/admin/stats/audit")
+async def admin_stats_audit(
+    request: Request,
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    target: Optional[str] = None,
+    since_hours: Optional[float] = None,
+    format: Optional[str] = None,
+    session=Depends(require_admin),
+):
+    """Audit log with filters + optional CSV export. CSV mode streams as
+    a download; default mode bundles the audit table together with the
+    failed-logins, recent-errors, and admin-sessions views so the Audit
+    tab is one round-trip."""
+    q = "SELECT actor, action, target, detail, ts FROM audit_log WHERE 1=1"
+    args: list = []
+    if actor:
+        q += " AND actor LIKE ?";  args.append(f"%{actor}%")
+    if action:
+        q += " AND action LIKE ?"; args.append(f"%{action}%")
+    if target:
+        q += " AND target LIKE ?"; args.append(f"%{target}%")
+    if since_hours and since_hours > 0:
+        q += " AND ts > datetime('now', ?)"
+        args.append(f"-{float(since_hours)} hours")
+    q += " ORDER BY id DESC LIMIT 500"
+    rows = db.execute(q, args).fetchall()
+    audit = [
+        {"actor": a[0], "action": a[1], "target": a[2], "detail": a[3], "ts": a[4]}
+        for a in rows
+    ]
+
+    if (format or "").lower() == "csv":
+        import io, csv
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["ts", "actor", "action", "target", "detail"])
+        for r in audit:
+            w.writerow([r["ts"], r["actor"], r["action"], r["target"], r["detail"]])
+        return PlainTextResponse(
+            buf.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="ghostlink-audit.csv"'},
+        )
+
+    failed_logins = [
+        {"ip": r[0], "hwid": (r[1] or "")[:16], "fp": (r[2] or "")[:8], "ts": r[3]}
+        for r in db.execute(
+            "SELECT ip, hwid, fingerprint_id, attempted_at FROM login_attempts "
+            "WHERE success=0 ORDER BY attempted_at DESC LIMIT 50"
+        ).fetchall()
+    ]
+    sessions = [
+        {"id": s[0], "ip": ar_dec(s[1]), "login_at": s[2], "last_activity": s[3], "active": not bool(s[4])}
+        for s in db.execute(
+            "SELECT id, ip, login_at, last_activity, logged_out "
+            "FROM admin_sessions ORDER BY login_at DESC LIMIT 50"
+        ).fetchall()
+    ]
+    return {
+        "audit_log": audit,
+        "failed_logins": failed_logins,
+        "recent_errors": list(RECENT_ERRORS)[:50],
+        "sessions": sessions,
+    }
+
+
+@app.get("/api/v1/admin/stats/activity")
+async def admin_stats_activity(session=Depends(require_admin)):
+    """Time-series data, recent message stream, onion vs clearnet split."""
+    # 7-day hourly buckets. We aggregate from real timestamped tables so
+    # we get history even before the server_stats_history snapshotter
+    # filled in. The snapshot table is only used for cumulative counters
+    # like requests_total/errors_total that don't have per-event tables.
+    series_buckets = []
+    for h in range(168, -1, -1):
+        end = datetime.now(tz=timezone.utc) - timedelta(hours=h)
+        series_buckets.append(end.strftime('%Y-%m-%d %H:00'))
+
+    def _hourly_counts(table: str, col: str) -> dict:
+        rows = db.execute(
+            f"SELECT strftime('%Y-%m-%d %H:00', {col}) AS hr, COUNT(*) "
+            f"FROM {table} WHERE {col} > datetime('now','-7 days') "
+            "GROUP BY hr"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    msgs_h     = _hourly_counts("messages", "server_ts")
+    new_users_h = _hourly_counts("users", "created_at")
+    failed_h   = db.execute(
+        "SELECT strftime('%Y-%m-%d %H:00', attempted_at), COUNT(*) "
+        "FROM login_attempts WHERE success=0 AND attempted_at > datetime('now','-7 days') "
+        "GROUP BY 1"
+    ).fetchall()
+    failed_h = {r[0]: r[1] for r in failed_h}
+
+    # Snapshot history for the things that don't live in event tables.
+    snap_rows = db.execute(
+        "SELECT strftime('%Y-%m-%d %H:00', taken_at) AS hr, "
+        "MAX(active_devices), MAX(files_dir_bytes), MAX(errors_total), MAX(requests_total) "
+        "FROM server_stats_history WHERE taken_at > datetime('now','-7 days') "
+        "GROUP BY hr ORDER BY hr"
+    ).fetchall()
+    snaps = {r[0]: {"active_devices": r[1] or 0, "storage_bytes": r[2] or 0,
+                    "errors_cum": r[3] or 0, "requests_cum": r[4] or 0}
+             for r in snap_rows}
+
+    # Convert cumulative errors_total into per-hour deltas.
+    series = []
+    prev_err = None
+    for b in series_buckets:
+        snap = snaps.get(b, {})
+        err_cum = snap.get("errors_cum", 0)
+        if prev_err is None:
+            errors_delta = 0
+        else:
+            errors_delta = max(0, err_cum - prev_err)
+        prev_err = err_cum
+        series.append({
+            "bucket": b,
+            "messages":       msgs_h.get(b, 0),
+            "new_users":      new_users_h.get(b, 0),
+            "failed_logins":  failed_h.get(b, 0),
+            "active_devices": snap.get("active_devices", 0),
+            "storage_bytes":  snap.get("storage_bytes",  0),
+            "errors":         errors_delta,
+        })
+
+    recent_messages = [
+        {"ts": m[0], "sender": m[1], "recipient": m[2], "size": m[3], "delivered": bool(m[4])}
+        for m in db.execute(
+            "SELECT server_ts, sender_device_id, recipient_device_id, "
+            "LENGTH(envelope), delivered FROM messages "
+            "ORDER BY server_ts DESC LIMIT 50"
+        ).fetchall()
+    ]
+    return {
+        "series": series,
+        "recent_messages": recent_messages,
+        "onion_requests": ONION_REQ_COUNT,
+        "clear_requests": CLEAR_REQ_COUNT,
+    }
+
+
+@app.get("/api/v1/admin/stats/badges")
+async def admin_stats_badges(session=Depends(require_admin)):
+    """Tiny counts for the inactive-tab badges. Fast — used by every poll."""
+    return {
+        "users":   db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
+        "devices": db.execute("SELECT COUNT(*) FROM devices").fetchone()[0],
+        "files":   db.execute("SELECT COUNT(*) FROM file_transfers").fetchone()[0],
+        "audit":   db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0],
+    }
+
+
+@app.get("/api/v1/admin/stats")
+async def admin_stats_legacy(session=Depends(require_admin)):
+    """Backwards-compat alias. External scripts pointed at the old monolithic
+    endpoint still get the overview block. New dashboard JS hits the
+    per-section endpoints directly."""
+    return await admin_stats_overview(session)
+
+
+# ─── Per-user drill-down ────────────────────────────────────────────
+@app.get("/admin/user/{user_id}")
+async def admin_user_page(user_id: str, session=Depends(require_admin)):
+    return _serve_admin_html("user.html")
+
+
+@app.get("/api/v1/admin/users/{user_id}/details")
+async def admin_user_details(user_id: str, session=Depends(require_admin)):
+    user = db.execute(
+        "SELECT username, created_at FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    if not user:
+        raise HTTPException(404, "user not found")
+    username, created_at = user
+
+    devices = []
+    for d in db.execute(
+        "SELECT id, platform, device_name, registered_at, last_seen "
+        "FROM devices WHERE user_id=? ORDER BY registered_at DESC", (user_id,)
+    ).fetchall():
+        pk = db.execute("SELECT COUNT(*) FROM one_time_prekeys WHERE device_id=?", (d[0],)).fetchone()[0]
+        devices.append({
+            "id": d[0], "platform": d[1], "name": d[2],
+            "registered": d[3], "last_seen": d[4] or "never", "prekeys": pk,
+        })
+    dev_ids = [d["id"] for d in devices]
+
+    if dev_ids:
+        ph = ",".join("?" * len(dev_ids))
+        msgs_24h = db.execute(
+            f"SELECT COUNT(*) FROM messages WHERE sender_device_id IN ({ph}) "
+            f"AND server_ts > datetime('now','-1 day')", dev_ids).fetchone()[0]
+        msgs_7d = db.execute(
+            f"SELECT COUNT(*) FROM messages WHERE sender_device_id IN ({ph}) "
+            f"AND server_ts > datetime('now','-7 days')", dev_ids).fetchone()[0]
+        msgs_all = db.execute(
+            f"SELECT COUNT(*) FROM messages WHERE sender_device_id IN ({ph})", dev_ids).fetchone()[0]
+    else:
+        msgs_24h = msgs_7d = msgs_all = 0
+
+    friend_rows = db.execute(
+        "SELECT CASE WHEN f.user_a=? THEN f.user_b ELSE f.user_a END, "
+        "       CASE WHEN f.user_a=? THEN 'a→b' ELSE 'b→a' END, "
+        "       f.created_at "
+        "FROM friendships f WHERE f.user_a=? OR f.user_b=? "
+        "ORDER BY f.created_at DESC LIMIT 200",
+        (user_id, user_id, user_id, user_id),
+    ).fetchall()
+    friends = []
+    for peer_id, direction, ts in friend_rows:
+        peer = db.execute("SELECT username FROM users WHERE id=?", (peer_id,)).fetchone()
+        friends.append({
+            "user_id": peer_id, "username": peer[0] if peer else "(unknown)",
+            "direction": direction, "established": ts,
+        })
+
+    groups = [
+        {"id": r[0], "name": r[1], "via_device": r[2]}
+        for r in db.execute(
+            "SELECT g.id, g.name, gm.device_id FROM group_chats g "
+            "JOIN group_members gm ON gm.group_id=g.id "
+            "JOIN devices d ON d.id=gm.device_id "
+            "WHERE d.user_id=? ORDER BY g.created_at DESC LIMIT 200",
+            (user_id,),
+        ).fetchall()
+    ]
+
+    # Login history needs a per-user link. We don't have one yet — best we
+    # can do is fingerprint-based for admins (irrelevant here) and SRP login
+    # records when the schema has them. For regular users we report only the
+    # registration-flow audit mentions, which is honest.
+    logins: list = []
+    login_count_24h = 0
+    failed_login_count = 0
+
+    audit_mentions = [
+        {"actor": r[0], "action": r[1], "target": r[2], "detail": r[3], "ts": r[4]}
+        for r in db.execute(
+            "SELECT actor, action, target, detail, ts FROM audit_log "
+            "WHERE target=? OR detail LIKE ? "
+            "ORDER BY id DESC LIMIT 100",
+            (user_id, f"%{user_id}%"),
+        ).fetchall()
+    ]
+
+    return {
+        "user_id": user_id, "username": username, "created_at": created_at,
+        "device_count": len(devices), "devices": devices,
+        "msgs_24h": msgs_24h, "msgs_7d": msgs_7d, "msgs_all": msgs_all,
+        "friend_count": len(friends), "friendships": friends,
+        "group_count": len(groups), "groups": groups,
+        "login_count_24h": login_count_24h, "failed_login_count": failed_login_count,
+        "logins": logins,
+        "audit_mentions": audit_mentions,
+    }
+
+
+# ─── Per-device drill-down ──────────────────────────────────────────
+@app.get("/admin/device/{device_id}")
+async def admin_device_page(device_id: str, session=Depends(require_admin)):
+    return _serve_admin_html("device.html")
+
+
+@app.get("/api/v1/admin/devices/{device_id}/details")
+async def admin_device_details(device_id: str, session=Depends(require_admin)):
+    row = db.execute(
+        "SELECT d.id, d.platform, d.device_name, d.registered_at, d.last_seen, "
+        "d.user_id, d.x25519_pub, d.ratchet_published_at, u.username "
+        "FROM devices d LEFT JOIN users u ON u.id=d.user_id "
+        "WHERE d.id=?", (device_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "device not found")
+
+    (did, platform, name, registered_at, last_seen, user_id,
+     x25519_pub, ratchet_at, username) = row
+
+    one_time = db.execute(
+        "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id=?", (did,)
+    ).fetchone()[0]
+    msgs_sent_24h = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE sender_device_id=? AND server_ts > datetime('now','-1 day')", (did,)
+    ).fetchone()[0]
+    msgs_recv_24h = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE recipient_device_id=? AND server_ts > datetime('now','-1 day')", (did,)
+    ).fetchone()[0]
+    msgs_sent_total = db.execute("SELECT COUNT(*) FROM messages WHERE sender_device_id=?", (did,)).fetchone()[0]
+    msgs_recv_total = db.execute("SELECT COUNT(*) FROM messages WHERE recipient_device_id=?", (did,)).fetchone()[0]
+    pending_to   = db.execute("SELECT COUNT(*) FROM messages WHERE recipient_device_id=? AND delivered=0", (did,)).fetchone()[0]
+    pending_from = db.execute("SELECT COUNT(*) FROM messages WHERE sender_device_id=?    AND delivered=0", (did,)).fetchone()[0]
+    group_count  = db.execute("SELECT COUNT(*) FROM group_members WHERE device_id=?", (did,)).fetchone()[0]
+
+    siblings = [
+        {"id": s[0], "platform": s[1], "name": s[2], "last_seen": s[3] or "never"}
+        for s in db.execute(
+            "SELECT id, platform, device_name, last_seen FROM devices "
+            "WHERE user_id=? AND id<>? ORDER BY registered_at DESC", (user_id, did),
+        ).fetchall()
+    ] if user_id else []
+
+    recent_msgs = [
+        {"ts": m[0], "direction": m[1], "peer": m[2], "size": m[3], "delivered": bool(m[4])}
+        for m in db.execute(
+            "SELECT server_ts, "
+            "CASE WHEN sender_device_id=? THEN 'sent' ELSE 'recv' END, "
+            "CASE WHEN sender_device_id=? THEN recipient_device_id ELSE sender_device_id END, "
+            "LENGTH(envelope), delivered "
+            "FROM messages WHERE sender_device_id=? OR recipient_device_id=? "
+            "ORDER BY server_ts DESC LIMIT 50",
+            (did, did, did, did),
+        ).fetchall()
+    ]
+
+    # Best-effort: scan RECENT_ERRORS for paths that mention this device id.
+    needle = did[:12]
+    recent_errors = [e for e in list(RECENT_ERRORS) if needle in (e.get("path") or "")][:50]
+
+    spk_age = None
+    if ratchet_at:
+        try:
+            t = datetime.fromisoformat(ratchet_at.replace(" ", "T")).replace(tzinfo=timezone.utc)
+            spk_age = max(0, (datetime.now(tz=timezone.utc) - t).days)
+        except Exception:
+            spk_age = None
+
+    return {
+        "id": did, "platform": platform, "name": name,
+        "registered_at": registered_at, "last_seen": last_seen,
+        "user_id": user_id, "username": username,
+        "has_x25519": x25519_pub is not None,
+        "has_ed25519": False,  # not currently persisted by device
+        "one_time_prekeys": one_time,
+        "signed_prekey_age_days": spk_age,
+        "last_bundle_fetch": ratchet_at,
+        "ratchet": {
+            "signed_prekey_id": None,
+            "signed_prekey_at": ratchet_at,
+            "recv_count": msgs_recv_total,
+            "send_count": msgs_sent_total,
+        },
+        "msgs_sent_24h": msgs_sent_24h, "msgs_recv_24h": msgs_recv_24h,
+        "msgs_sent_total": msgs_sent_total, "msgs_recv_total": msgs_recv_total,
+        "undelivered_to_me": pending_to, "undelivered_from_me": pending_from,
+        "group_count": group_count,
+        "siblings": siblings,
+        "recent_messages": recent_msgs,
+        "recent_errors": recent_errors,
+        "recent_error_count": len(recent_errors),
+    }
+
+
+# ─── Control "preview" endpoints ────────────────────────────────────
+# Destructive actions ask for an impact preview before they fire so the
+# dashboard can show the operator exactly what is about to happen.
+@app.get("/api/v1/admin/control/clear-undelivered/preview")
+async def admin_preview_clear_undelivered(session=Depends(require_admin)):
+    n = db.execute("SELECT COUNT(*) FROM messages WHERE delivered=0").fetchone()[0]
+    b = db.execute("SELECT COALESCE(SUM(LENGTH(envelope)),0) FROM messages WHERE delivered=0").fetchone()[0]
+    return {
+        "messages": n,
+        "bytes": b,
+        "message": f"Will permanently delete {n} undelivered message(s) totalling {b} bytes.",
+    }
+
+
+@app.get("/api/v1/admin/control/purge-files/preview")
+async def admin_preview_purge_files(session=Depends(require_admin)):
+    rows = db.execute(
+        "SELECT COUNT(*), COALESCE(SUM(encrypted_size),0) "
+        "FROM file_transfers WHERE expires_at < datetime('now') OR downloaded=1"
+    ).fetchone()
+    return {
+        "files": rows[0],
+        "bytes": rows[1],
+        "message": f"Will remove {rows[0]} file(s), reclaiming {rows[1]} bytes from disk.",
+    }
+
+
+@app.get("/api/v1/admin/control/rotate-identity/preview")
+async def admin_preview_rotate_identity(session=Depends(require_admin)):
+    old_fp = SERVER_IDENTITY["fingerprint"] if SERVER_IDENTITY else ""
+    pinned_devices = db.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
+    return {
+        "current_fingerprint": old_fp,
+        "pinned_devices": pinned_devices,
+        "message": (
+            "Will discard the current server identity keypair and generate "
+            "a new one. All previously-pinned clients (~"
+            f"{pinned_devices} device(s)) must re-pin out-of-band."
+        ),
+    }
+
+
+# ─── WebSocket live tail ────────────────────────────────────────────
+def _ws_admin_session(ws: WebSocket):
+    """Validate the admin session cookie on a WebSocket handshake.
+    Returns the session row or None — caller is responsible for closing
+    the socket if None. We can't use FastAPI dependency injection here
+    because WebSockets aren't request-scoped the same way."""
+    sid = ws.cookies.get("ghostlink_sid")
+    if not sid:
+        # Fallback: some browsers don't attach cookies to WS upgrade
+        # requests. Accept ?token=<session-id> as an alternative.
+        qp_token = ws.query_params.get("token")
+        print(f"[admin_ws] cookie sid=None, query token={'present' if qp_token else 'None'}", flush=True)
+        sid = qp_token
+    if not sid:
+        return None
+    session = get_admin_session(sid)
+    if not session:
+        print(f"[admin_ws] get_admin_session returned None for sid={sid[:8]}...", flush=True)
+    return session
+
+
+@app.get("/api/v1/admin/ws-token")
+async def admin_ws_token(session=Depends(require_admin)):
+    """Return the session ID so the browser can pass it as a query parameter
+    to the WebSocket endpoint.  The browser already proves auth by sending the
+    HttpOnly ghostlink_sid cookie with this HTTP request."""
+    return {"token": session[0]}
+
+
+async def _admin_ws_handler(ws: WebSocket):
+    """Core admin WebSocket handler — called from /ws/admin or /ws/{device_id}
+    when device_id == 'admin' (the catch-all device route would otherwise
+    consume the connection before the explicit /ws/admin route fires)."""
+    peer = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
+    has_sid = "ghostlink_sid" in ws.cookies
+    session = _ws_admin_session(ws)
+    if not session:
+        print(f"[admin_ws] REJECT {peer} — has_sid={has_sid} session=None", flush=True)
+        try:
+            await ws.accept()
+            await ws.close(code=4401, reason="not authenticated")
+        except Exception as e:
+            print(f"[admin_ws] reject-close error: {e!r}", flush=True)
+        return
+    try:
+        await ws.accept()
+    except Exception as e:
+        print(f"[admin_ws] accept failed for {peer}: {e!r}", flush=True)
+        return
+    print(f"[admin_ws] ACCEPT {peer} sid={session[0][:8]}…", flush=True)
+    _WS_ADMIN_SUBS.add(ws)
+    try:
+        await ws.send_text(json.dumps({
+            "type": "hello",
+            "server_time_utc": datetime.now(tz=timezone.utc).isoformat(timespec='seconds'),
+            "version": SERVER_VERSION,
+        }))
+        while True:
+            msg = await ws.receive_text()
+            if msg and '"ping"' in msg:
+                try:
+                    await ws.send_text('{"type":"pong"}')
+                except Exception:
+                    break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[admin_ws] loop error {peer}: {e!r}", flush=True)
+    finally:
+        _WS_ADMIN_SUBS.discard(ws)
+        print(f"[admin_ws] CLOSED {peer}", flush=True)
+
+
+@app.websocket("/ws/admin")
+async def admin_ws(ws: WebSocket):
+    await _admin_ws_handler(ws)
+
+
 @app.delete("/api/v1/admin/devices/{device_id}")
-async def admin_delete_device(device_id: str, session=Depends(require_admin)):
+async def admin_delete_device(device_id: str, session=Depends(require_admin_csrf)):
     db.execute("DELETE FROM messages WHERE sender_device_id=? OR recipient_device_id=?", (device_id, device_id))
     db.execute("DELETE FROM group_members WHERE device_id=?", (device_id,))
     db.execute("DELETE FROM devices WHERE id=?", (device_id,))
@@ -2704,7 +3465,7 @@ async def admin_delete_device(device_id: str, session=Depends(require_admin)):
 
 # ── Admin Controls ────────────────────────────────────────────────
 @app.post("/api/v1/admin/control/purge-files")
-async def admin_purge_files(session=Depends(require_admin)):
+async def admin_purge_files(session=Depends(require_admin_csrf)):
     rows = db.execute("SELECT id, storage_name FROM file_transfers WHERE expires_at < datetime('now') OR downloaded=1").fetchall()
     removed = 0
     for fid, name in rows:
@@ -2718,7 +3479,7 @@ async def admin_purge_files(session=Depends(require_admin)):
     return {"removed": removed}
 
 @app.post("/api/v1/admin/control/vacuum")
-async def admin_vacuum(session=Depends(require_admin)):
+async def admin_vacuum(session=Depends(require_admin_csrf)):
     before = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
     try:
         db.execute("VACUUM")
@@ -2730,20 +3491,20 @@ async def admin_vacuum(session=Depends(require_admin)):
     return {"before": before, "after": after, "saved": before - after}
 
 @app.post("/api/v1/admin/control/clear-ecdh")
-async def admin_clear_ecdh(session=Depends(require_admin)):
+async def admin_clear_ecdh(session=Depends(require_admin_csrf)):
     with ecdh_lock:
         n = len(ecdh_cache); ecdh_cache.clear()
     audit_admin(session[0][:8], "clear_ecdh_cache", "", f"cleared={n}")
     return {"cleared": n}
 
 @app.post("/api/v1/admin/control/wipe-rate-limits")
-async def admin_wipe_rate_limits(session=Depends(require_admin)):
+async def admin_wipe_rate_limits(session=Depends(require_admin_csrf)):
     n = len(rate_limits); rate_limits.clear()
     audit_admin(session[0][:8], "wipe_rate_limits", "", f"buckets={n}")
     return {"cleared_buckets": n}
 
 @app.post("/api/v1/admin/control/kill-sessions")
-async def admin_kill_other_sessions(session=Depends(require_admin)):
+async def admin_kill_other_sessions(session=Depends(require_admin_csrf)):
     cur_sid = session[0]
     db.execute("UPDATE admin_sessions SET logged_out=1 WHERE logged_out=0 AND id != ?", (cur_sid,))
     n = db.execute("SELECT changes()").fetchone()[0]
@@ -2752,7 +3513,7 @@ async def admin_kill_other_sessions(session=Depends(require_admin)):
     return {"killed": n}
 
 @app.post("/api/v1/admin/control/clear-undelivered")
-async def admin_clear_undelivered(session=Depends(require_admin)):
+async def admin_clear_undelivered(session=Depends(require_admin_csrf)):
     n = db.execute("SELECT COUNT(*) FROM messages WHERE delivered=0").fetchone()[0]
     db.execute("DELETE FROM messages WHERE delivered=0")
     db.commit()
@@ -2760,7 +3521,7 @@ async def admin_clear_undelivered(session=Depends(require_admin)):
     return {"deleted": n}
 
 @app.post("/api/v1/admin/control/registration")
-async def admin_toggle_registration(request: Request, session=Depends(require_admin)):
+async def admin_toggle_registration(request: Request, session=Depends(require_admin_csrf)):
     body = await request.json()
     enabled = bool(body.get("enabled", True))
     setting_set("registration_enabled", "1" if enabled else "0")
@@ -2768,7 +3529,7 @@ async def admin_toggle_registration(request: Request, session=Depends(require_ad
     return {"registration_enabled": enabled}
 
 @app.post("/api/v1/admin/control/maintenance")
-async def admin_toggle_maintenance(request: Request, session=Depends(require_admin)):
+async def admin_toggle_maintenance(request: Request, session=Depends(require_admin_csrf)):
     body = await request.json()
     enabled = bool(body.get("enabled", False))
     setting_set("maintenance_mode", "1" if enabled else "0")
@@ -2776,7 +3537,7 @@ async def admin_toggle_maintenance(request: Request, session=Depends(require_adm
     return {"maintenance_mode": enabled}
 
 @app.post("/api/v1/admin/control/onion-only")
-async def admin_toggle_onion_only(request: Request, session=Depends(require_admin)):
+async def admin_toggle_onion_only(request: Request, session=Depends(require_admin_csrf)):
     """Reject any connection not arriving over a Tor onion service.
     Detection: client must present X-Onion-Proof or arrive via the local Tor
     SocksPort/HiddenServicePort wired into your tor config."""
@@ -2787,7 +3548,7 @@ async def admin_toggle_onion_only(request: Request, session=Depends(require_admi
     return {"onion_only": enabled}
 
 @app.post("/api/v1/admin/control/rotate-identity")
-async def admin_rotate_identity(session=Depends(require_admin)):
+async def admin_rotate_identity(session=Depends(require_admin_csrf)):
     """Generate a NEW server identity keypair. Existing pinned clients will
     refuse to connect until they re-pin the new fingerprint out-of-band."""
     if not HYBRID_SIG_AVAILABLE:
@@ -2801,7 +3562,7 @@ async def admin_rotate_identity(session=Depends(require_admin)):
     return {"old_fingerprint": old_fp, "new_fingerprint": new_fp}
 
 @app.delete("/api/v1/admin/users/{user_id}")
-async def admin_delete_user(user_id: str, session=Depends(require_admin)):
+async def admin_delete_user(user_id: str, session=Depends(require_admin_csrf)):
     devs = [r[0] for r in db.execute("SELECT id FROM devices WHERE user_id=?", (user_id,)).fetchall()]
     # Remove file blobs owned by those devices
     file_rows = db.execute(
@@ -2830,294 +3591,16 @@ async def admin_delete_user(user_id: str, session=Depends(require_admin)):
     return {"deleted_user": user_id, "devices_removed": len(devs), "files_removed": len(file_rows)}
 
 @app.delete("/api/v1/admin/sessions/{target_sid}")
-async def admin_kill_session(target_sid: str, session=Depends(require_admin)):
+async def admin_kill_session(target_sid: str, session=Depends(require_admin_csrf)):
     db.execute("UPDATE admin_sessions SET logged_out=1 WHERE id=?", (target_sid,))
     db.commit()
     audit_admin(session[0][:8], "kill_session", target_sid[:12], "")
     return {"killed": target_sid}
 
-# ── Admin Dashboard HTML ──────────────────────────────────────────
+# ── Admin Dashboard HTML ───────────────────────────────────────────
 @app.get("/admin")
 async def admin_dashboard(session=Depends(require_admin)):
-    return HTMLResponse(r"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GHOSTLINK Admin</title>
-<style>
-:root{--bg:#0a0e17;--bg2:#111827;--bg3:#0d1420;--border:#1a2535;--text:#c8d6e5;--dim:#6e7a8a;--accent:#00d4ff;--ok:#2ed573;--warn:#ffc048;--danger:#ff4757;--purple:#a55eea}
-*,*::before,*::after{box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);font-size:13px;margin:0;padding:0}
-.top{background:var(--bg2);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:18px;position:sticky;top:0;z-index:50}
-.top h1{font-size:18px;margin:0;color:var(--accent);letter-spacing:1.5px;font-weight:600}
-.top .meta{color:var(--dim);font-size:11px;font-family:Consolas,monospace}
-.top .spacer{flex:1}
-.top .toggle{display:inline-flex;align-items:center;gap:8px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;user-select:none}
-.top .toggle .dot{width:8px;height:8px;border-radius:50%;background:var(--danger);box-shadow:0 0 6px var(--danger)}
-.top .toggle.on .dot{background:var(--ok);box-shadow:0 0 6px var(--ok)}
-.top button.btn{background:transparent;border:1px solid var(--border);color:var(--dim);padding:6px 12px;border-radius:5px;cursor:pointer;font-size:11px;letter-spacing:.3px}
-.top button.btn:hover{color:var(--text);border-color:var(--accent)}
-.top button.danger{color:var(--danger);border-color:rgba(255,71,87,.4)}
-.top button.danger:hover{background:rgba(255,71,87,.1);color:var(--danger);border-color:var(--danger)}
-.row{display:flex;gap:12px;padding:0 20px;flex-wrap:wrap}
-.row.tight{padding:14px 20px 6px;gap:10px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;padding:14px 20px 6px}
-.card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px;min-width:0;overflow:hidden}
-.card .val{font-size:26px;font-weight:700;line-height:1.1;font-family:Consolas,monospace}
-.card .lbl{font-size:10px;color:var(--dim);text-transform:uppercase;margin-top:4px;letter-spacing:.6px}
-.card.accent .val{color:var(--accent)}.card.ok .val{color:var(--ok)}.card.warn .val{color:var(--warn)}.card.danger .val{color:var(--danger)}.card.purple .val{color:var(--purple)}
-.panel{background:var(--bg2);border:1px solid var(--border);border-radius:8px;margin:0 20px 14px;overflow:hidden}
-.panel-hdr{padding:10px 14px;border-bottom:1px solid var(--border);font-weight:600;color:var(--accent);letter-spacing:.6px;font-size:12px;display:flex;align-items:center;gap:10px}
-.panel-hdr .pill{background:var(--bg3);color:var(--dim);font-weight:400;border:1px solid var(--border);padding:2px 8px;border-radius:99px;font-size:10px}
-.panel-hdr .actions{margin-left:auto;display:flex;gap:6px}
-.panel-hdr .actions button{background:var(--bg3);border:1px solid var(--border);color:var(--dim);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:10px}
-.panel-hdr .actions button:hover{color:var(--text);border-color:var(--accent)}
-.panel-hdr .actions button.danger{color:var(--danger);border-color:rgba(255,71,87,.4)}
-.panel-hdr .actions button.danger:hover{background:rgba(255,71,87,.1)}
-.panel .body{max-height:360px;overflow:auto}
-table{width:100%;border-collapse:collapse;font-size:11px}
-th{text-align:left;padding:7px 12px;color:var(--dim);text-transform:uppercase;font-size:10px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg2);z-index:2}
-td{padding:7px 12px;border-bottom:1px solid rgba(26,37,53,.4);font-family:Consolas,monospace;vertical-align:top}
-tr:hover td{background:rgba(0,212,255,.03)}
-.tinybtn{background:var(--danger);color:#fff;border:none;padding:1px 8px;border-radius:3px;cursor:pointer;font-size:10px}
-.tinybtn.warn{background:var(--warn);color:#1a1a1a}
-.tinybtn:hover{filter:brightness(1.15)}
-.chart{display:flex;align-items:flex-end;gap:3px;height:90px;padding:8px 14px 12px}
-.chart .bar{flex:1;background:linear-gradient(180deg,var(--accent),rgba(0,212,255,.2));border-radius:2px 2px 0 0;position:relative;min-height:1px;transition:opacity .2s}
-.chart .bar:hover{opacity:.7}
-.chart .bar .tt{display:none;position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:var(--bg3);border:1px solid var(--border);padding:3px 6px;border-radius:3px;font-size:10px;white-space:nowrap;color:var(--text);font-family:Consolas,monospace;z-index:10}
-.chart .bar:hover .tt{display:block}
-.statusdot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
-.statusdot.ok{background:var(--ok)}.statusdot.warn{background:var(--warn)}.statusdot.dim{background:var(--dim)}
-.bars2col{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:10px 14px}
-.barlist{display:flex;flex-direction:column;gap:6px}
-.barlist .item{display:flex;align-items:center;gap:8px;font-size:11px;font-family:Consolas,monospace}
-.barlist .label{flex:0 0 140px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.barlist .track{flex:1;background:var(--bg3);height:10px;border-radius:3px;overflow:hidden;border:1px solid var(--border)}
-.barlist .fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--purple))}
-.barlist .num{flex:0 0 40px;text-align:right;color:var(--dim)}
-.tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:10px;letter-spacing:.4px;font-weight:600}
-.tag.ok{background:rgba(46,213,115,.15);color:var(--ok);border:1px solid rgba(46,213,115,.3)}
-.tag.danger{background:rgba(255,71,87,.15);color:var(--danger);border:1px solid rgba(255,71,87,.3)}
-.tag.warn{background:rgba(255,192,72,.15);color:var(--warn);border:1px solid rgba(255,192,72,.3)}
-.empty{padding:24px;text-align:center;color:var(--dim);font-style:italic}
-.kbd{background:var(--bg3);border:1px solid var(--border);border-bottom-width:2px;border-radius:3px;padding:0 4px;font-family:Consolas,monospace;font-size:10px;color:var(--dim)}
-</style></head><body>
-<div class="top">
-<h1>GHOSTLINK</h1>
-<span class="meta" id="metaUptime">uptime —</span>
-<span class="meta" id="metaTime">—</span>
-<span class="meta" id="metaVer">—</span>
-<span class="spacer"></span>
-<span class="toggle" id="regToggle" onclick="toggleSetting('registration', !regOn)"><span class="dot"></span><span id="regLbl">Registration —</span></span>
-<span class="toggle" id="mntToggle" onclick="toggleSetting('maintenance', !mntOn)"><span class="dot"></span><span id="mntLbl">Maintenance —</span></span>
-<span class="toggle" id="onionToggle" onclick="toggleSetting('onion-only', !onionOn)"><span class="dot"></span><span id="onionLbl">Onion —</span></span>
-<button class="btn" onclick="refresh()">Refresh</button>
-<button class="btn danger" onclick="logout()">Logout</button>
-</div>
-
-<div class="grid" id="stats"></div>
-
-<div class="panel"><div class="panel-hdr">Server Identity
-<div class="actions">
-<button onclick="copyFp()">Copy Fingerprint</button>
-<button class="danger" onclick="ctrl('rotate-identity','Rotate the server identity? All previously-pinned clients will refuse to connect until they re-pin the new fingerprint.')">Rotate Identity</button>
-</div>
-</div><div style="padding:14px;display:flex;gap:24px;flex-wrap:wrap;align-items:baseline">
-<div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Fingerprint (publish this)</div><div id="idFp" style="font-family:Consolas,monospace;font-size:18px;color:var(--accent);letter-spacing:1.5px;font-weight:600">—</div></div>
-<div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Signature Suite</div><div id="idSuite" style="font-family:Consolas,monospace;font-size:12px;color:var(--text)">—</div></div>
-<div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">PQ KEX Suite</div><div id="pqSuite" style="font-family:Consolas,monospace;font-size:12px;color:var(--text)">—</div></div>
-</div></div>
-
-<div class="row">
-<div class="panel" style="flex:1 1 60%;margin:0 0 14px"><div class="panel-hdr">Messages — last 24h <span class="pill" id="hourlyTotal">—</span></div><div class="chart" id="hourlyChart"></div></div>
-<div class="panel" style="flex:1 1 35%;margin:0 0 14px"><div class="panel-hdr">Top Endpoints (since boot)</div><div class="barlist" id="endpointList" style="padding:10px 14px"></div></div>
-</div>
-
-<div class="panel"><div class="panel-hdr">Server Controls
-<div class="actions">
-<button onclick="ctrl('purge-files','Purge expired/downloaded files?')">Purge Files</button>
-<button onclick="ctrl('vacuum','Vacuum the database? Reclaims disk space.')">VACUUM DB</button>
-<button onclick="ctrl('clear-ecdh','Clear ephemeral ECDH session cache?')">Clear ECDH Cache</button>
-<button onclick="ctrl('wipe-rate-limits','Reset all rate-limit buckets?')">Reset Rate Limits</button>
-<button class="danger" onclick="ctrl('kill-sessions','Sign out every OTHER admin session?')">Kill Other Admin Sessions</button>
-<button class="danger" onclick="ctrl('clear-undelivered','PERMANENTLY drop all undelivered messages? This cannot be undone.')">Drop Undelivered</button>
-</div>
-</div><div style="padding:8px 14px;color:var(--dim);font-size:11px">Use sparingly. Every control action is recorded in the audit log.</div></div>
-
-<div class="panel"><div class="panel-hdr">Top Senders/Recipients — 24h</div>
-<div class="bars2col">
-<div><div style="color:var(--dim);font-size:10px;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px">Senders</div><div class="barlist" id="topSenders"></div></div>
-<div><div style="color:var(--dim);font-size:10px;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px">Recipients</div><div class="barlist" id="topRecips"></div></div>
-</div></div>
-
-<div class="panel"><div class="panel-hdr">Pending Friend Requests <span class="pill" id="frPill">0</span></div><div class="body"><table><thead><tr><th>From</th><th>To</th><th>Reason</th><th>Created</th></tr></thead><tbody id="frTable"></tbody></table></div></div>
-
-<div class="panel"><div class="panel-hdr">Pending Group Invites <span class="pill" id="giPill">0</span></div><div class="body"><table><thead><tr><th>Group</th><th>From</th><th>To</th><th>Reason</th><th>Created</th></tr></thead><tbody id="giTable"></tbody></table></div></div>
-
-<div class="panel"><div class="panel-hdr">Failed Logins <span class="pill" id="flPill">0</span></div><div class="body"><table><thead><tr><th>IP</th><th>HWID</th><th>Fingerprint</th><th>Time</th></tr></thead><tbody id="flTable"></tbody></table></div></div>
-
-<div class="panel"><div class="panel-hdr">Recent Errors <span class="pill" id="errPill">0</span></div><div class="body"><table><thead><tr><th>Time</th><th>Path</th><th>Status</th><th>Detail</th></tr></thead><tbody id="errTable"></tbody></table></div></div>
-
-<div class="panel"><div class="panel-hdr">Audit Log <span class="pill">last 100</span></div><div class="body"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody id="auditTable"></tbody></table></div></div>
-
-<div class="panel"><div class="panel-hdr">Recent Messages</div><div class="body"><table><thead><tr><th>Time</th><th>Sender</th><th>Recipient</th><th>Size</th><th>Status</th></tr></thead><tbody id="msgTable"></tbody></table></div></div>
-
-<div class="panel"><div class="panel-hdr">Users
-<div class="actions"><span style="color:var(--dim);font-size:10px">click X to nuke user + all their data</span></div>
-</div><div class="body"><table><thead><tr><th>Username</th><th>User ID</th><th>Devices</th><th>Registered</th><th></th></tr></thead><tbody id="userTable"></tbody></table></div></div>
-
-<div class="panel"><div class="panel-hdr">Devices <span class="pill">click X to delete</span></div><div class="body"><table><thead><tr><th>Device ID</th><th>Platform</th><th>Name</th><th>Registered</th><th>Last Seen</th><th></th></tr></thead><tbody id="devTable"></tbody></table></div></div>
-
-<div class="panel"><div class="panel-hdr">Groups</div><div class="body"><table><thead><tr><th>Group ID</th><th>Name</th><th>Members</th><th>Created</th></tr></thead><tbody id="grpTable"></tbody></table></div></div>
-
-<div class="panel"><div class="panel-hdr">Admin Sessions</div><div class="body"><table><thead><tr><th>Session ID</th><th>IP</th><th>Login</th><th>Last Activity</th><th>Status</th><th></th></tr></thead><tbody id="sessTable"></tbody></table></div></div>
-
-<div class="panel"><div class="panel-hdr">Files <span class="pill">live countdown</span></div><div class="body"><table><thead><tr><th>File ID</th><th>Sender</th><th>Recipient</th><th>Orig</th><th>Enc</th><th>Uploaded</th><th>Countdown</th><th>Status</th></tr></thead><tbody id="fileTable"></tbody></table></div></div>
-
-<script>
-let fileData=[],regOn=false,mntOn=false,onionOn=false;
-function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c])}
-function fmtSize(b){if(!b&&b!==0)return'—';if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';if(b<1073741824)return(b/1048576).toFixed(1)+' MB';return(b/1073741824).toFixed(2)+' GB'}
-function fmtPct(part,total){if(!total)return'0%';return((part/total)*100).toFixed(1)+'%'}
-
-async function refresh(){
-  try{
-    const r=await fetch('/api/v1/admin/stats');
-    if(r.status===401){location='/admin/login';return}
-    const d=await r.json();
-    fileData=d.files||[];
-    regOn=d.registration_enabled;mntOn=d.maintenance_mode;onionOn=d.onion_only;
-    document.getElementById('metaUptime').textContent='uptime '+d.uptime_fmt;
-    document.getElementById('metaTime').textContent=d.server_time_utc+' UTC';
-    document.getElementById('metaVer').textContent='v'+d.version;
-    document.getElementById('regToggle').classList.toggle('on',regOn);
-    document.getElementById('regLbl').textContent='Registration '+(regOn?'ON':'OFF');
-    document.getElementById('mntToggle').classList.toggle('on',mntOn);
-    document.getElementById('mntLbl').textContent='Maintenance '+(mntOn?'ON':'OFF');
-    document.getElementById('onionToggle').classList.toggle('on',onionOn);
-    document.getElementById('onionLbl').textContent='Onion '+(onionOn?'ON':'OFF');
-    document.getElementById('idFp').textContent=d.identity_fingerprint||'(unavailable)';
-    document.getElementById('idSuite').textContent=d.identity_suite||'(none)';
-    document.getElementById('pqSuite').textContent=d.pq_suite||'(unavailable)';
-
-    document.getElementById('stats').innerHTML=[
-      ['accent',d.total_users,'Users'],
-      ['ok',d.total_devices,'Devices'],
-      ['ok',d.active_now,'Active Now (60s)'],
-      ['ok',d.active_1min,'Active (5 min)'],
-      ['accent',d.active_today,'Active Today'],
-      ['warn',d.os_windows+'/'+d.os_android+'/'+d.os_ios,'Win/Android/iOS'],
-      ['accent',d.total_messages.toLocaleString(),'Total Messages'],
-      ['ok',d.msgs_1h.toLocaleString(),'Msgs / 1h'],
-      ['ok',d.msgs_24h.toLocaleString(),'Msgs / 24h'],
-      ['warn',d.undelivered,'Undelivered'],
-      ['purple',d.total_groups,'Groups'],
-      ['purple',d.total_friendships,'Friendships'],
-      ['warn',d.avg_latency_ms+'ms','Avg Msg Latency'],
-      ['warn',d.avg_req_ms+'ms','Avg Req'],
-      ['warn',d.p95_req_ms+'ms','p95 Req'],
-      ['danger',d.file_count,'Files'],
-      ['danger',fmtSize(d.file_total_bytes),'Encrypted Stored'],
-      ['accent',fmtSize(d.files_dir_bytes),'Files Folder'],
-      ['accent',fmtSize(d.db_size_bytes),'Database'],
-      ['warn',fmtSize(d.disk_free_bytes)+' free','Disk'],
-      ['danger',d.failed_logins_24h,'Failed Logins 24h'],
-      ['warn',d.pending_friend_requests,'Pending Friend Req'],
-      ['warn',d.pending_group_invites,'Pending Group Inv'],
-      ['purple',d.requests_total.toLocaleString(),'Reqs Since Boot'],
-      ['danger',d.errors_total,'Errors Since Boot'],
-      ['accent',d.ecdh_cache_size,'ECDH Cache'],
-      ['ok',fmtSize(d.bytes_24h),'Msg Bytes / 24h'],
-      ['ok',fmtSize(d.avg_msg_size),'Avg Msg Size'],
-      [d.pq_available?'ok':'danger',d.pq_available?'READY':'OFF','PQ Hybrid'],
-      ['purple',d.sealed_pending,'Sealed Pending'],
-      ['purple',d.v2_pending,'v2 Pending'],
-      ['warn',d.disappearing_pending,'Disappearing Pending'],
-      ['accent',d.ratchet_devices,'Ratchet Devices'],
-      ['ok',d.one_time_prekeys_total,'One-Time Prekeys'],
-      ['purple',d.cover_count,'Cover Messages'],
-      ['purple',fmtSize(d.cover_bytes),'Cover Bytes'],
-      [d.anon_creds_available?'ok':'danger',d.anon_creds_available?'READY':'OFF','Anon Creds'],
-      ['ok',d.anon_creds_redeemed_total,'Anon Creds Redeemed'],
-      [d.srp_available?'ok':'danger',d.srp_available?'READY':'OFF','SRP-6a PAKE'],
-      ['ok',d.srp_users,'SRP Users'],
-      [d.at_rest_available?'ok':'danger',d.at_rest_available?'ON':'OFF','At-Rest Enc'],
-      ['purple',d.treekem_groups,'TreeKEM Groups'],
-      ['accent',d.device_link_active,'Active Device Links'],
-    ].map(c=>'<div class="card '+c[0]+'"><div class="val">'+esc(c[1])+'</div><div class="lbl">'+esc(c[2])+'</div></div>').join('');
-
-    const hh=d.hourly_activity||[];const hMax=Math.max(1,...hh.map(x=>x.count));
-    const hTotal=hh.reduce((a,b)=>a+b.count,0);
-    document.getElementById('hourlyTotal').textContent=hTotal.toLocaleString()+' msgs';
-    const buckets=[];for(let i=23;i>=0;i--){const dt=new Date(Date.now()-i*3600000);const k=dt.toISOString().slice(0,13).replace('T',' ')+':00';const found=hh.find(x=>x.hour===k);buckets.push({hour:dt.getUTCHours()+':00',count:found?found.count:0});}
-    document.getElementById('hourlyChart').innerHTML=buckets.map(b=>'<div class="bar" style="height:'+(b.count/hMax*100)+'%"><span class="tt">'+b.hour+' — '+b.count+'</span></div>').join('');
-
-    const ep=d.top_endpoints||[];const eMax=Math.max(1,...ep.map(x=>x.count));
-    document.getElementById('endpointList').innerHTML=ep.map(x=>'<div class="item"><span class="label">'+esc(x.path)+'</span><span class="track"><span class="fill" style="width:'+(x.count/eMax*100)+'%"></span></span><span class="num">'+x.count+(x.errors?' <span style="color:var(--danger)">('+x.errors+')</span>':'')+'</span></div>').join('')||'<div class="empty">no traffic yet</div>';
-
-    const ts=d.top_senders||[];const tsMax=Math.max(1,...ts.map(x=>x.count));
-    document.getElementById('topSenders').innerHTML=ts.map(x=>'<div class="item"><span class="label">'+esc(x.id)+'</span><span class="track"><span class="fill" style="width:'+(x.count/tsMax*100)+'%"></span></span><span class="num">'+x.count+'</span></div>').join('')||'<div class="empty">—</div>';
-    const tr=d.top_recipients||[];const trMax=Math.max(1,...tr.map(x=>x.count));
-    document.getElementById('topRecips').innerHTML=tr.map(x=>'<div class="item"><span class="label">'+esc(x.id)+'</span><span class="track"><span class="fill" style="width:'+(x.count/trMax*100)+'%"></span></span><span class="num">'+x.count+'</span></div>').join('')||'<div class="empty">—</div>';
-
-    const fr=d.friend_requests_pending||[];document.getElementById('frPill').textContent=fr.length;
-    document.getElementById('frTable').innerHTML=fr.map(r=>'<tr><td>'+esc(r.from)+'</td><td>'+esc(r.to)+'</td><td>'+esc(r.reason)+'</td><td>'+esc(r.created)+'</td></tr>').join('')||'<tr><td colspan="4" class="empty">none</td></tr>';
-    const gi=d.group_invites_pending||[];document.getElementById('giPill').textContent=gi.length;
-    document.getElementById('giTable').innerHTML=gi.map(r=>'<tr><td>'+esc(r.group)+'</td><td>'+esc(r.from)+'</td><td>'+esc(r.to)+'</td><td>'+esc(r.reason)+'</td><td>'+esc(r.created)+'</td></tr>').join('')||'<tr><td colspan="5" class="empty">none</td></tr>';
-
-    const fl=d.failed_logins||[];document.getElementById('flPill').textContent=fl.length;
-    document.getElementById('flTable').innerHTML=fl.map(r=>'<tr><td>'+esc(r.ip)+'</td><td>'+esc(r.hwid)+'</td><td>'+esc(r.fp)+'</td><td>'+esc(r.ts)+'</td></tr>').join('')||'<tr><td colspan="4" class="empty">none</td></tr>';
-
-    const er=d.recent_errors||[];document.getElementById('errPill').textContent=er.length;
-    document.getElementById('errTable').innerHTML=er.map(r=>'<tr><td>'+esc(r.ts)+'</td><td>'+esc(r.path)+'</td><td><span class="tag '+(r.status>=500?'danger':'warn')+'">'+esc(r.status)+'</span></td><td>'+esc(r.detail)+'</td></tr>').join('')||'<tr><td colspan="4" class="empty">none</td></tr>';
-
-    const al=d.audit_log||[];
-    document.getElementById('auditTable').innerHTML=al.map(r=>'<tr><td>'+esc(r.ts)+'</td><td>'+esc(r.actor)+'</td><td><span class="tag ok">'+esc(r.action)+'</span></td><td>'+esc(r.target)+'</td><td>'+esc(r.detail)+'</td></tr>').join('')||'<tr><td colspan="5" class="empty">none</td></tr>';
-
-    document.getElementById('msgTable').innerHTML=(d.recent_messages||[]).map(m=>'<tr><td>'+esc(m.ts)+'</td><td>'+esc(m.sender.substring(0,12))+'</td><td>'+esc(m.recipient.substring(0,12))+'</td><td>'+m.size+'B</td><td><span class="tag '+(m.delivered?'ok':'warn')+'">'+(m.delivered?'Delivered':'Pending')+'</span></td></tr>').join('');
-
-    document.getElementById('devTable').innerHTML=(d.devices||[]).map(dv=>'<tr><td>'+esc(dv.id.substring(0,16))+'</td><td>'+esc(dv.platform)+'</td><td>'+esc(dv.name)+'</td><td>'+esc(dv.registered)+'</td><td>'+esc(dv.last_seen)+'</td><td><button class="tinybtn" onclick="delDev(\''+esc(dv.id)+'\')">X</button></td></tr>').join('');
-    document.getElementById('grpTable').innerHTML=(d.groups||[]).map(g=>'<tr><td>'+esc(g.id.substring(0,12))+'</td><td>'+esc(g.name)+'</td><td>'+g.members+'</td><td>'+esc(g.created)+'</td></tr>').join('');
-    document.getElementById('userTable').innerHTML=(d.users||[]).map(u=>'<tr><td>'+esc(u.username)+'</td><td>'+esc(u.user_id.substring(0,16))+'</td><td>'+u.devices+'</td><td>'+esc(u.created)+'</td><td><button class="tinybtn" onclick="delUser(\''+esc(u.user_id)+'\',\''+esc(u.username)+'\')">X</button></td></tr>').join('');
-    document.getElementById('sessTable').innerHTML=(d.sessions||[]).map(s=>'<tr><td>'+esc(s.id.substring(0,12))+'</td><td>'+esc(s.ip)+'</td><td>'+esc(s.login_at)+'</td><td>'+esc(s.last_activity)+'</td><td><span class="tag '+(s.active?'ok':'warn')+'">'+(s.active?'Active':'Ended')+'</span></td><td>'+(s.active?'<button class="tinybtn warn" onclick="killSess(\''+esc(s.id)+'\')">Kill</button>':'')+'</td></tr>').join('');
-  }catch(e){console.error(e)}
-}
-
-function updateCountdowns(){
-  let h='';const n=Date.now();
-  for(const f of fileData){
-    if(!f.expires_at){continue}
-    const e=new Date(f.expires_at+'Z').getTime();const r=e-n;
-    let d,c;
-    if(f.downloaded){d='DOWNLOADED';c='var(--ok)';}
-    else if(r<=0){d='EXPIRED';c='var(--danger)';}
-    else{const hh=Math.floor(r/3600000);const mm=Math.floor((r%3600000)/60000);const ss=Math.floor((r%60000)/1000);const ms=r%1000;
-      d=hh+':'+String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0')+'.'+String(ms).padStart(3,'0');
-      c=r<300000?'var(--danger)':r<1800000?'var(--warn)':'var(--ok)';}
-    h+='<tr><td>'+esc(f.id.substring(0,12))+'</td><td>'+esc(f.sender)+'</td><td>'+esc(f.recipient)+'</td><td>'+fmtSize(f.orig_size)+'</td><td>'+fmtSize(f.enc_size)+'</td><td>'+esc(f.server_ts)+'</td><td style="color:'+c+';font-weight:600">'+d+'</td><td>'+(f.downloaded?'<span class="tag ok">Done</span>':'<span class="tag warn">Waiting</span>')+'</td></tr>';
-  }
-  document.getElementById('fileTable').innerHTML=h||'<tr><td colspan="8" class="empty">no files</td></tr>';
-}
-
-async function ctrl(action,msg){
-  if(!confirm(msg))return;
-  const r=await fetch('/api/v1/admin/control/'+action,{method:'POST'});
-  const j=await r.json().catch(()=>({}));
-  alert(action+': '+JSON.stringify(j));
-  refresh();
-}
-async function toggleSetting(which,enabled){
-  const path=which;  // 'registration' | 'maintenance' | 'onion-only'
-  await fetch('/api/v1/admin/control/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});
-  refresh();
-}
-function copyFp(){const fp=document.getElementById('idFp').textContent;if(navigator.clipboard){navigator.clipboard.writeText(fp).then(()=>alert('Copied: '+fp));}else{prompt('Fingerprint:',fp);}}
-async function delDev(id){if(confirm('Delete device '+id.substring(0,16)+'?')){await fetch('/api/v1/admin/devices/'+id,{method:'DELETE'});refresh()}}
-async function delUser(id,name){if(prompt('To delete user "'+name+'" and ALL their data, type the username:')!==name)return;await fetch('/api/v1/admin/users/'+id,{method:'DELETE'});refresh()}
-async function killSess(id){if(confirm('Kill admin session '+id.substring(0,12)+'?')){await fetch('/api/v1/admin/sessions/'+id,{method:'DELETE'});refresh()}}
-async function logout(){await fetch('/api/v1/admin/logout',{method:'POST'});location='/admin/login'}
-
-setInterval(updateCountdowns,50);
-setInterval(refresh,8000);
-refresh();
-</script></body></html>""")
+    return _serve_admin_html("index.html")
 
 if __name__ == "__main__":
     import argparse, uvicorn

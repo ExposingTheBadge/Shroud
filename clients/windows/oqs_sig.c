@@ -67,13 +67,15 @@ BOOL oqs_sig_verify(const char *algorithm,
  *   SIG_BLOB:  4B 'SGB2' | 64B Ed25519 | 4627B ML-DSA-87 | 29792B SPHINCS+
  *              total 34487 bytes
  *
- * We verify the two PQ components (ML-DSA-87 + SPHINCS+). Ed25519 verify
- * is not present in liboqs; clients today rely on the fingerprint pin to
- * cover that piece (it transitively authenticates the whole pk blob, of
- * which Ed25519 is one component). When the C-only Ed25519 verifier ships
- * in v1.8 the third assumption snaps into place.
+ * Verifies ALL THREE signatures. Ed25519 is checked by the pure-C
+ * implementation in ed25519.c (no DLL dependency). ML-DSA-87 and
+ * SPHINCS+-SHA2-256s-simple are checked by liboqs.dll when present.
  *
- * Returns TRUE only if BOTH PQ signatures verify.
+ * Requires: Ed25519 OK AND (oqs.dll present AND ML-DSA OK AND SPHINCS+ OK).
+ * If oqs.dll is missing, the function returns FALSE so the caller falls
+ * back to identity-fingerprint-only pinning. An attacker would have to
+ * forge all three signatures simultaneously — three independent hardness
+ * assumptions (elliptic curve / lattice / hash).
  */
 #define HSIG_PK_TOTAL    2692
 #define HSIG_PK_ED       32
@@ -94,19 +96,26 @@ BOOL ghostlink_verify_server_sig(const BYTE *pk_blob, DWORD pk_blob_len,
     if (*(const DWORD*)sig_blob != HSIG_SIG_MAGIC) return FALSE;
     if (!ensure_oqs_loaded()) return FALSE;
 
-    DWORD off = 4;
-    const BYTE *mldsa_pk  = pk_blob + off + HSIG_PK_ED;
+    const BYTE *ed_pk      = pk_blob + 4;
+    const BYTE *mldsa_pk   = ed_pk + HSIG_PK_ED;
     const BYTE *sphincs_pk = mldsa_pk + HSIG_PK_MLDSA;
 
-    DWORD soff = 4;
-    const BYTE *mldsa_sig  = sig_blob + soff + HSIG_SIG_ED;
+    const BYTE *ed_sig      = sig_blob + 4;
+    const BYTE *mldsa_sig   = ed_sig + HSIG_SIG_ED;
     const BYTE *sphincs_sig = mldsa_sig + HSIG_SIG_MLDSA;
 
+    /* Ed25519 (classical) — pure C; must pass the RFC 8032 self-test. */
+    if (!ed25519_verify(message, message_len, ed_sig, ed_pk)) return FALSE;
+
+    /* ML-DSA-87 (lattice PQ). */
     if (!oqs_sig_verify("ML-DSA-87",
                         message, message_len,
                         mldsa_sig, HSIG_SIG_MLDSA, mldsa_pk)) return FALSE;
+
+    /* SPHINCS+-256s (hash-based PQ). */
     if (!oqs_sig_verify("SPHINCS+-SHA2-256s-simple",
                         message, message_len,
                         sphincs_sig, HSIG_SIG_SPHINCS, sphincs_pk)) return FALSE;
+
     return TRUE;
 }

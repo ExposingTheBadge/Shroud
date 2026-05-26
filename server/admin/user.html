@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GHOSTLINK Admin — User</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+
+<div class="drill-hdr">
+  <div class="back" onclick="location='/admin#users'">&larr; back to dashboard</div>
+  <h1 id="userTitle">—</h1>
+  <div class="sub" id="userSub">—</div>
+</div>
+
+<div class="grid" id="userCards" style="padding:14px 20px"></div>
+
+<div class="panel">
+  <div class="panel-hdr">Devices <span class="pill" id="devCountPill">—</span></div>
+  <div class="body"><table>
+    <thead><tr><th>Device ID</th><th>Platform</th><th>Name</th><th>Registered</th><th>Last Seen</th><th>One-Time Prekeys</th></tr></thead>
+    <tbody id="userDevices"></tbody>
+  </table></div>
+</div>
+
+<div class="panel">
+  <div class="panel-hdr">Friendships <span class="pill" id="friendCountPill">—</span></div>
+  <div class="body"><table>
+    <thead><tr><th>With</th><th>Direction</th><th>Established</th></tr></thead>
+    <tbody id="userFriends"></tbody>
+  </table></div>
+</div>
+
+<div class="panel">
+  <div class="panel-hdr">Groups <span class="pill" id="userGroupCountPill">—</span></div>
+  <div class="body"><table>
+    <thead><tr><th>Group ID</th><th>Name</th><th>Joined Via Device</th></tr></thead>
+    <tbody id="userGroups"></tbody>
+  </table></div>
+</div>
+
+<div class="panel">
+  <div class="panel-hdr">Login History <span class="pill" id="loginCountPill">—</span></div>
+  <div class="body"><table>
+    <thead><tr><th>When</th><th>IP</th><th>HWID</th><th>Outcome</th></tr></thead>
+    <tbody id="userLogins"></tbody>
+  </table></div>
+</div>
+
+<div class="panel">
+  <div class="panel-hdr">Audit Mentions <span class="pill" id="auditMentionPill">—</span></div>
+  <div class="body"><table>
+    <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
+    <tbody id="userAudit"></tbody>
+  </table></div>
+</div>
+
+<script src="/admin/static/user.js"></script>
+</body>
+</html>

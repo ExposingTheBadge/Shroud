@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GHOSTLINK Admin — Device</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+
+<div class="drill-hdr">
+  <div class="back" onclick="location='/admin#devices'">&larr; back to dashboard</div>
+  <h1 id="devTitle">—</h1>
+  <div class="sub" id="devSub">—</div>
+</div>
+
+<div class="grid" id="devCards" style="padding:14px 20px"></div>
+
+<div class="panel">
+  <div class="panel-hdr">Ratchet state</div>
+  <div style="padding:14px;display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-family:Consolas,monospace;font-size:12px" id="ratchetInfo"></div>
+</div>
+
+<div class="panel">
+  <div class="panel-hdr">Sibling devices on this user <span class="pill" id="siblingCountPill">—</span></div>
+  <div class="body"><table>
+    <thead><tr><th>Device ID</th><th>Platform</th><th>Name</th><th>Last Seen</th></tr></thead>
+    <tbody id="devSiblings"></tbody>
+  </table></div>
+</div>
+
+<div class="panel">
+  <div class="panel-hdr">Recent messages — this device <span class="pill" id="msgCountPill">—</span></div>
+  <div class="body"><table>
+    <thead><tr><th>Time</th><th>Direction</th><th>Peer</th><th>Size</th><th>Status</th></tr></thead>
+    <tbody id="devMessages"></tbody>
+  </table></div>
+</div>
+
+<div class="panel">
+  <div class="panel-hdr">Recent errors involving this device <span class="pill" id="errCountPill">—</span></div>
+  <div class="body"><table>
+    <thead><tr><th>Time</th><th>Path</th><th>Status</th><th>Detail</th></tr></thead>
+    <tbody id="devErrors"></tbody>
+  </table></div>
+</div>
+
+<script src="/admin/static/device.js"></script>
+</body>
+</html>

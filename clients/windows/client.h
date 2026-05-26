@@ -181,10 +181,14 @@ BOOL ghostlink_verify_server_sig(const BYTE *pk_blob, DWORD pk_blob_len,
                                   const BYTE *sig_blob, DWORD sig_blob_len,
                                   const BYTE *message, DWORD message_len);
 
-/* Ed25519 verify is deferred — see notes in commit history. The
- * existing oqs_sig path verifies ML-DSA-87 + SPHINCS+-256s; the
- * Ed25519 component is covered by the fingerprint pin + the new
- * per-contact safety number UI shipped in v2.0. */
+/* Pure-C Ed25519 verify (no DLL dependency). 16-limb radix-2^16 field
+ * arithmetic, SHA-512 from BCrypt. Self-test runs lazily on first call;
+ * if it fails (which it never has on RFC 8032 vectors 1 and 2),
+ * ed25519_available() returns FALSE forever and the higher-level
+ * triple-hybrid checker falls back to ML-DSA + SPHINCS+ only. */
+BOOL ed25519_available(void);
+BOOL ed25519_verify(const BYTE *msg, DWORD msg_len,
+                    const BYTE sig[64], const BYTE pub[32]);
 
 /* Safety number: stable per-pair fingerprint of two X25519 identity
  * pubkeys. SHA-512 over sorted([a,b]); take 30 bytes, emit six

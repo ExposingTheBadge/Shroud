@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GHOSTLINK Admin</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+
+<!-- ─── Top bar ───────────────────────────────────────────────────── -->
+<div class="top">
+  <h1 onclick="goTab('overview')">GHOSTLINK</h1>
+  <span class="meta" id="metaUptime">uptime —</span>
+  <span class="meta" id="metaTime">—</span>
+  <span class="meta" id="metaVer">—</span>
+  <span class="ws-status" id="wsStatus" title="WebSocket live tail status"><span class="dot"></span><span id="wsLabel">connecting</span></span>
+  <span class="spacer"></span>
+  <span class="toggle" id="regToggle" onclick="toggleSetting('registration', !state.regOn)"><span class="dot"></span><span id="regLbl">Registration —</span></span>
+  <span class="toggle" id="mntToggle" onclick="toggleSetting('maintenance', !state.mntOn)"><span class="dot"></span><span id="mntLbl">Maintenance —</span></span>
+  <span class="toggle" id="onionToggle" onclick="toggleSetting('onion-only', !state.onionOn)"><span class="dot"></span><span id="onionLbl">Onion —</span></span>
+  <select class="interval" id="refreshInterval" title="Auto-refresh cadence">
+    <option value="2000">2s</option>
+    <option value="5000">5s</option>
+    <option value="8000" selected>8s</option>
+    <option value="30000">30s</option>
+    <option value="0">off</option>
+  </select>
+  <button class="btn" onclick="refresh()" title="Refresh now (r)">Refresh</button>
+  <button class="btn" onclick="showCheatsheet()" title="Keyboard shortcuts (?)">?</button>
+  <button class="btn danger" onclick="logout()">Logout</button>
+</div>
+
+<!-- ─── Tab bar ───────────────────────────────────────────────────── -->
+<div class="tabs">
+  <div class="tab active" data-tab="overview" onclick="goTab('overview')">Overview</div>
+  <div class="tab" data-tab="users"    onclick="goTab('users')">Users <span class="badge" id="userBadge">—</span></div>
+  <div class="tab" data-tab="devices"  onclick="goTab('devices')">Devices <span class="badge" id="deviceBadge">—</span></div>
+  <div class="tab" data-tab="crypto"   onclick="goTab('crypto')">Crypto</div>
+  <div class="tab" data-tab="files"    onclick="goTab('files')">Files <span class="badge" id="fileBadge">—</span></div>
+  <div class="tab" data-tab="audit"    onclick="goTab('audit')">Audit <span class="badge" id="auditBadge">—</span></div>
+  <div class="tab" data-tab="activity" onclick="goTab('activity')">Activity</div>
+</div>
+
+<!-- ─── Overview ──────────────────────────────────────────────────── -->
+<div class="section active" data-section="overview">
+  <div class="grid" id="stats"></div>
+
+  <div class="row">
+    <div class="panel" style="flex:1 1 60%;margin:0 0 14px">
+      <div class="panel-hdr">Messages — last 24h <span class="pill" id="hourlyTotal">—</span></div>
+      <div class="chart" id="hourlyChart"></div>
+    </div>
+    <div class="panel" style="flex:1 1 35%;margin:0 0 14px">
+      <div class="panel-hdr">Top Endpoints (since boot)</div>
+      <div class="barlist" id="endpointList" style="padding:10px 14px"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Server Controls
+      <div class="actions">
+        <button onclick="ctrlConfirm('purge-files', 'Purge Files', 'This deletes expired and already-downloaded files from disk.', 'warn')">Purge Files</button>
+        <button onclick="ctrlConfirm('vacuum',     'Vacuum DB',   'Reclaims disk space by repacking the SQLite database. Briefly locks the DB.', 'warn')">VACUUM DB</button>
+        <button onclick="ctrlConfirm('clear-ecdh', 'Clear ECDH',  'Drops all ephemeral ECDH session keys. In-flight handshakes will need to be retried.', 'warn')">Clear ECDH Cache</button>
+        <button onclick="ctrlConfirm('wipe-rate-limits', 'Reset Rate Limits', 'Resets all per-IP rate-limit buckets to zero.', 'warn')">Reset Rate Limits</button>
+        <button class="danger" onclick="ctrlConfirm('kill-sessions', 'Kill Other Admin Sessions', 'Signs out every OTHER admin session except yours.', 'danger')">Kill Other Admin Sessions</button>
+        <button class="danger" onclick="ctrlConfirm('clear-undelivered', 'Drop Undelivered', null, 'danger')">Drop Undelivered</button>
+      </div>
+    </div>
+    <div style="padding:8px 14px;color:var(--dim);font-size:11px">Every control action is recorded in the audit log. Destructive actions show an exact impact preview before they fire.</div>
+  </div>
+</div>
+
+<!-- ─── Users ─────────────────────────────────────────────────────── -->
+<div class="section" data-section="users">
+  <div class="panel">
+    <div class="panel-hdr">Users <span class="pill" id="userCountPill">—</span>
+      <div class="actions">
+        <input type="text" class="search" data-target="userTable" placeholder="Filter username / id…">
+        <span style="color:var(--dim);font-size:10px;margin-left:8px">click row to drill down · X to nuke + all data</span>
+      </div>
+    </div>
+    <div class="body tall"><table>
+      <thead><tr><th>Username</th><th>User ID</th><th>Devices</th><th>Registered</th><th></th></tr></thead>
+      <tbody id="userTable"></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Pending Friend Requests <span class="pill" id="frPill">0</span>
+      <div class="actions">
+        <input type="text" class="search" data-target="frTable" placeholder="Filter…">
+      </div>
+    </div>
+    <div class="body"><table>
+      <thead><tr><th>From</th><th>To</th><th>Reason</th><th>Created</th></tr></thead>
+      <tbody id="frTable"></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Pending Group Invites <span class="pill" id="giPill">0</span>
+      <div class="actions">
+        <input type="text" class="search" data-target="giTable" placeholder="Filter…">
+      </div>
+    </div>
+    <div class="body"><table>
+      <thead><tr><th>Group</th><th>From</th><th>To</th><th>Reason</th><th>Created</th></tr></thead>
+      <tbody id="giTable"></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Top Senders/Recipients — 24h</div>
+    <div class="bars2col">
+      <div>
+        <div style="color:var(--dim);font-size:10px;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px">Senders</div>
+        <div class="barlist" id="topSenders"></div>
+      </div>
+      <div>
+        <div style="color:var(--dim);font-size:10px;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px">Recipients</div>
+        <div class="barlist" id="topRecips"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Devices ───────────────────────────────────────────────────── -->
+<div class="section" data-section="devices">
+  <div class="panel">
+    <div class="panel-hdr">Devices <span class="pill" id="deviceCountPill">—</span>
+      <div class="actions">
+        <input type="text" class="search" data-target="devTable" placeholder="Filter device-id / platform / name…">
+        <span style="color:var(--dim);font-size:10px;margin-left:8px">click row to drill down · X to delete</span>
+      </div>
+    </div>
+    <div class="body tall"><table>
+      <thead><tr><th>Device ID</th><th>Platform</th><th>Name</th><th>Registered</th><th>Last Seen</th><th></th></tr></thead>
+      <tbody id="devTable"></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Groups <span class="pill" id="grpCountPill">—</span>
+      <div class="actions"><input type="text" class="search" data-target="grpTable" placeholder="Filter…"></div>
+    </div>
+    <div class="body"><table>
+      <thead><tr><th>Group ID</th><th>Name</th><th>Members</th><th>Created</th></tr></thead>
+      <tbody id="grpTable"></tbody>
+    </table></div>
+  </div>
+</div>
+
+<!-- ─── Crypto ────────────────────────────────────────────────────── -->
+<div class="section" data-section="crypto">
+  <div class="panel">
+    <div class="panel-hdr">Server Identity
+      <div class="actions">
+        <button onclick="copyFp()">Copy Fingerprint</button>
+        <button class="danger" onclick="ctrlConfirm('rotate-identity', 'Rotate Server Identity', null, 'danger')">Rotate Identity</button>
+      </div>
+    </div>
+    <div style="padding:14px;display:flex;gap:24px;flex-wrap:wrap;align-items:baseline">
+      <div>
+        <div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Fingerprint (publish this)</div>
+        <div id="idFp" style="font-family:Consolas,monospace;font-size:18px;color:var(--accent);letter-spacing:1.5px;font-weight:600">—</div>
+      </div>
+      <div>
+        <div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Signature Suite</div>
+        <div id="idSuite" style="font-family:Consolas,monospace;font-size:12px;color:var(--text)">—</div>
+      </div>
+      <div>
+        <div style="color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">PQ KEX Suite</div>
+        <div id="pqSuite" style="font-family:Consolas,monospace;font-size:12px;color:var(--text)">—</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Crypto Health</div>
+    <div class="grid" id="cryptoCards" style="padding:14px"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Padded-Envelope Bucket Distribution
+      <span class="pill" id="padTotalPill">—</span>
+    </div>
+    <div class="barlist" id="padBuckets" style="padding:14px"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Devices Low on One-Time Prekeys <span class="pill" id="lowPrekeyPill">0</span>
+      <div class="actions">
+        <span style="color:var(--dim);font-size:10px">flagged when &lt; 5 remaining</span>
+      </div>
+    </div>
+    <div class="body"><table>
+      <thead><tr><th>Device ID</th><th>User</th><th>Prekeys</th><th>Last Seen</th></tr></thead>
+      <tbody id="lowPrekeyTable"></tbody>
+    </table></div>
+  </div>
+</div>
+
+<!-- ─── Files ─────────────────────────────────────────────────────── -->
+<div class="section" data-section="files">
+  <div class="panel">
+    <div class="panel-hdr">Files <span class="pill" id="fileCountPill">—</span> <span class="pill">live countdown</span>
+      <div class="actions">
+        <input type="text" class="search" data-target="fileTable" placeholder="Filter id / sender / recipient…">
+      </div>
+    </div>
+    <div class="body tall"><table>
+      <thead><tr><th>File ID</th><th>Sender</th><th>Recipient</th><th>Orig</th><th>Enc</th><th>Uploaded</th><th>Countdown</th><th>Status</th></tr></thead>
+      <tbody id="fileTable"></tbody>
+    </table></div>
+  </div>
+</div>
+
+<!-- ─── Audit ─────────────────────────────────────────────────────── -->
+<div class="section" data-section="audit">
+  <div class="panel">
+    <div class="panel-hdr">Audit Log <span class="pill" id="auditCountPill">—</span>
+      <div class="actions">
+        <button onclick="exportAuditCsv()">Export CSV</button>
+      </div>
+    </div>
+    <div class="filter-row">
+      <label>Actor</label>
+      <input type="text" id="auditFilterActor"  placeholder="any" style="width:140px">
+      <label>Action</label>
+      <input type="text" id="auditFilterAction" placeholder="any" style="width:160px">
+      <label>Target</label>
+      <input type="text" id="auditFilterTarget" placeholder="any" style="width:160px">
+      <label>Since</label>
+      <select id="auditFilterSince">
+        <option value="">all time</option>
+        <option value="1">last hour</option>
+        <option value="24" selected>last 24h</option>
+        <option value="168">last 7d</option>
+        <option value="720">last 30d</option>
+      </select>
+      <button class="tinybtn dim" onclick="applyAuditFilters()">Apply</button>
+      <button class="tinybtn dim" onclick="clearAuditFilters()">Clear</button>
+    </div>
+    <div class="body tall"><table>
+      <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
+      <tbody id="auditTable"></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Failed Logins <span class="pill" id="flPill">0</span>
+      <div class="actions">
+        <input type="text" class="search" data-target="flTable" placeholder="Filter ip / hwid / fp…">
+      </div>
+    </div>
+    <div class="body"><table>
+      <thead><tr><th>IP</th><th>HWID</th><th>Fingerprint</th><th>Time</th></tr></thead>
+      <tbody id="flTable"></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Recent Errors <span class="pill" id="errPill">0</span>
+      <div class="actions">
+        <input type="text" class="search" data-target="errTable" placeholder="Filter path / detail…">
+      </div>
+    </div>
+    <div class="body"><table>
+      <thead><tr><th>Time</th><th>Path</th><th>Status</th><th>Detail</th></tr></thead>
+      <tbody id="errTable"></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Admin Sessions <span class="pill" id="sessCountPill">—</span></div>
+    <div class="body"><table>
+      <thead><tr><th>Session ID</th><th>IP</th><th>Login</th><th>Last Activity</th><th>Status</th><th></th></tr></thead>
+      <tbody id="sessTable"></tbody>
+    </table></div>
+  </div>
+</div>
+
+<!-- ─── Activity ──────────────────────────────────────────────────── -->
+<div class="section" data-section="activity">
+  <div class="panel">
+    <div class="panel-hdr">Time-Series — last 7 days
+      <span class="pill" id="seriesRangePill">—</span>
+    </div>
+    <div class="sparkline-row" id="seriesGrid"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Recent Messages <span class="pill">50 latest</span>
+      <div class="actions">
+        <input type="text" class="search" data-target="msgTable" placeholder="Filter…">
+      </div>
+    </div>
+    <div class="body"><table>
+      <thead><tr><th>Time</th><th>Sender</th><th>Recipient</th><th>Size</th><th>Status</th></tr></thead>
+      <tbody id="msgTable"></tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Network Transport Split</div>
+    <div style="padding:14px;display:flex;gap:24px;flex-wrap:wrap;font-family:Consolas,monospace;font-size:12px;color:var(--text)">
+      <div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;margin-bottom:4px">Via .onion</div><div id="onionPct" style="font-size:22px;color:var(--accent);font-weight:700">—</div><div id="onionCount" style="color:var(--dim);font-size:10px">—</div></div>
+      <div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;margin-bottom:4px">Via clearnet</div><div id="clearPct" style="font-size:22px;color:var(--warn);font-weight:700">—</div><div id="clearCount" style="color:var(--dim);font-size:10px">—</div></div>
+      <div style="flex:1;min-width:200px"><div style="color:var(--dim);font-size:10px;text-transform:uppercase;margin-bottom:4px">Ratio</div>
+        <div class="barlist" style="margin-top:6px">
+          <div class="item"><span class="track"><span class="fill" id="onionRatioBar" style="width:0%"></span></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Modal / toast / cheatsheet ────────────────────────────────── -->
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <h2 id="modalTitle">Confirm</h2>
+    <div class="body" id="modalBody"></div>
+    <div class="impact" id="modalImpact" style="display:none"></div>
+    <div class="actions">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="primary" id="modalConfirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="cheatsheetBg" onclick="if(event.target===this) closeCheatsheet()">
+  <div class="modal">
+    <h2>Keyboard shortcuts</h2>
+    <div class="body">
+      <div class="cheatsheet-grid">
+        <span class="kbd">/</span>             <span>Focus the search box on the current tab</span>
+        <span class="kbd">r</span>             <span>Refresh now</span>
+        <span class="kbd">?</span>             <span>Show this cheatsheet</span>
+        <span class="kbd">Esc</span>           <span>Close modal / clear focused search</span>
+        <span class="kbd">g</span> then a key  <span>Jump to tab — see below</span>
+        <span class="kbd">g</span> <span class="kbd">o</span> <span>Overview</span>
+        <span class="kbd">g</span> <span class="kbd">u</span> <span>Users</span>
+        <span class="kbd">g</span> <span class="kbd">d</span> <span>Devices</span>
+        <span class="kbd">g</span> <span class="kbd">c</span> <span>Crypto</span>
+        <span class="kbd">g</span> <span class="kbd">f</span> <span>Files</span>
+        <span class="kbd">g</span> <span class="kbd">a</span> <span>Audit</span>
+        <span class="kbd">g</span> <span class="kbd">y</span> <span>Activity</span>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="closeCheatsheet()">Got it</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-stack" id="toastStack"></div>
+
+<script src="/admin/static/admin.js"></script>
+</body>
+</html>

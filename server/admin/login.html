@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GHOSTLINK Admin</title>
+  <link rel="stylesheet" href="/admin/static/login.css">
+</head>
+<body>
+<div class="card">
+  <h1>GHOSTLINK Admin</h1>
+  <p class="sub">3 failed attempts = permanent IP ban</p>
+
+  <div class="error" id="err"></div>
+
+  <div class="fp-label" id="fpLabel">Paste your fingerprint into the grid</div>
+  <div class="fp-grid" id="fpGrid"></div>
+
+  <label>Password</label>
+  <input type="password" class="text" id="pw" placeholder="Admin password" autocomplete="current-password">
+
+  <button id="fpBtn" disabled>Authenticate</button>
+  <button id="setupBtn" style="display:none">Generate Fingerprint</button>
+
+  <p class="fp-status" id="fpStatus"></p>
+  <p class="ban-warn" id="banWarn" style="display:none">ACCESS DENIED — Your IP is banned</p>
+</div>
+<script src="/admin/static/login.js"></script>
+</body>
+</html>
