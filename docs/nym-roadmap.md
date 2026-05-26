@@ -1,6 +1,18 @@
-# Nym Mixnet Integration — Roadmap (deferred to v2.5)
+# Nym Mixnet Integration — Roadmap
 
-## Why this isn't shipping in v2.3
+> **Status update (v2.3.1).** The Windows client now exposes a Nym
+> transport in Settings → Network. This pulls forward part of milestone
+> M3 below — the client-side wire is shipped. What's still missing is
+> the project-operated **Service Provider** (M1) and the bundled SDK
+> bridge binary (M2). Users who want to use the toggle today must run
+> their own SP and their own `nym-socks5-client`. See `docs/nym.md`
+> for the operator-facing guide.
+>
+> Android and Linux Nym support are still **deferred** as originally
+> planned (post-v2.5 for Android, deferred until the v2.4 Linux rewrite
+> for Linux).
+
+## Why the rest isn't shipping yet
 
 Tor hidden services (v2.3) defeat passive metadata collection on the
 content side but still leak **traffic patterns**: a global passive
@@ -88,15 +100,24 @@ Phased rollout, each milestone independently shippable:
 - Pinned to a fixed `nym-sdk` version; signed with the same multi-sig
   bundle as the rest of the release.
 
-### M3 — Client integration (target: v2.6)
-- Windows: same Settings → Network tab now exposes a third radio,
-  "Mixnet (Nym)", below the Tor SOCKS field. Sets WinHTTP proxy to the
-  bridge's localhost port.
-- Android: re-use the Network settings dialog from v2.3 Tor support;
-  point at the bundled bridge service.
-- Add UX affordance: a small chip on the chat list shows the active
-  transport (Direct / Tor / Nym) so users always know how their messages
-  are reaching the server.
+### M3 — Client integration
+
+**Windows: SHIPPED in v2.3.1.** Settings → Network exposes a
+Transport radio (Direct / Tor / Nym) that swaps the WinHTTP proxy.
+The Help → About dialog surfaces the active transport so users always
+know how their messages are reaching the server. The SOCKS5 endpoint
+and SP address are persisted to the registry. See `docs/nym.md` for
+the operator-facing setup.
+
+Remaining work in M3:
+- **Android (target: post-v2.5).** Re-use the Network settings dialog
+  from v2.3 Tor support; point at the bundled bridge service. Needs
+  M2 (Rust SDK shim) to land first because Android can't shell out to
+  a `nym-socks5-client` daemon — the bridge has to be a `.so` linked
+  into the APK.
+- **Linux (target: v2.4 GTK rewrite).** Wired up as part of the
+  fresh GTK4 client. The existing `clients/linux/main.c` is stale and
+  not getting Nym retrofitted; see `docs/linux-roadmap.md`.
 
 ### M4 — Cover traffic + padding (target: v2.7)
 - Even with Nym, real-time messaging can leak via the cover-traffic
@@ -126,6 +147,8 @@ Phased rollout, each milestone independently shippable:
 
 ## When this doc gets deleted
 
-When `docs/nym.md` exists with concrete deployment instructions and
-clients ship a working bridge, delete this roadmap. Until then, it's the
-canonical answer to "why is Nym not in GHOSTLINK yet?".
+When the GHOSTLINK project operates its own Service Provider (M1), the
+bundled `ghostlink-nym-bridge` binary ships (M2), and the Android client
+has Nym support, delete this roadmap. The user-facing `docs/nym.md`
+becomes the canonical doc at that point. Until then, this roadmap is
+the answer to "why does the Nym toggle exist but not Just Work?".
