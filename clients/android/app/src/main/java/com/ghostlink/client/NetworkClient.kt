@@ -116,12 +116,17 @@ object NetworkClient {
     }
 
     /** GET raw bytes. Returns null on non-2xx (caller can poll). */
-    suspend fun getBytes(path: String): ByteArray? = withContext(Dispatchers.IO) {
+    suspend fun getBytes(path: String): ByteArray? = getBytes(path, emptyMap())
+
+    /** GET raw bytes with extra headers. The /api/v1/files/{id} endpoint
+     *  requires X-Device-ID so the server can authorize the download. */
+    suspend fun getBytes(path: String, headers: Map<String, String>): ByteArray? = withContext(Dispatchers.IO) {
         val url = URL(BASE + path)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
+            for ((k, v) in headers) setRequestProperty(k, v)
             connectTimeout = TIMEOUT
-            readTimeout = TIMEOUT
+            readTimeout = 30_000
         }
         try {
             if (conn.responseCode !in 200..299) return@withContext null

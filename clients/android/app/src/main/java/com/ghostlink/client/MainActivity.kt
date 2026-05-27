@@ -362,14 +362,104 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
                 val obj = JSONObject(String(plain))
                 val body = obj.optString("body", "")
                 val name = obj.optString("name", "")
-                if (body.isNotBlank()) {
-                    messages = messages + Msg(sender, body, name = name.ifBlank { null })
+                val isImage = obj.optBoolean("is_image", false) ||
+                              obj.optString("type", "") == "image"
+
+                if (isImage) {
+                    // v2.4.4 — match Windows downloadAndDecryptImage().
+                    // Sender encrypted the file with SHA-256(sender pubkey
+                    // blob); the recipient hashes the same blob fetched
+                    // from /api/v1/devices/{sender}/pubkey, downloads the
+                    // ciphertext from /api/v1/files/{fid}, AES-GCM decrypts,
+                    // and caches the plaintext for inline display.
+                    val fid = obj.optString("file_id", "")
+                    if (fid.isNotBlank()) {
+                        val localPath = decryptInlineImage(sender, fid, obj.optString("name", ""))
+                        if (localPath != null) {
+                            messages = messages + Msg(
+                                sender = sender,
+                                body = "",
+                                imagePath = localPath,
+                                fileId = fid,
+                                name = name.ifBlank { null },
+                            )
+                            continue
+                        }
+                    }
+                    // Couldn't fetch / decrypt — fall through to a text
+                    // placeholder so the user knows something arrived.
+                    if (body.isNotBlank()) {
+                        messages = messages + Msg(sender, body, name = name.ifBlank { null })
+                    } else {
+                        messages = messages + Msg(sender, "[image unavailable]",
+                            name = name.ifBlank { null })
+                    }
+                } else if (body.isNotBlank()) {
+                    // group_id may or may not be present. Display it as a
+                    // small prefix so the user can tell apart 1:1 vs group
+                    // messages without a dedicated group screen.
+                    val gid = obj.optString("group_id", "")
+                    val finalBody = if (gid.isNotBlank()) "[group] $body" else body
+                    messages = messages + Msg(sender, finalBody,
+                        name = name.ifBlank { null })
                 }
             } catch (_: Throwable) {
-                // Unparseable plaintext — drop. Could be a file envelope
-                // which goes through a different decoder in v2.5+.
+                // Unparseable plaintext — drop silently.
             }
         }
+    }
+
+    /**
+     * Download an encrypted image-attachment, decrypt with the sender's
+     * pub-derived key, and save to filesDir/images/<file_id>.<ext>.
+     * Returns the local absolute path on success; null if any step
+     * fails (network, decrypt, write). Idempotent — re-uses an already
+     * cached file if present.
+     */
+    private suspend fun decryptInlineImage(senderDid: String, fileId: String, origName: String): String? {
+        val ctx = getApplication<Application>()
+        val imagesDir = java.io.File(ctx.filesDir, "images").apply { mkdirs() }
+        // Pick the extension from the sender-supplied filename so
+        // intent-viewers know what to do; default to .jpg.
+        val ext = origName.substringAfterLast('.', "jpg").lowercase().take(5)
+        val out = java.io.File(imagesDir, "$fileId.$ext")
+        if (out.exists() && out.length() > 0) return out.absolutePath
+
+        // Get the sender's pubkey blob — server returns whatever bytes
+        // were registered (Android: X.509 SubjectPublicKeyInfo). Hash
+        // those bytes to derive the symmetric file key. The Windows
+        // sender does the same on its end with its own pub blob, and
+        // the server stores both verbatim — so cross-platform works as
+        // long as everyone hashes the exact bytes the server stores.
+        val pubResp = withContext(Dispatchers.IO) {
+            NetworkClient.post("/api/v1/devices/$senderDid/pubkey", JSONObject())
+        }
+        val pubHex = pubResp.optString("public_key", "")
+        if (pubHex.isBlank()) return null
+        val pubBytes = pubHex.hexToBytes()
+        val fileKey = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(pubBytes).copyOf(32)
+        val keySpec = javax.crypto.spec.SecretKeySpec(fileKey, "AES")
+
+        // Pull the encrypted blob. X-Device-ID is required by the server
+        // for authorization on /api/v1/files/{id}.
+        val blob = withContext(Dispatchers.IO) {
+            NetworkClient.getBytes("/api/v1/files/$fileId",
+                mapOf("X-Device-ID" to deviceID))
+        } ?: return null
+        if (blob.size < 12 + 16 + 1) return null
+
+        // Layout matches the sender: [12B iv || ct || 16B tag].
+        val iv  = blob.copyOfRange(0, 12)
+        val ct  = blob.copyOfRange(12, blob.size - 16)
+        val tag = blob.copyOfRange(blob.size - 16, blob.size)
+        val plain = try {
+            CryptoProvider.decryptAESGCM(keySpec, iv, ct, tag)
+        } catch (_: Throwable) { return null }
+
+        return try {
+            out.writeBytes(plain); out.absolutePath
+        } catch (_: Throwable) { null }
     }
 
     fun auth(u: String, p: String, d: String, isReg: Boolean, onError: (String) -> Unit) {
