@@ -9,8 +9,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
@@ -25,6 +28,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
@@ -58,6 +62,66 @@ private val DarkColors = darkColorScheme(
     outline = Color(0xFF3D3D3D),
 )
 
+/* Theme presets parallel to the Windows v2.1 picker. Switched at runtime
+ * via colorSchemeFor(name); the choice is persisted in prefs. */
+private fun colorSchemeFor(name: String): androidx.compose.material3.ColorScheme = when (name) {
+    "GHOSTLINK Light" -> androidx.compose.material3.lightColorScheme(
+        primary = Color(0xFFff8c1e), background = Color(0xFFFFFFFF),
+        surface = Color(0xFFF5F5F0), surfaceVariant = Color(0xFFF0F0E8),
+        onPrimary = Color.White, onBackground = Color(0xFF1A1A1A),
+        onSurface = Color(0xFF1A1A1A), onSurfaceVariant = Color(0xFF666666),
+    )
+    "Solarized Dark" -> darkColorScheme(
+        primary = Color(0xFF268BD2), background = Color(0xFF002B36),
+        surface = Color(0xFF073642), surfaceVariant = Color(0xFF073642),
+        onPrimary = Color.Black, onBackground = Color(0xFF93A1A1),
+        onSurface = Color(0xFF93A1A1), onSurfaceVariant = Color(0xFF586E75),
+    )
+    "Nord" -> darkColorScheme(
+        primary = Color(0xFF5E81AC), background = Color(0xFF2E3440),
+        surface = Color(0xFF3B4252), surfaceVariant = Color(0xFF434C5E),
+        onPrimary = Color.White, onBackground = Color(0xFFECEFF4),
+        onSurface = Color(0xFFECEFF4), onSurfaceVariant = Color(0xFF88C0D0),
+    )
+    "Dracula" -> darkColorScheme(
+        primary = Color(0xFFBD93F9), background = Color(0xFF282A36),
+        surface = Color(0xFF1E1F29), surfaceVariant = Color(0xFF44475A),
+        onPrimary = Color.Black, onBackground = Color(0xFFF8F8F2),
+        onSurface = Color(0xFFF8F8F2), onSurfaceVariant = Color(0xFF6272A4),
+    )
+    "Monokai" -> darkColorScheme(
+        primary = Color(0xFFA6E22E), background = Color(0xFF272822),
+        surface = Color(0xFF1E1F1C), surfaceVariant = Color(0xFF3E3D32),
+        onPrimary = Color.Black, onBackground = Color(0xFFF8F8F2),
+        onSurface = Color(0xFFF8F8F2), onSurfaceVariant = Color(0xFF75715E),
+    )
+    "Tokyo Night" -> darkColorScheme(
+        primary = Color(0xFF7AA2F7), background = Color(0xFF1A1B26),
+        surface = Color(0xFF16161E), surfaceVariant = Color(0xFF24283B),
+        onPrimary = Color.Black, onBackground = Color(0xFFC0CAF5),
+        onSurface = Color(0xFFC0CAF5), onSurfaceVariant = Color(0xFF565F89),
+    )
+    "Gruvbox Dark" -> darkColorScheme(
+        primary = Color(0xFFFE8019), background = Color(0xFF282828),
+        surface = Color(0xFF3C3836), surfaceVariant = Color(0xFF504945),
+        onPrimary = Color.Black, onBackground = Color(0xFFEBDBB2),
+        onSurface = Color(0xFFEBDBB2), onSurfaceVariant = Color(0xFFA89984),
+    )
+    "High Contrast" -> darkColorScheme(
+        primary = Color(0xFFFFFF00), background = Color.Black,
+        surface = Color(0xFF0A0A0A), surfaceVariant = Color(0xFF101010),
+        onPrimary = Color.Black, onBackground = Color.White,
+        onSurface = Color.White, onSurfaceVariant = Color(0xFFBBBBBB),
+    )
+    else -> DarkColors
+}
+
+val THEME_NAMES = listOf(
+    "GHOSTLINK Dark", "GHOSTLINK Light",
+    "Solarized Dark", "Nord", "Dracula", "Monokai",
+    "Tokyo Night", "Gruvbox Dark", "High Contrast",
+)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -69,8 +133,8 @@ class MainActivity : ComponentActivity() {
             android.view.WindowManager.LayoutParams.FLAG_SECURE,
         )
         setContent {
-            MaterialTheme(colorScheme = DarkColors) {
-                val vm: GhostlinkVM = viewModel(factory = GhostlinkVM.Factory(application))
+            val vm: GhostlinkVM = viewModel(factory = GhostlinkVM.Factory(application))
+            MaterialTheme(colorScheme = colorSchemeFor(vm.themeName)) {
                 if (vm.isRegistered) ChatScreen(vm) else AuthScreen(vm)
             }
         }
@@ -86,6 +150,35 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
     var selectedRecipient by mutableStateOf("")
     var currentMessage by mutableStateOf("")
     var connStatus by mutableStateOf("Connecting...")
+    /** Server-wide maintenance flag. Flipped by the heartbeat poll +
+     *  by any send-attempt that returns 503 detail=maintenance. UI
+     *  uses this to red-border the input, disable send, and show a
+     *  banner identical in wording to the Windows v2.4.1 client. */
+    var maintenanceMode by mutableStateOf(false)
+    /** Disappearing-message timer. Persisted in prefs. When enabled,
+     *  outgoing sends carry X-Expires-In: disappearSeconds. Default off
+     *  matches Windows v2.1.0 behaviour. Initialized in init { } below
+     *  because `prefs` is declared further down the class body. */
+    var disappearEnabled by mutableStateOf(false)
+    var disappearSeconds by mutableStateOf(60)
+    /** Theme persisted in prefs. Names match the Windows presets. */
+    var themeName by mutableStateOf("GHOSTLINK Dark")
+
+    /* Persistence helpers — the Settings dialog calls these so the
+     * choice survives process death. */
+    fun setTheme(name: String) {
+        themeName = name
+        prefs.edit().putString("theme_name", name).apply()
+    }
+    fun setDisappearing(enabled: Boolean, secs: Int) {
+        disappearEnabled = enabled
+        disappearSeconds = secs.coerceAtLeast(1)
+        prefs.edit()
+            .putBoolean("disappear_enabled", enabled)
+            .putInt("disappear_secs", disappearSeconds)
+            .apply()
+    }
+
     var connColor by mutableStateOf(Color(0xFF888888))
 
     private var identityKey: JavaKeyPair? = null
@@ -109,6 +202,14 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
 
     init {
         identityKey = CryptoProvider.getIdentityKey()
+        // Hydrate Settings-tab state from prefs. Done here so it runs
+        // after `prefs` itself is initialized (Kotlin class-member init
+        // order: declarations top-down, so prefs must be declared before
+        // these lines — see below).
+        disappearEnabled = prefs.getBoolean("disappear_enabled", false)
+        disappearSeconds = prefs.getInt("disappear_secs", 60)
+        themeName = prefs.getString("theme_name", "GHOSTLINK Dark") ?: "GHOSTLINK Dark"
+
         val sid = prefs.getString("device_id", "") ?: ""
         val su = prefs.getString("username", "") ?: ""
         val sp = prefs.getString("password", "") ?: ""
@@ -186,8 +287,19 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
                     val r = withContext(Dispatchers.IO) {
                         NetworkClient.post("/api/v1/heartbeat", JSONObject().apply { put("device_id", deviceID) })
                     }
-                    connStatus = if (r.optString("beat") == "ok") "Online — AES-256-GCM | ECDH P-384" else "Waiting..."
-                    connColor = if (r.optString("beat") == "ok") Color(0xFF2ed573) else Color(0xFF888888)
+                    val beatOk = r.optString("beat") == "ok"
+                    // Server v2.4.1+ surfaces maintenance_mode on every beat.
+                    maintenanceMode = r.optBoolean("maintenance_mode", false)
+                    if (maintenanceMode) {
+                        connStatus = "Server in maintenance — sending disabled"
+                        connColor  = Color(0xFFff8a8a)
+                    } else if (beatOk) {
+                        connStatus = "Online — AES-256-GCM | ECDH P-384"
+                        connColor  = Color(0xFF2ed573)
+                    } else {
+                        connStatus = "Waiting..."
+                        connColor  = Color(0xFF888888)
+                    }
                 } catch (_: Exception) {
                     connStatus = "Server offline"; connColor = Color(0xFFff4757)
                 }
@@ -283,7 +395,20 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
                 val (iv,ct,tg) = CryptoProvider.encryptAESGCM(sk, pl)
                 val sg = CryptoProvider.hmacSign(sk, ct)
                 val env = JSONObject().apply { put("sender",deviceID); put("ts",System.currentTimeMillis()/1000); put("nonce",iv.toHex()); put("ciphertext",ct.toHex()); put("tag",tg.toHex()); put("sig",sg.toHex()) }
-                NetworkClient.post("/api/v1/messages/send", JSONObject().apply { put("sender_device_id",deviceID); put("recipient_device_id",recip); put("envelope",env.toString()) })
+                val headers = if (disappearEnabled && disappearSeconds > 0)
+                    mapOf("X-Expires-In" to disappearSeconds.toString()) else emptyMap()
+                val resp = NetworkClient.post(
+                    "/api/v1/messages/send",
+                    JSONObject().apply { put("sender_device_id",deviceID); put("recipient_device_id",recip); put("envelope",env.toString()) },
+                    headers,
+                )
+                // Server v2.4.1+ returns 503 + {"detail":"maintenance"} when locked.
+                if (resp.optInt("_status") == 503 && resp.optString("detail") == "maintenance") {
+                    maintenanceMode = true
+                    connStatus = "Send refused — server in maintenance"
+                    connColor  = Color(0xFFff8a8a)
+                    return@launch
+                }
                 messages = messages + Msg(deviceID, body)
             } catch (_: Exception) {}
         }
@@ -357,11 +482,23 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
                         put("nonce", eiv.toHex()); put("ciphertext", ect.toHex())
                         put("tag", etag.toHex()); put("sig", esg.toHex())
                     }
-                    NetworkClient.post("/api/v1/messages/send", JSONObject().apply {
-                        put("sender_device_id", deviceID)
-                        put("recipient_device_id", recip)
-                        put("envelope", env.toString())
-                    })
+                    val imgHeaders = if (disappearEnabled && disappearSeconds > 0)
+                        mapOf("X-Expires-In" to disappearSeconds.toString()) else emptyMap()
+                    val imgResp = NetworkClient.post(
+                        "/api/v1/messages/send",
+                        JSONObject().apply {
+                            put("sender_device_id", deviceID)
+                            put("recipient_device_id", recip)
+                            put("envelope", env.toString())
+                        },
+                        imgHeaders,
+                    )
+                    if (imgResp.optInt("_status") == 503 && imgResp.optString("detail") == "maintenance") {
+                        maintenanceMode = true
+                        connStatus = "Upload refused — server in maintenance"
+                        connColor  = Color(0xFFff8a8a)
+                        return@launch
+                    }
                 }
 
                 messages = messages + Msg(deviceID, "", imagePath = local.absolutePath,
@@ -587,7 +724,14 @@ fun ChatScreen(vm: GhostlinkVM) {
     var pendingDelete by remember { mutableStateOf<Msg?>(null) }
     var safetyNumber by remember { mutableStateOf<String?>(null) }
     var showLink by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     val ctx = androidx.compose.ui.platform.LocalContext.current
+
+    if (showSettings) {
+        SettingsDialog(vm, onDismiss = { showSettings = false }, onLinkDevice = {
+            showSettings = false; showLink = true
+        })
+    }
 
     if (showLink) {
         var pasted by remember { mutableStateOf("") }
@@ -697,22 +841,66 @@ fun ChatScreen(vm: GhostlinkVM) {
                     ) { Icon(Icons.Filled.Lock, "Verify safety number") }
                     IconButton(onClick = { vm.ownDevices(); tab = 0; showSide = true }) { Icon(Icons.Filled.Search, "Contacts") }
                     IconButton(onClick = { vm.loadGroups(); tab = 2; showSide = true }) { Icon(Icons.Filled.Share, "Groups") }
-                    IconButton(onClick = { showLink = true }) { Icon(Icons.Filled.Settings, "Link device") }
+                    IconButton(onClick = { showSettings = true }) { Icon(Icons.Filled.Settings, "Settings") }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
             )
         },
         bottomBar = {
             Column {
+                // v2.4.2 — maintenance banner identical wording to Windows
+                // v2.4.1. Sits above the input; only visible while the
+                // server has flipped the maintenance flag.
+                if (vm.maintenanceMode) {
+                    Surface(
+                        color = Color(0xFFB00020),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            "Server is undergoing maintenance — messaging is disabled for security.",
+                            modifier = Modifier.fillMaxWidth().padding(8.dp),
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        )
+                    }
+                }
                 Text(vm.connStatus, fontSize = 10.sp, color = vm.connColor, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp))
                 Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
                     Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(
                             onClick = { pickImage.launch("image/*") },
-                            enabled = vm.selectedRecipient.isNotBlank()
+                            // Disabled during maintenance.
+                            enabled = vm.selectedRecipient.isNotBlank() && !vm.maintenanceMode,
                         ) { Icon(Icons.Filled.Add, "Attach image", tint = MaterialTheme.colorScheme.primary) }
-                        OutlinedTextField(vm.currentMessage, { vm.currentMessage = it }, placeholder = { Text("Message...") }, modifier = Modifier.weight(1f), singleLine = true)
-                        IconButton(onClick = { vm.send() }, enabled = vm.currentMessage.isNotBlank()) { Icon(Icons.Filled.Send, "Send", tint = MaterialTheme.colorScheme.primary) }
+                        // 3x taller multi-line input matching the Windows v2.4.1
+                        // 108px bump. minLines=3 gives ~3 lines of visible text;
+                        // user can keep typing past that and the field scrolls.
+                        OutlinedTextField(
+                            value = vm.currentMessage,
+                            onValueChange = { vm.currentMessage = it },
+                            placeholder = {
+                                Text(if (vm.maintenanceMode)
+                                    "Server in maintenance — messaging disabled for security"
+                                    else "Message...")
+                            },
+                            modifier = Modifier.weight(1f),
+                            minLines = 3,
+                            maxLines = 6,
+                            enabled = !vm.maintenanceMode,
+                            colors = if (vm.maintenanceMode) {
+                                androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                                    disabledTextColor = Color(0xFFff8a8a),
+                                    disabledBorderColor = Color(0xFFB00020),
+                                    disabledContainerColor = Color(0x33B00020),
+                                )
+                            } else androidx.compose.material3.OutlinedTextFieldDefaults.colors(),
+                        )
+                        IconButton(
+                            onClick = { vm.send() },
+                            enabled = vm.currentMessage.isNotBlank() && !vm.maintenanceMode,
+                        ) { Icon(Icons.Filled.Send, "Send", tint = MaterialTheme.colorScheme.primary) }
                     }
                 }
             }
@@ -746,7 +934,11 @@ fun ChatScreen(vm: GhostlinkVM) {
                                         Text("[image unavailable]", color = if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface)
                                     }
                                 } else if (msg.body.isNotEmpty()) {
-                                    Text(msg.body, color = if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface)
+                                    val onCol = if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                                    Text(
+                                        text = mdToAnnotated(msg.body, onCol),
+                                        color = onCol,
+                                    )
                                 }
                                 Text((msg.name ?: vm.username).take(16), fontSize = 9.sp, color = (if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface).copy(alpha = 0.5f))
                             }
@@ -834,5 +1026,234 @@ fun ChatScreen(vm: GhostlinkVM) {
             },
             dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } }
         )
+    }
+}
+
+/**
+ * Markdown → AnnotatedString. Mirrors the Windows v2.1 mdToHtml subset:
+ * **bold**, *italic*, `code`, and bare https URLs styled distinctly so
+ * users can spot them. URLs aren't clickable yet — same level as the
+ * Windows client which only styles them.
+ */
+private fun mdToAnnotated(s: String, baseColor: androidx.compose.ui.graphics.Color): androidx.compose.ui.text.AnnotatedString {
+    data class Span(val start: Int, val end: Int, val style: androidx.compose.ui.text.SpanStyle, val text: String)
+    val out = StringBuilder()
+    val spans = mutableListOf<Span>()
+
+    // Walk char by char. Heuristic, not a CommonMark parser — same level
+    // of fidelity the Windows mdToHtml() helper provides.
+    var i = 0
+    while (i < s.length) {
+        if (i + 1 < s.length && s[i] == '*' && s[i + 1] == '*') {
+            val close = s.indexOf("**", i + 2)
+            if (close > i + 2) {
+                val body = s.substring(i + 2, close)
+                val st = out.length; out.append(body)
+                spans += Span(st, out.length, androidx.compose.ui.text.SpanStyle(fontWeight = androidx.compose.ui.text.font.FontWeight.Bold), body)
+                i = close + 2; continue
+            }
+        }
+        if (s[i] == '*') {
+            val close = s.indexOf('*', i + 1)
+            if (close > i + 1 && !s.substring(i + 1, close).contains('\n')) {
+                val body = s.substring(i + 1, close)
+                val st = out.length; out.append(body)
+                spans += Span(st, out.length, androidx.compose.ui.text.SpanStyle(fontStyle = androidx.compose.ui.text.font.FontStyle.Italic), body)
+                i = close + 1; continue
+            }
+        }
+        if (s[i] == '`') {
+            val close = s.indexOf('`', i + 1)
+            if (close > i + 1) {
+                val body = s.substring(i + 1, close)
+                val st = out.length; out.append(body)
+                spans += Span(st, out.length, androidx.compose.ui.text.SpanStyle(
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    background = androidx.compose.ui.graphics.Color(0x33888888),
+                ), body)
+                i = close + 1; continue
+            }
+        }
+        if (s.startsWith("https://", i) || s.startsWith("http://", i)) {
+            val end = s.substring(i).indexOfFirst { it == ' ' || it == '\n' || it == '\t' }.let {
+                if (it < 0) s.length else i + it
+            }
+            val body = s.substring(i, end)
+            val st = out.length; out.append(body)
+            spans += Span(st, out.length, androidx.compose.ui.text.SpanStyle(
+                color = androidx.compose.ui.graphics.Color(0xFF6FB6FF),
+                textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
+            ), body)
+            i = end; continue
+        }
+        out.append(s[i]); i++
+    }
+
+    return androidx.compose.ui.text.buildAnnotatedString {
+        append(out.toString())
+        for (sp in spans) addStyle(sp.style, sp.start, sp.end)
+    }
+}
+
+/**
+ * Settings dialog — mirror of the Windows v2.1.0 Settings dialog. Three
+ * tabs:
+ *   Appearance — theme preset picker. Selection persists via vm.setTheme().
+ *   Messages   — disappearing-messages toggle + minutes/seconds spinners.
+ *   Security   — link a new device + safety-number reminder.
+ *   Help       — quick documentation matching the Windows Help tab.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsDialog(vm: GhostlinkVM, onDismiss: () -> Unit, onLinkDevice: () -> Unit) {
+    var tab by remember { mutableIntStateOf(0) }
+    val tabs = listOf("Appearance", "Messages", "Security", "Help")
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        title = { Text("Settings") },
+        text = {
+            Column(Modifier.fillMaxWidth().heightIn(min = 380.dp, max = 560.dp)) {
+                androidx.compose.material3.TabRow(selectedTabIndex = tab) {
+                    tabs.forEachIndexed { i, label ->
+                        androidx.compose.material3.Tab(
+                            selected = tab == i,
+                            onClick = { tab = i },
+                            text = { Text(label, fontSize = 12.sp) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Box(Modifier.fillMaxWidth().weight(1f)
+                    .verticalScroll(rememberScrollState())) {
+                    when (tab) {
+                        0 -> AppearanceTab(vm)
+                        1 -> MessagesTab(vm)
+                        2 -> SecurityTab(vm, onLinkDevice)
+                        else -> HelpTab()
+                    }
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun AppearanceTab(vm: GhostlinkVM) {
+    Column {
+        Text("Theme", style = MaterialTheme.typography.titleSmall)
+        Text("Applies on next app open for the full effect, but most surfaces update immediately.",
+            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 8.dp))
+        THEME_NAMES.forEach { name ->
+            Row(
+                Modifier.fillMaxWidth().clickable { vm.setTheme(name) }.padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = vm.themeName == name, onClick = { vm.setTheme(name) })
+                Spacer(Modifier.width(8.dp))
+                Text(name)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessagesTab(vm: GhostlinkVM) {
+    var enabled by remember { mutableStateOf(vm.disappearEnabled) }
+    var mins by remember { mutableIntStateOf(vm.disappearSeconds / 60) }
+    var secs by remember { mutableIntStateOf(vm.disappearSeconds % 60) }
+    LaunchedEffect(enabled, mins, secs) {
+        vm.setDisappearing(enabled, mins * 60 + secs)
+    }
+
+    Column {
+        Text("Disappearing messages", style = MaterialTheme.typography.titleSmall)
+        Text("Outgoing messages auto-delete after the timer. Server enforces; clients pick the timer.",
+            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.material3.Switch(checked = enabled, onCheckedChange = { enabled = it })
+            Spacer(Modifier.width(8.dp))
+            Text(if (enabled) "Enabled" else "Disabled (default)")
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("After: ", modifier = Modifier.padding(end = 4.dp))
+            NumberStepper(value = mins, onChange = { mins = it.coerceIn(0, 1440) }, suffix = "min", enabled = enabled)
+            Spacer(Modifier.width(8.dp))
+            NumberStepper(value = secs, onChange = { secs = it.coerceIn(0, 59) }, suffix = "sec", enabled = enabled)
+        }
+        Spacer(Modifier.height(18.dp))
+        Text("Rich text", style = MaterialTheme.typography.titleSmall)
+        Text("Incoming messages render **bold**, *italic*, `code`, and clickable URLs.\nWindows users get the same. Emoji works via your system keyboard.",
+            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun NumberStepper(value: Int, onChange: (Int) -> Unit, suffix: String, enabled: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = { onChange(value - 1) }, enabled = enabled) {
+            Icon(Icons.Filled.Close, "decrement", modifier = Modifier.rotate(45f))
+        }
+        Text(
+            "$value $suffix",
+            modifier = Modifier.widthIn(min = 60.dp),
+            color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+        IconButton(onClick = { onChange(value + 1) }, enabled = enabled) {
+            Icon(Icons.Filled.Add, "increment")
+        }
+    }
+}
+
+@Composable
+private fun SecurityTab(vm: GhostlinkVM, onLinkDevice: () -> Unit) {
+    Column {
+        Text("Multi-device", style = MaterialTheme.typography.titleSmall)
+        Text("Link this account to another device using a short code. The server only sees ephemeral X25519 pubkeys + opaque ciphertext.",
+            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = onLinkDevice) { Text("Link another device…") }
+        Spacer(Modifier.height(18.dp))
+        Text("Safety numbers", style = MaterialTheme.typography.titleSmall)
+        Text("Tap the shield icon at the top of the chat with a contact selected to see a 30-digit number. Compare it with them in person to defeat MITM.",
+            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(18.dp))
+        Text("Screen-capture protection", style = MaterialTheme.typography.titleSmall)
+        Text("FLAG_SECURE is set on this activity — screenshots and screen-share record a black frame instead of the chat.",
+            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun HelpTab() {
+    Column {
+        Text("GHOSTLINK — Quick reference", style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.height(8.dp))
+        @Composable fun section(t: String, body: String) {
+            Text(t, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            Text(body, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp, bottom = 10.dp))
+        }
+        section("How conversations work",
+            "Every message is encrypted on your device before it touches the server. The server can route ciphertext and not read it.")
+        section("Verifying contacts",
+            "Open a chat → tap the shield icon at the top. A 30-digit number appears. Compare it out-of-band; same on both sides means no MITM.")
+        section("Disappearing messages",
+            "Settings → Messages. Toggle on, pick minutes/seconds. The server's sweeper deletes expired messages. Default is OFF.")
+        section("Theme",
+            "Settings → Appearance. Pick from preset palettes. Choice survives app restart.")
+        section("Linking a second device",
+            "Settings → Security → Link another device. Follow the short-code prompts. 5-minute TTL.")
+        section("If you suspect coercion",
+            "Five wrong-password attempts auto-wipes the account on the server side. Cannot be undone.")
+        section("Troubleshooting",
+            "'Server in maintenance' — operator paused the system, sends are 503'd. Wait + retry.\n" +
+            "'Server offline' — heartbeat is failing; check connectivity.")
+        section("Source",
+            "https://github.com/ExposingTheBadge/GhostLink")
     }
 }

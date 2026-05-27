@@ -6,7 +6,7 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "2.4.1"
+#define CLIENT_VERSION "2.4.2"
 
 extern "C" {
 #include "client.h"

@@ -20,24 +20,37 @@ object NetworkClient {
     }
     private const val TIMEOUT = 10_000
 
-    suspend fun post(path: String, body: JSONObject): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun post(path: String, body: JSONObject): JSONObject =
+        post(path, body, emptyMap())
+
+    /** POST with extra request headers (e.g. X-Expires-In for
+     *  disappearing messages). Header names with a single value each. */
+    suspend fun post(path: String, body: JSONObject,
+                     headers: Map<String, String>): JSONObject = withContext(Dispatchers.IO) {
         val url = URL(BASE + path)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Connection", "close")
+            for ((k, v) in headers) setRequestProperty(k, v)
             connectTimeout = 10_000
             readTimeout = 10_000
             doOutput = true
         }
         OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
 
+        val status = conn.responseCode
         val response = BufferedReader(InputStreamReader(
-            if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream
+            if (status in 200..299) conn.inputStream else conn.errorStream
         )).readText()
 
         conn.disconnect()
-        JSONObject(response)
+        // Stash the HTTP status so callers can detect 503 maintenance
+        // without re-issuing the request. Best-effort — if parsing fails
+        // we just return what we have.
+        val obj = try { JSONObject(response) } catch (_: Throwable) { JSONObject() }
+        obj.put("_status", status)
+        obj
     }
 
     suspend fun get(path: String): JSONObject = withContext(Dispatchers.IO) {
