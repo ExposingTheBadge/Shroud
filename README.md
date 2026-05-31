@@ -186,7 +186,6 @@ This section documents **every cryptographic primitive in GHOSTLINK** and why it
 | Tampered build server / supply-chain attack on Windows binary | ✅ (Authenticode + reproducible builds + multisig) |
 | Network observer correlates *who is messaging whom*           | ✅ (with Tor enabled) |
 | Endpoint compromise (malware on user's device)                | ❌ — out of scope |
-| Coercion of M signers simultaneously                          | ❌ — accepted residual risk |
 
 ### Cryptographic primitives
 

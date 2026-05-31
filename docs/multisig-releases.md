@@ -114,17 +114,9 @@ current one.
 
 ## Trust model summary
 
-| Threat                                       | Single-sig | Multi-sig (M of N) |
-|----------------------------------------------|------------|--------------------|
-| Source-only attacker (no key)                | safe       | safe               |
-| Server identity key stolen                   | broken     | safe (need ≥ M)    |
-| One signer's machine owned                   | broken     | safe (need ≥ M)    |
-| (M-1) signers compromised at once            | broken     | safe               |
-| M signers compromised at once                | broken     | broken             |
-| Loss of (N-M) signer keys (key destroyed)    | broken     | safe (still ≥ M)   |
-| Lose the box holding sign_manifest's key     | broken     | safe (still ≥ M)   |
-
-The single-sig (`sign_manifest.py`) path stays useful — it covers the
-"this is the GHOSTLINK server identity" claim — and the multi-sig
-(`multisig.py`) path covers the "humans agree this is a real release"
-claim. Both ride along in the v2.3.0+ release directory.
+The single-sig (`sign_manifest.py`) path covers the "this is the
+GHOSTLINK server identity" claim — it binds a release to the project's
+identity key. The multi-sig (`multisig.py`) path covers the "humans
+agree this is a real release" claim — it requires M independent
+signers to attest the same manifest, so no single compromised key can
+forge a release. Both ride along in the v2.3.0+ release directory.
