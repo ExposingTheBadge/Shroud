@@ -1,0 +1,25 @@
+[package]
+name = "shroud-anon-routing"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Rust port of SHROUD's anonymous routing protocol — sealed envelopes + per-pair epoch routing tags. Wire-compatible with the Python/C/Kotlin/Swift/JS reference implementations."
+repository = "https://github.com/ExposingTheBadge/Shroud"
+keywords = ["shroud", "crypto", "messaging", "privacy", "post-quantum"]
+categories = ["cryptography", "network-programming"]
+
+[lib]
+name = "shroud_anon_routing"
+path = "src/lib.rs"
+
+[dependencies]
+# Pinned for reproducibility. Bump together after audit.
+x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+hmac = "0.12"
+
+[dev-dependencies]
+hex = "0.4"
