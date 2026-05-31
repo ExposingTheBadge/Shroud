@@ -1,0 +1,82 @@
+# SHROUD full-stack docker-compose deployment.
+#
+# Runs the relay + the SFU as separate services behind a shared
+# network. Optional federation can be enabled by setting
+# SHROUD_FEDERATION=1 in the .env file alongside.
+#
+# Use for self-hosted relays. Storage is persisted to named volumes;
+# delete those to reset.
+#
+# Bring up:
+#   docker compose up -d
+#
+# Tear down (preserving volumes):
+#   docker compose down
+#
+# Tear down EVERYTHING (volumes + data):
+#   docker compose down --volumes
+
+version: "3.9"
+
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.repro
+    image: shroud-relay:latest
+    container_name: shroud-relay
+    restart: unless-stopped
+    ports:
+      - "58443:58443"
+    environment:
+      SHROUD_FEDERATION: "${SHROUD_FEDERATION:-0}"
+      SHROUD_DATA_DIR: /var/lib/shroud
+    volumes:
+      - shroud-data:/var/lib/shroud
+      - ./certs:/etc/shroud/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-qO-", "https://127.0.0.1:58443/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - shroud-net
+
+  sfu:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile.sfu
+    image: shroud-sfu:latest
+    container_name: shroud-sfu
+    restart: unless-stopped
+    ports:
+      - "58444:58444"
+    depends_on:
+      - relay
+    networks:
+      - shroud-net
+
+  # Optional: an Nginx in front to terminate TLS with a real cert.
+  # Uncomment if you want Let's Encrypt instead of self-signed.
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: shroud-nginx
+  #   restart: unless-stopped
+  #   ports:
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./certs:/etc/nginx/certs:ro
+  #   depends_on:
+  #     - relay
+  #   networks:
+  #     - shroud-net
+
+networks:
+  shroud-net:
+    driver: bridge
+
+volumes:
+  shroud-data:
+    name: shroud-data

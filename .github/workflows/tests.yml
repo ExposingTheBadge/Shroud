@@ -1,0 +1,55 @@
+name: Protocol module tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  python-self-tests:
+    name: All module self-tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install cryptography argon2-cffi liboqs-python httpx fastapi 'uvicorn[standard]' pydantic
+
+      - name: Run all module self-tests
+        run: python -m tests.run_all
+
+  e2e-against-live-relay:
+    name: E2E against live AWS relay (best-effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true   # never gates a merge; just surfaces drift
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install cryptography
+
+      - name: Run e2e tests
+        run: python -m tests.e2e_anon_protocol
+        env:
+          SHROUD_RELAY_URL: https://44.202.225.57:58443

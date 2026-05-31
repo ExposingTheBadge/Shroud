@@ -1,0 +1,22 @@
+# SFU container image for SHROUD.
+#
+# Trivial — installs python + fastapi + uvicorn and runs server.sfu.
+# Same reproducibility hygiene as Dockerfile.repro: pinned base + no
+# pip cache.
+
+FROM python:3.12.6-slim-bookworm@sha256:032c52613401895aa3d418a4c563d2d05f993bc3ecc065c8f4e2280978acd249
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=0 \
+    SOURCE_DATE_EPOCH=1700000000 \
+    PIP_NO_CACHE_DIR=1
+
+RUN pip install --no-cache-dir "fastapi==0.128.8" "uvicorn[standard]==0.39.0"
+
+WORKDIR /sfu
+COPY server/sfu.py /sfu/sfu.py
+
+EXPOSE 58444
+
+CMD ["python", "-m", "uvicorn", "sfu:app", "--host", "0.0.0.0", "--port", "58444"]
