@@ -1,6 +1,6 @@
 # Reproducible Builds
 
-GHOSTLINK's threat model assumes upstream binaries themselves could be
+SHROUD's threat model assumes upstream binaries themselves could be
 tampered with. To defend against that, anyone (you, an auditor, a paranoid
 user) should be able to compile the same source and get the same binary.
 This document covers what's reproducible today, what isn't, and the path
@@ -23,10 +23,10 @@ docker buildx build \
     --pull \
     --output type=docker \
     -f Dockerfile.repro \
-    -t ghostlink-server:repro \
+    -t shroud-server:repro \
     .
 
-docker image inspect --format='{{.Id}}' ghostlink-server:repro
+docker image inspect --format='{{.Id}}' shroud-server:repro
 ```
 
 The reported `sha256:...` must match the value published with the release.
@@ -142,7 +142,7 @@ single-signature manifest from `release/sign_manifest.py`) AND
 - their respective signatures
 
 Verifiers cross-check against the public transparency log (currently
-`https://github.com/ExposingTheBadge/GhostLink/releases`). Conflicting
+`https://github.com/ExposingTheBadge/Shroud/releases`). Conflicting
 hashes are evidence of compromise — alert maintainers and refuse the
 binary.
 
@@ -152,8 +152,8 @@ If you don't trust *anyone*, including the release server:
 
 1. Clone the repo at the tagged commit:
    ```
-   git clone https://github.com/ExposingTheBadge/GhostLink
-   git -C GhostLink checkout v2.3.0
+   git clone https://github.com/ExposingTheBadge/Shroud
+   git -C Shroud checkout v2.3.0
    ```
 2. Build each component with the commands above.
 3. Hash your binaries.

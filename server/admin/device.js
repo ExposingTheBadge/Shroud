@@ -2,11 +2,7 @@
 'use strict';
 
 function $(id) { return document.getElementById(id); }
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  })[c]);
-}
+/* esc(), api(), toast(), showModal() come from shared.js */
 function fmtSize(b) {
   if (!b && b !== 0) return '—';
   if (b < 1024) return b + ' B';
@@ -96,6 +92,25 @@ async function load() {
     esc(e.status) + '</span></td>' +
     '<td>' + esc(e.detail) + '</td></tr>'
   ).join('') || '<tr><td colspan="4" class="empty">none</td></tr>';
+}
+
+async function deleteThisDevice() {
+  const ok = await showModal({
+    title: 'Delete device',
+    body: 'Delete device <code>' + esc(did.substring(0, 16)) + '…</code>?',
+    impact: 'All queued messages to and from this device will be removed. ' +
+            'The owning user is not affected.',
+    impactClass: 'warn',
+    confirmText: 'Yes, delete', confirmClass: 'danger',
+  });
+  if (!ok) return;
+  try {
+    await api('DELETE', '/api/v1/admin/devices/' + encodeURIComponent(did));
+    toast('Device deleted', 'ok');
+    setTimeout(() => { location = '/admin#devices'; }, 600);
+  } catch (e) {
+    toast('Delete failed: ' + (e && e.message ? e.message : 'unknown'), 'danger');
+  }
 }
 
 load();

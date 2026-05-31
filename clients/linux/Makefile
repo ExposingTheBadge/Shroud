@@ -1,12 +1,12 @@
 CFLAGS  = -O2 -Wall $(shell pkg-config --cflags gtk+-3.0 openssl libcurl)
 LDFLAGS = $(shell pkg-config --libs gtk+-3.0 openssl libcurl) -lm
 
-ghostlink: main.c
-	gcc $(CFLAGS) -o ghostlink main.c $(LDFLAGS)
+shroud: main.c
+	gcc $(CFLAGS) -o shroud main.c $(LDFLAGS)
 
 clean:
-	rm -f ghostlink
+	rm -f shroud
 
-install: ghostlink
-	cp ghostlink /usr/local/bin/ghostlink
-	chmod 755 /usr/local/bin/ghostlink
+install: shroud
+	cp shroud /usr/local/bin/shroud
+	chmod 755 /usr/local/bin/shroud

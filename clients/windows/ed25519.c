@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Ed25519 verify-only.
+ * SHROUD Ed25519 verify-only.
  *
  * Port of TweetNaCl's crypto_sign_open path (public domain, Bernstein
  * et al.). 16-limb radix-2^16 field arithmetic. SHA-512 from BCrypt.

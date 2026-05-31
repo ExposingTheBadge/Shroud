@@ -1,13 +1,13 @@
-# GHOSTLINK Tor configuration (example)
+# SHROUD Tor configuration (example)
 # =====================================
-# Drop into /etc/tor/torrc.d/ghostlink.conf and restart tor.
+# Drop into /etc/tor/torrc.d/shroud.conf and restart tor.
 # See docs/tor.md for the full deployment guide.
 
-# --- Hidden service for the GHOSTLINK server ---------------------------------
+# --- Hidden service for the SHROUD server ---------------------------------
 # This publishes a v3 onion address that maps to the locally-bound server.
 # The matching server invocation is:
 #   python -m server.server --bind 127.0.0.1
-HiddenServiceDir /var/lib/tor/ghostlink/
+HiddenServiceDir /var/lib/tor/shroud/
 HiddenServicePort 58443 127.0.0.1:58443
 HiddenServiceVersion 3
 

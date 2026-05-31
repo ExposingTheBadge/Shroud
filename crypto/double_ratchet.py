@@ -1,5 +1,5 @@
 """
-GHOSTLINK Double Ratchet
+SHROUD Double Ratchet
 ========================
 Signal-style Double Ratchet for forward + future secrecy. Each conversation
 maintains:
@@ -18,7 +18,7 @@ A device compromise burns roughly one message worth of past traffic: every
 send rotates the chain key, every receive after the peer's DH rotation
 rotates the root. Old chain keys are forgotten.
 
-Initialization is seeded by the GHOSTLINK PQ-hybrid handshake (ECDH-P384 +
+Initialization is seeded by the SHROUD PQ-hybrid handshake (ECDH-P384 +
 ML-KEM-1024 via HKDF-SHA512). That gives the root key. The per-message DH
 ratchet uses X25519 — fast and well-studied. (Pure PQ ratcheting is on the
 v1.7.0 roadmap; today's design closes Harvest-Now-Decrypt-Later at the
@@ -42,9 +42,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 MAGIC = 0x32325244
 MAX_SKIP = 1000  # max messages we'll cache as "skipped"
-INFO_RK = b"GHOSTLINK-DR-RK"
-INFO_CK = b"GHOSTLINK-DR-CK"
-INFO_MSG = b"GHOSTLINK-DR-MSG"
+INFO_RK = b"SHROUD-DR-RK"
+INFO_CK = b"SHROUD-DR-CK"
+INFO_MSG = b"SHROUD-DR-MSG"
 
 
 def _hkdf(ikm: bytes, salt: bytes, info: bytes, length: int = 64) -> bytes:

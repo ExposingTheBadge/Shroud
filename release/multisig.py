@@ -1,5 +1,5 @@
 """
-GHOSTLINK multi-party release signing — N-of-M threshold attestation.
+SHROUD multi-party release signing — N-of-M threshold attestation.
 
 Why this exists
 ---------------
@@ -127,7 +127,7 @@ def cmd_roster(args):
 def _build_manifest(args):
     """Same envelope shape as sign_manifest.py so the two can coexist."""
     manifest = {
-        "product": "GHOSTLINK",
+        "product": "SHROUD",
         "version": args.version,
         "git_commit": args.git_commit,
         "built_at_utc": int(time.time()),
@@ -184,7 +184,7 @@ def cmd_gather(args):
         sys.exit(f"attestations cover {len(manifests_seen)} distinct manifests — refusing to combine")
 
     combined = {
-        "format": "ghostlink-multisig-v1",
+        "format": "shroud-multisig-v1",
         "roster": roster,
         "manifest": attestations[0]["manifest"],
         "signatures": [

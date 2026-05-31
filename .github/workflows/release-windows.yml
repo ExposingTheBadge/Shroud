@@ -56,7 +56,7 @@ jobs:
 
           # Keep CMakeLists.txt project() version in sync
           $cmake = Get-Content clients/windows/CMakeLists.txt -Raw
-          $cmake = $cmake -replace 'project\(GHOSTLINK VERSION \d+\.\d+\.\d+', "project(GHOSTLINK VERSION $ver"
+          $cmake = $cmake -replace 'project\(SHROUD VERSION \d+\.\d+\.\d+', "project(SHROUD VERSION $ver"
           Set-Content clients/windows/CMakeLists.txt -Value $cmake -NoNewline
 
           "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -87,7 +87,7 @@ jobs:
             -DCMAKE_CXX_FLAGS="/Brepro" `
             -DCMAKE_EXE_LINKER_FLAGS="/Brepro"
 
-      - name: Build ghostlink.exe
+      - name: Build shroud.exe
         shell: pwsh
         working-directory: clients/windows
         run: cmake --build build --config Release
@@ -97,8 +97,8 @@ jobs:
         working-directory: clients/windows
         run: |
           New-Item -ItemType Directory -Force -Path "dist" | Out-Null
-          Copy-Item "build/ghostlink.exe" "dist/ghostlink.exe"
-          windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw "dist/ghostlink.exe"
+          Copy-Item "build/shroud.exe" "dist/shroud.exe"
+          windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw "dist/shroud.exe"
 
       - name: Azure login (OIDC federated)
         uses: azure/login@v2
@@ -107,7 +107,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Sign ghostlink.exe with Azure Artifact Signing
+      - name: Sign shroud.exe with Azure Artifact Signing
         uses: azure/trusted-signing-action@v0.5.1
         with:
           endpoint: ${{ env.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
@@ -125,7 +125,7 @@ jobs:
         working-directory: clients/windows
         run: |
           $ver = "${{ steps.bump.outputs.version }}"
-          $zipName = "GHOSTLINK-v$ver-win64.zip"
+          $zipName = "SHROUD-v$ver-win64.zip"
           Compress-Archive -Path "dist/*" -DestinationPath $zipName -Force
 
           $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash.ToLower()
@@ -156,7 +156,7 @@ jobs:
           $commits
 
           ### Windows
-          Download ``${{ steps.package.outputs.zipname }}`` below and extract. ``ghostlink.exe`` is Authenticode-signed; Windows shows **Verified publisher: Brent Gordon**.
+          Download ``${{ steps.package.outputs.zipname }}`` below and extract. ``shroud.exe`` is Authenticode-signed; Windows shows **Verified publisher: Brent Gordon**.
 
           Verify the zip hash against ``SHA256SUMS.txt`` before extracting.
 
@@ -188,7 +188,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.bump.outputs.tag }}
-          name: GHOSTLINK ${{ steps.bump.outputs.tag }}
+          name: SHROUD ${{ steps.bump.outputs.tag }}
           body: ${{ steps.notes.outputs.body }}
           files: |
             ${{ steps.package.outputs.zip }}

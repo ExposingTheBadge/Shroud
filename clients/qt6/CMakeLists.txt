@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(GHOSTLINK VERSION 1.2.0 LANGUAGES CXX C)
+project(SHROUD VERSION 1.2.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,17 +17,17 @@ set(WIN_MODULES
     ../windows/kyber1024.c
 )
 
-add_executable(ghostlink
+add_executable(shroud
     main.cpp
     ${WIN_MODULES}
 )
 
-target_include_directories(ghostlink PRIVATE
+target_include_directories(shroud PRIVATE
     ../windows
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(ghostlink PRIVATE
+target_link_libraries(shroud PRIVATE
     Qt6::Widgets
     Qt6::Core
     Qt6::Gui
@@ -35,5 +35,5 @@ target_link_libraries(ghostlink PRIVATE
     bcrypt ncrypt winhttp ws2_32 crypt32 tbs user32 gdi32 advapi32 comdlg32 shell32 dwmapi uxtheme
 )
 
-target_compile_definitions(ghostlink PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
-set_target_properties(ghostlink PROPERTIES WIN32_EXECUTABLE TRUE)
+target_compile_definitions(shroud PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+set_target_properties(shroud PROPERTIES WIN32_EXECUTABLE TRUE)

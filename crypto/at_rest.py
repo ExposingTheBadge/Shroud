@@ -1,8 +1,8 @@
 """
-GHOSTLINK At-Rest Field Encryption
+SHROUD At-Rest Field Encryption
 ==================================
 Wraps a 32-byte master key (loaded from server/data.key or env var
-GHOSTLINK_DATA_KEY) around AES-256-GCM column-level encryption. Used for
+SHROUD_DATA_KEY) around AES-256-GCM column-level encryption. Used for
 columns whose contents leak metadata if the SQLite file is exfiltrated:
 
   - friend_requests.reason
@@ -28,8 +28,8 @@ DATA_KEY_LEN = 32
 
 def load_or_create_data_key(path: str) -> bytes:
     """Load the master key from <path>, or create one if missing.
-    Honors the GHOSTLINK_DATA_KEY env var (hex string) when set."""
-    env = os.environ.get("GHOSTLINK_DATA_KEY", "")
+    Honors the SHROUD_DATA_KEY env var (hex string) when set."""
+    env = os.environ.get("SHROUD_DATA_KEY", "")
     if env:
         try:
             k = bytes.fromhex(env)

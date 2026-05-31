@@ -1,5 +1,5 @@
 """
-GHOSTLINK Anonymous Send Credentials
+SHROUD Anonymous Send Credentials
 ====================================
 Privacy-Pass-style blind RSA signatures. The server issues short-lived
 tokens to authenticated users; the user spends a token per message. Because
@@ -47,7 +47,7 @@ def fdh(msg: bytes, n: int) -> int:
     out = b""
     counter = 0
     while len(out) < RSA_BYTES:
-        out += hashlib.sha256(b"GHOSTLINK-FDH|" + counter.to_bytes(4, "big") + msg).digest()
+        out += hashlib.sha256(b"SHROUD-FDH|" + counter.to_bytes(4, "big") + msg).digest()
         counter += 1
     val = int.from_bytes(out[:RSA_BYTES], "big")
     return val % n

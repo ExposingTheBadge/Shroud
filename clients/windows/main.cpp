@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Qt6 Client — Clean cross-platform desktop client
+ * SHROUD Qt6 Client — Clean cross-platform desktop client
  * Compile: cmake -B build && cmake --build build --config Release
  */
 #include <QtWidgets>
@@ -38,9 +38,9 @@ struct Theme {
 };
 
 static QList<Theme> THEME_PRESETS = {
-    /* Default — GHOSTLINK dark/orange (unchanged from v2.0) */
-    {"GHOSTLINK Dark",       "#1a1a1a", "#222222", "#2d2d2d", "#333333", "#cccccc", "#888888", "#ff8c1e", "#ff8c1e", "#cc3333"},
-    {"GHOSTLINK Light",      "#ffffff", "#f5f5f0", "#f0f0e8", "#dddddd", "#1a1a1a", "#666666", "#ff8c1e", "#cc4400", "#cc0000"},
+    /* Default — SHROUD dark/orange (unchanged from v2.0) */
+    {"SHROUD Dark",       "#1a1a1a", "#222222", "#2d2d2d", "#333333", "#cccccc", "#888888", "#ff8c1e", "#ff8c1e", "#cc3333"},
+    {"SHROUD Light",      "#ffffff", "#f5f5f0", "#f0f0e8", "#dddddd", "#1a1a1a", "#666666", "#ff8c1e", "#cc4400", "#cc0000"},
     {"Solarized Dark",       "#002b36", "#073642", "#073642", "#586e75", "#93a1a1", "#586e75", "#268bd2", "#b58900", "#dc322f"},
     {"Solarized Light",      "#fdf6e3", "#eee8d5", "#eee8d5", "#93a1a1", "#586e75", "#839496", "#268bd2", "#b58900", "#dc322f"},
     {"Nord",                 "#2e3440", "#3b4252", "#434c5e", "#4c566a", "#eceff4", "#88c0d0", "#5e81ac", "#88c0d0", "#bf616a"},
@@ -98,7 +98,7 @@ QString themeQSS(const Theme &t) {
 /* Legacy adapter so existing call sites keep working until they're
  * migrated to themeQSS(gTheme) directly. */
 QString themeCSS(bool dark) {
-    if (gTheme.name == "GHOSTLINK Dark" || gTheme.name == "GHOSTLINK Light") {
+    if (gTheme.name == "SHROUD Dark" || gTheme.name == "SHROUD Light") {
         gTheme = dark ? THEME_PRESETS[0] : THEME_PRESETS[1];
     }
     return themeQSS(gTheme);
@@ -157,7 +157,7 @@ QString mdToHtml(QString s) {
 
 static void loadUserPrefs() {
     HKEY hk;
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK\\Prefs", 0, KEY_READ, &hk) != ERROR_SUCCESS) return;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\SHROUD\\Prefs", 0, KEY_READ, &hk) != ERROR_SUCCESS) return;
     DWORD val, sz = sizeof(val);
     char str[128]; DWORD ssz;
     if (RegQueryValueExA(hk, "Dark", NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gDark = val != 0;
@@ -207,7 +207,7 @@ static void loadUserPrefs() {
 
 static void saveUserPrefs() {
     HKEY hk;
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK\\Prefs", 0, NULL,
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\SHROUD\\Prefs", 0, NULL,
                         REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hk, NULL) != ERROR_SUCCESS) return;
     DWORD v;
     v = gDark ? 1 : 0;                RegSetValueExA(hk, "Dark", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
@@ -385,11 +385,11 @@ private:
 /* ===================================================================
  *  MAIN WINDOW
  * =================================================================== */
-class GhostlinkWindow : public QMainWindow {
+class ShroudWindow : public QMainWindow {
     Q_OBJECT
 public:
-    GhostlinkWindow() {
-        setWindowTitle("GHOSTLINK Secure Messenger");
+    ShroudWindow() {
+        setWindowTitle("SHROUD Secure Messenger");
         resize(880, 620);
         loadUserPrefs();
         qApp->setStyleSheet(themeQSS(gTheme));
@@ -551,7 +551,7 @@ private:
         QAction *ex = file->addAction("E&xit"); connect(ex, &QAction::triggered, this, &QWidget::close);
 
         QMenu *sett = menuBar()->addMenu("&Settings");
-        QAction *st = sett->addAction("&Settings..."); connect(st, &QAction::triggered, this, &GhostlinkWindow::openSettings);
+        QAction *st = sett->addAction("&Settings..."); connect(st, &QAction::triggered, this, &ShroudWindow::openSettings);
         QAction *th = sett->addAction(gDark ? "Switch to &Light Mode" : "Switch to &Dark Mode");
         connect(th, &QAction::triggered, [this, th]() {
             gDark = !gDark;
@@ -564,8 +564,8 @@ private:
             const char *tname =
                 gTransport == Transport::Tor ? "Tor (SOCKS5)" :
                                                 "Direct (clearnet)";
-            QMessageBox::about(this, "GHOSTLINK",
-                QString("GHOSTLINK v%1\n\nAES-256-GCM | ECDH P-384 | ML-KEM-1024\n"
+            QMessageBox::about(this, "SHROUD",
+                QString("SHROUD v%1\n\nAES-256-GCM | ECDH P-384 | ML-KEM-1024\n"
                         "Self-Destructing Messages | One-Time Files\n"
                         "No personal data. No metadata. No trace.\n\n"
                         "Active transport: %2").arg(CLIENT_VERSION).arg(tname));
@@ -600,7 +600,7 @@ private:
         QMessageBox box(this);
         box.setWindowTitle("Update Available");
         box.setIcon(QMessageBox::Information);
-        box.setText(QString("<b>GHOSTLINK v%1</b> is available.<br>You have v%2.").arg(latest, CLIENT_VERSION));
+        box.setText(QString("<b>SHROUD v%1</b> is available.<br>You have v%2.").arg(latest, CLIENT_VERSION));
         if (!changelog.isEmpty()) box.setInformativeText(changelog);
         QPushButton *dl = box.addButton("Download", QMessageBox::AcceptRole);
         box.addButton("Later", QMessageBox::RejectRole);
@@ -623,7 +623,7 @@ private:
     auto *cl = new QVBoxLayout(card);
     cl->setSpacing(12);
 
-    auto *title = new QLabel("<h2>GHOSTLINK</h2>"); title->setAlignment(Qt::AlignCenter);
+    auto *title = new QLabel("<h2>SHROUD</h2>"); title->setAlignment(Qt::AlignCenter);
     cl->addWidget(title);
 
     /* Shared fields */
@@ -750,8 +750,8 @@ private:
                     QByteArray idResp = httpGet("/api/v1/server-identity");
                     QByteArray pkBlob = QByteArray::fromHex(jsonStr(idResp, "pubkey_blob").toUtf8());
                     QByteArray sigBlob = QByteArray::fromHex(sigHexV2.toUtf8());
-                    QByteArray msg = QByteArray("GHOSTLINK-KEX-v2|") + sidV2.toUtf8() + "|" + blobBytesQ;
-                    if (!ghostlink_verify_server_sig(
+                    QByteArray msg = QByteArray("SHROUD-KEX-v2|") + sidV2.toUtf8() + "|" + blobBytesQ;
+                    if (!shroud_verify_server_sig(
                             (const BYTE*)pkBlob.constData(), pkBlob.size(),
                             (const BYTE*)sigBlob.constData(), sigBlob.size(),
                             (const BYTE*)msg.constData(), msg.size())) {
@@ -767,16 +767,21 @@ private:
                 BYTE sessionKey[32];
                 if (crypto_pq_hybrid_client((const BYTE*)blobBytesQ.constData(), blobBytesQ.size(),
                                             clientBlob, &cbLen, sessionKey)) {
-                    /* Auth key = SHA-256(session_key || "GHOSTLINK-AUTH-PQ-v1") */
+                    /* Auth key = SHA-256(session_key || "SHROUD-AUTH-PQ-v1") */
                     BYTE authKey[32]; BYTE buf[32 + 21];
                     memcpy(buf, sessionKey, 32);
-                    memcpy(buf + 32, "GHOSTLINK-AUTH-PQ-v1", 21);
+                    memcpy(buf + 32, "SHROUD-AUTH-PQ-v1", 21);
                     crypto_sha256(buf, sizeof(buf), authKey);
 
+                    /* v2.4.6 — pass the persisted device_id on login so
+                       the server can reuse our existing devices row
+                       instead of issuing a fresh one every time. */
+                    QString existingDid = showRegister ? QString() : m_deviceId;
                     QByteArray payload = jsonBody({
                         {"username", u}, {"password", p}, {"device_name", d},
                         {"platform", QString("windows")}, {"register", showRegister},
-                        {"public_key", pubHex}
+                        {"public_key", pubHex},
+                        {"existing_device_id", existingDid}
                     });
                     BYTE nonce[12], ct[4096], tag[16];
                     crypto_random_bytes(nonce, 12);
@@ -816,10 +821,14 @@ private:
             if (!crypto_auth_derive_key(kp.handle, serverBlob, blobLen, authKey)) {
                 status->setText("Key derivation failed"); crypto_free_keypair(&kp); return;
             }
+            /* v2.4.6 — pass existing device_id on login so the server
+               reuses our row instead of issuing a new one every login. */
+            QString existingDid_v1 = showRegister ? QString() : m_deviceId;
             QByteArray payload = jsonBody({
                 {"username", u}, {"password", p}, {"device_name", d},
                 {"platform", QString("windows")}, {"register", showRegister},
-                {"public_key", pubHex}
+                {"public_key", pubHex},
+                {"existing_device_id", existingDid_v1}
             });
             BYTE nonce[12], ct[4096], tag[16];
             crypto_random_bytes(nonce, 12);
@@ -951,7 +960,7 @@ private:
         m_chatLog->setReadOnly(true);
         m_chatLog->setOpenLinks(false);
         m_chatLog->setOpenExternalLinks(false);
-        connect(m_chatLog, &QTextBrowser::anchorClicked, this, &GhostlinkWindow::onChatAnchorClicked);
+        connect(m_chatLog, &QTextBrowser::anchorClicked, this, &ShroudWindow::onChatAnchorClicked);
         m_chatLog->setContextMenuPolicy(Qt::CustomContextMenu);
         /* Ensure emoji glyphs render via Segoe UI Emoji fallback. */
         {
@@ -959,7 +968,7 @@ private:
             f.setFamilies({"Segoe UI", "Segoe UI Emoji", "Noto Color Emoji"});
             m_chatLog->setFont(f);
         }
-        connect(m_chatLog, &QWidget::customContextMenuRequested, this, &GhostlinkWindow::onChatContextMenu);
+        connect(m_chatLog, &QWidget::customContextMenuRequested, this, &ShroudWindow::onChatContextMenu);
         cl->addWidget(m_chatLog, 1);
 
         /* File panel */
@@ -1028,17 +1037,17 @@ private:
             QString name = QInputDialog::getText(this, "New Group", "Group name:", QLineEdit::Normal, "", &ok);
             if (ok && !name.trimmed().isEmpty()) { createGroup(name.trimmed()); m_tabGroups = true; loadGroups(); }
         });
-        connect(reqBtn, &QPushButton::clicked, this, &GhostlinkWindow::openRequestsDialog);
+        connect(reqBtn, &QPushButton::clicked, this, &ShroudWindow::openRequestsDialog);
         connect(themeBtn, &QPushButton::clicked, [=]() {
             gDark = !gDark; qApp->setStyleSheet(themeCSS(gDark));
             themeBtn->setText(gDark ? "Light Mode" : "Dark Mode");
         });
-        connect(m_sideList, &QListWidget::itemDoubleClicked, this, &GhostlinkWindow::sideSelect);
+        connect(m_sideList, &QListWidget::itemDoubleClicked, this, &ShroudWindow::sideSelect);
         m_sideList->setContextMenuPolicy(Qt::CustomContextMenu);
-        connect(m_sideList, &QListWidget::customContextMenuRequested, this, &GhostlinkWindow::onContactContextMenu);
-        connect(m_sendBtn, &QPushButton::clicked, this, &GhostlinkWindow::sendMessage);
-        connect(m_attachBtn, &QPushButton::clicked, this, &GhostlinkWindow::attachFile);
-        connect(m_msgInput, &QLineEdit::returnPressed, this, &GhostlinkWindow::sendMessage);
+        connect(m_sideList, &QListWidget::customContextMenuRequested, this, &ShroudWindow::onContactContextMenu);
+        connect(m_sendBtn, &QPushButton::clicked, this, &ShroudWindow::sendMessage);
+        connect(m_attachBtn, &QPushButton::clicked, this, &ShroudWindow::attachFile);
+        connect(m_msgInput, &QLineEdit::returnPressed, this, &ShroudWindow::sendMessage);
         /* Exact-match search only fires on Enter. */
         connect(search, &QLineEdit::returnPressed, [=]() {
             if (!m_tabGroups) doExactSearch(search->text());
@@ -1166,8 +1175,8 @@ private:
     QString serverPinPath() {
         QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
         if (base.isEmpty()) base = QDir::tempPath();
-        QDir().mkpath(base + "/GHOSTLINK");
-        return base + "/GHOSTLINK/server.pin";
+        QDir().mkpath(base + "/SHROUD");
+        return base + "/SHROUD/server.pin";
     }
     QString loadPinnedFingerprint() {
         QFile f(serverPinPath());
@@ -1196,7 +1205,7 @@ private:
     QString ratchetKeyDir() {
         QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
         if (base.isEmpty()) base = QDir::tempPath();
-        QString dir = base + "/GHOSTLINK/ratchet";
+        QString dir = base + "/SHROUD/ratchet";
         QDir().mkpath(dir);
         return dir;
     }
@@ -1214,7 +1223,7 @@ private:
         memcpy(idBundle, idPriv, 32);
         memcpy(idBundle + 32, idPub, 32);
         std::wstring wIdPath = idPath.toStdWString();
-        if (!storage_save_blob(wIdPath.c_str(), L"GHOSTLINK Ratchet Identity", idBundle, 64)) return false;
+        if (!storage_save_blob(wIdPath.c_str(), L"SHROUD Ratchet Identity", idBundle, 64)) return false;
 
         /* Generate 32 one-time prekeys; persist (prekey_id || priv) DPAPI-wrapped. */
         QJsonArray otps;
@@ -1231,7 +1240,7 @@ private:
             otps.append(one);
         }
         std::wstring wOtpPath = (ratchetKeyDir() + "/one_time_prekeys.bin").toStdWString();
-        if (!storage_save_blob(wOtpPath.c_str(), L"GHOSTLINK Ratchet OTPs", otpBuf, sizeof(otpBuf))) return false;
+        if (!storage_save_blob(wOtpPath.c_str(), L"SHROUD Ratchet OTPs", otpBuf, sizeof(otpBuf))) return false;
 
         QByteArray body = jsonBody({
             {"device_id", deviceId},
@@ -1246,7 +1255,7 @@ private:
     QString imagesDir() {
         QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
         if (base.isEmpty()) base = QDir::tempPath();
-        QString dir = base + "/GHOSTLINK/images";
+        QString dir = base + "/SHROUD/images";
         QDir().mkpath(dir);
         return dir;
     }
@@ -1276,14 +1285,14 @@ private:
         int displayW = qMin(maxW, img.width());
         QString html = QString(
             "<div><b>[%1]</b><br/>"
-            "<a href=\"ghostlink-img://%2\">"
+            "<a href=\"shroud-img://%2\">"
             "<img src=\"%3\" width=\"%4\"/></a></div>"
         ).arg(senderLabel.toHtmlEscaped(), fileId, resName).arg(displayW);
         m_chatLog->append(html);
     }
 
     void onChatAnchorClicked(const QUrl &url) {
-        if (url.scheme() != "ghostlink-img") return;
+        if (url.scheme() != "shroud-img") return;
         QString fileId = url.host().isEmpty() ? url.path().mid(1) : url.host();
         if (fileId.isEmpty()) fileId = url.toString().section("//", 1, 1);
         QString path = m_imagePaths.value(fileId);
@@ -1298,8 +1307,8 @@ private:
         QTextCursor cur = m_chatLog->cursorForPosition(pos);
         QString href = cur.charFormat().anchorHref();
         QMenu menu(this);
-        if (href.startsWith("ghostlink-img://")) {
-            QString fileId = href.mid(QString("ghostlink-img://").length());
+        if (href.startsWith("shroud-img://")) {
+            QString fileId = href.mid(QString("shroud-img://").length());
             QAction *open = menu.addAction("Open Full Size");
             QAction *del = menu.addAction("Delete Image");
             menu.addSeparator();
@@ -1334,7 +1343,7 @@ private:
     /* After deletion, walk the chat log document and replace the image
        fragment with a [deleted] placeholder so the bubble updates visually. */
     void replaceImageInChatLog(const QString &fileId) {
-        QString anchor = QString("ghostlink-img://%1").arg(fileId);
+        QString anchor = QString("shroud-img://%1").arg(fileId);
         QTextCursor c(m_chatLog->document());
         while (!c.atEnd()) {
             c.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
@@ -1819,9 +1828,9 @@ private:
         bool ok = true;
         if (writeOff == 0) {
             /* No entries left — keep zero-byte file so next publish replaces. */
-            ok = storage_save_blob(wPath.c_str(), L"GHOSTLINK Ratchet OTPs", out, 0);
+            ok = storage_save_blob(wPath.c_str(), L"SHROUD Ratchet OTPs", out, 0);
         } else {
-            ok = storage_save_blob(wPath.c_str(), L"GHOSTLINK Ratchet OTPs", out, writeOff);
+            ok = storage_save_blob(wPath.c_str(), L"SHROUD Ratchet OTPs", out, writeOff);
         }
         free(out);
         return ok;
@@ -1839,7 +1848,7 @@ private:
     bool savePeerRatchet(const QString &peerDeviceId, const RatchetState *st) {
         std::wstring wPath = peerRatchetPath(peerDeviceId).toStdWString();
         return storage_save_blob(wPath.c_str(),
-                                 L"GHOSTLINK Ratchet Peer State",
+                                 L"SHROUD Ratchet Peer State",
                                  reinterpret_cast<const BYTE*>(st),
                                  (DWORD)sizeof(*st));
     }
@@ -1864,7 +1873,7 @@ private:
         BYTE buf[36];
         memcpy(buf, ek_pub, 32);
         memcpy(buf + 32, &otp_id, 4);
-        return storage_save_blob(wPath.c_str(), L"GHOSTLINK X3DH side",
+        return storage_save_blob(wPath.c_str(), L"SHROUD X3DH side",
                                  buf, sizeof(buf));
     }
     void deleteX3dhSide(const QString &peerDeviceId) {
@@ -2325,7 +2334,7 @@ private:
      *    4. Poll /devices/link/{id} for secondary_pubkey_hex.
      *    5. When it appears: shared = X25519(ekP_priv, ekS_pub).
      *       AES-256-GCM-encrypt {username, contacts:[…]} under
-     *       HKDF-SHA512(shared, "GHOSTLINK-DEVLINK-v1"). POST the
+     *       HKDF-SHA512(shared, "SHROUD-DEVLINK-v1"). POST the
      *       12-byte nonce ‖ 16-byte tag ‖ ciphertext to /payload.
      *
      *  Secondary's flow:
@@ -2349,7 +2358,7 @@ private:
     static QByteArray hkdfDevlink(const BYTE shared[32]) {
         BYTE salt[64] = {0};
         BYTE out[32];
-        static const BYTE info[] = "GHOSTLINK-DEVLINK-v1";
+        static const BYTE info[] = "SHROUD-DEVLINK-v1";
         if (!ratchet_hkdf_sha512(salt, 64, shared, 32, info, sizeof(info) - 1, out, 32))
             return QByteArray();
         return QByteArray((const char*)out, 32);
@@ -2410,7 +2419,7 @@ private:
                 {"username", m_username},
                 {"primary_device_id", m_deviceId},
                 {"friends", QJsonDocument::fromJson(friendsResp).object().value("friends").toArray()},
-                {"note", "GHOSTLINK device-link snapshot. Import-only; does not grant credentials."},
+                {"note", "SHROUD device-link snapshot. Import-only; does not grant credentials."},
             };
             QByteArray plain = QJsonDocument(bundle).toJson(QJsonDocument::Compact);
             BYTE iv[12]; crypto_random_bytes(iv, 12);
@@ -2508,7 +2517,7 @@ private:
      * =============================================================== */
     void openSettings() {
         QDialog dlg(this);
-        dlg.setWindowTitle("GHOSTLINK Settings");
+        dlg.setWindowTitle("SHROUD Settings");
         dlg.setFixedSize(620, 560);
         auto *lay = new QVBoxLayout(&dlg);
         auto *tabs = new QTabWidget;
@@ -2675,7 +2684,7 @@ private:
         /* ──────────── Network (transport) tab ────────────
          * Mutually-exclusive radio group: Direct / Tor.
          *
-         * GHOSTLINK's anonymity story is the *protocol*: end-to-end Double
+         * SHROUD's anonymity story is the *protocol*: end-to-end Double
          * Ratchet encryption (server never sees plaintext), padded envelopes
          * (server can't fingerprint by size), RSA-3072 blind-signature
          * anonymous credentials (server rate-limits without tying actions to
@@ -2804,11 +2813,11 @@ private:
         help->setOpenExternalLinks(true);
         QString lk = cN(gTheme.link);
         help->setHtml(QString(R"HTMLDOC(
-<h2 style='color:%1'>GHOSTLINK — Quick Reference</h2>
+<h2 style='color:%1'>SHROUD — Quick Reference</h2>
 
 <h3 style='color:%1'>How conversations work</h3>
 <p>Every message you send is encrypted on your device <b>before</b> it ever
-touches the server. GHOSTLINK uses post-quantum hybrid handshakes
+touches the server. SHROUD uses post-quantum hybrid handshakes
 (ECDH&nbsp;P-384 &nbsp;+&nbsp; ML-KEM-1024) when liboqs.dll is available, and
 falls back to classical ECDH otherwise. Sealed-sender, disappearing
 messages, and rotating pickup tokens hide message metadata from the
@@ -2841,7 +2850,7 @@ clickable links.</p>
 
 <h3 style='color:%1'>Theme</h3>
 <p><b>Settings → Appearance</b>. Pick from twelve presets including
-GHOSTLINK&nbsp;Dark, Solarized, Nord, Dracula, Monokai, One Dark, Tokyo
+SHROUD&nbsp;Dark, Solarized, Nord, Dracula, Monokai, One Dark, Tokyo
 Night, Gruvbox, Cobalt, and High Contrast. Click any swatch to override
 a single color — the theme switches to <i>Custom</i> automatically and
 remembers your edits.</p>
@@ -2874,14 +2883,14 @@ server is running and reachable on port 58443.</li>
 <li><b>Key derivation failed</b> — fixed in v2.0.0+. Update the client.</li>
 <li><b>Server identity changed</b> — either the operator rotated the
 identity (verify out of band) or you're being MITM'd. Delete the pin file
-at <code>%APPDATA%\GHOSTLINK\server.pin</code> and try again only if
+at <code>%APPDATA%\SHROUD\server.pin</code> and try again only if
 you've confirmed the rotation is legitimate.</li>
 <li><b>Server is in onion-only mode</b> — the operator restricted
 connections to Tor hidden services. Connect via the .onion address.</li>
 </ul>
 
 <h3 style='color:%1'>More</h3>
-<p>Source &amp; releases: <a href='https://github.com/ExposingTheBadge/GhostLink'>github.com/ExposingTheBadge/GhostLink</a></p>
+<p>Source &amp; releases: <a href='https://github.com/ExposingTheBadge/Shroud'>github.com/ExposingTheBadge/Shroud</a></p>
 )HTMLDOC").arg(lk));
         hl->addWidget(help);
         tabs->addTab(hp, "Help");
@@ -2894,7 +2903,7 @@ connections to Tor hidden services. Connect via the .onion address.</li>
         nukeBtn->setStyleSheet(QString("QPushButton { background-color: %1; color: white; font-weight: bold; }").arg(dgr));
         connect(nukeBtn, &QPushButton::clicked, [&dlg]() {
             if (QMessageBox::question(&dlg, "Confirm Nuke",
-                "Delete ALL data and the GHOSTLINK executable?\nThis is IRREVERSIBLE.",
+                "Delete ALL data and the SHROUD executable?\nThis is IRREVERSIBLE.",
                 QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
                 storage_delete_all();
                 QApplication::quit();
@@ -3054,7 +3063,7 @@ protected:
         p.setFont(titleFont);
         p.setPen(QColor(255, 170, 60));
         p.drawText(QRectF(textX, 96, textW, 44),
-                   Qt::AlignLeft | Qt::AlignVCenter, "GHOSTLINK");
+                   Qt::AlignLeft | Qt::AlignVCenter, "SHROUD");
 
         /* Underline accent */
         p.setPen(QPen(QColor(255, 140, 30, 230), 2.0));
@@ -3134,9 +3143,9 @@ private:
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
-    app.setApplicationName("GHOSTLINK");
+    app.setApplicationName("SHROUD");
     app.setApplicationVersion(CLIENT_VERSION);
-    app.setWindowIcon(QIcon(":/ghostlink.png"));
+    app.setWindowIcon(QIcon(":/shroud.png"));
 
     CryptoSplash splash;
     splash.show();
@@ -3145,8 +3154,8 @@ int main(int argc, char *argv[]) {
     /* Construct main window synchronously (crypto/network/TPM init runs here).
        The splash stays visible while the constructor runs, then for the
        remainder of the hold time. */
-    GhostlinkWindow w;
-    w.setWindowIcon(QIcon(":/ghostlink.png"));
+    ShroudWindow w;
+    w.setWindowIcon(QIcon(":/shroud.png"));
 
     QTimer::singleShot(splash.holdMs(), &splash, [&]() {
         w.show();

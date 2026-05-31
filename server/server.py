@@ -1,5 +1,5 @@
 """
-GHOSTLINK Secure Messaging Server — FIPS 140-2 Compliant
+SHROUD Secure Messaging Server — FIPS 140-2 Compliant
 Port 58443 | TLS 1.3 | E2E Encryption | Device Registration
 """
 
@@ -103,7 +103,7 @@ try:
 except Exception as _pq_e:
     pq_hybrid = None
     PQ_AVAILABLE = False
-    print(f"[GHOSTLINK] PQ hybrid unavailable: {_pq_e}")
+    print(f"[SHROUD] PQ hybrid unavailable: {_pq_e}")
 
 try:
     from crypto import hybrid_sig
@@ -111,7 +111,7 @@ try:
 except Exception as _sig_e:
     hybrid_sig = None
     HYBRID_SIG_AVAILABLE = False
-    print(f"[GHOSTLINK] Hybrid signatures unavailable: {_sig_e}")
+    print(f"[SHROUD] Hybrid signatures unavailable: {_sig_e}")
 
 try:
     from crypto import anon_creds
@@ -119,7 +119,7 @@ try:
 except Exception as _ac_e:
     anon_creds = None
     ANON_CREDS_AVAILABLE = False
-    print(f"[GHOSTLINK] Anonymous credentials unavailable: {_ac_e}")
+    print(f"[SHROUD] Anonymous credentials unavailable: {_ac_e}")
 
 try:
     from crypto import srp6a
@@ -127,7 +127,7 @@ try:
 except Exception as _srp_e:
     srp6a = None
     SRP_AVAILABLE = False
-    print(f"[GHOSTLINK] SRP-6a unavailable: {_srp_e}")
+    print(f"[SHROUD] SRP-6a unavailable: {_srp_e}")
 
 try:
     from crypto import at_rest
@@ -135,7 +135,7 @@ try:
 except Exception as _ar_e:
     at_rest = None
     AT_REST_AVAILABLE = False
-    print(f"[GHOSTLINK] At-rest encryption unavailable: {_ar_e}")
+    print(f"[SHROUD] At-rest encryption unavailable: {_ar_e}")
 
 try:
     from crypto import treekem
@@ -143,7 +143,7 @@ try:
 except Exception as _tk_e:
     treekem = None
     TREEKEM_AVAILABLE = False
-    print(f"[GHOSTLINK] TreeKEM unavailable: {_tk_e}")
+    print(f"[SHROUD] TreeKEM unavailable: {_tk_e}")
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -176,10 +176,10 @@ def _load_or_create_identity():
             secrets = {"ed_sk_bytes": ed_sk, "mldsa_sk": mldsa_sk, "sph_sk": sph_sk}
             fp = hybrid_sig.fingerprint(pk)
             SERVER_IDENTITY = {"pk_blob": pk, "secrets": secrets, "fingerprint": fp}
-            print(f"[GHOSTLINK] Server identity loaded — fingerprint {fp}")
+            print(f"[SHROUD] Server identity loaded — fingerprint {fp}")
             return
         except Exception as e:
-            print(f"[GHOSTLINK] WARN: identity file corrupt ({e}) — regenerating")
+            print(f"[SHROUD] WARN: identity file corrupt ({e}) — regenerating")
 
     pk, secrets = hybrid_sig.keygen()
     data = (
@@ -194,14 +194,14 @@ def _load_or_create_identity():
     except Exception: pass
     fp = hybrid_sig.fingerprint(pk)
     SERVER_IDENTITY = {"pk_blob": pk, "secrets": secrets, "fingerprint": fp}
-    print(f"[GHOSTLINK] Server identity generated — fingerprint {fp}")
+    print(f"[SHROUD] Server identity generated — fingerprint {fp}")
 
 
 def server_sign_attestation(session_id: str, pq_pubkey_blob: bytes) -> bytes:
     """Triple-sign a handshake response so the client can pin our identity."""
     if not SERVER_IDENTITY:
         return b""
-    msg = b"GHOSTLINK-KEX-v2|" + session_id.encode("ascii") + b"|" + pq_pubkey_blob
+    msg = b"SHROUD-KEX-v2|" + session_id.encode("ascii") + b"|" + pq_pubkey_blob
     return hybrid_sig.sign(msg, SERVER_IDENTITY["secrets"])
 
 
@@ -222,17 +222,17 @@ def _load_or_create_anon_creds_key():
             sk = anon_creds.parse_sk(blob)
             pub = {"n": sk["n"], "e": sk["e"]}
             ANON_CREDS_KEYS = {"pub": pub, "sk": sk}
-            print(f"[GHOSTLINK] Anonymous credential key loaded (RSA-{sk['n'].bit_length()})")
+            print(f"[SHROUD] Anonymous credential key loaded (RSA-{sk['n'].bit_length()})")
             return
         except Exception as e:
-            print(f"[GHOSTLINK] WARN: anon_creds key corrupt ({e}) — regenerating")
+            print(f"[SHROUD] WARN: anon_creds key corrupt ({e}) — regenerating")
     pub, sk = anon_creds.server_keygen()
     with open(ANON_CREDS_KEY_PATH, "wb") as f:
         f.write(anon_creds.serialize_sk(sk))
     try: os.chmod(ANON_CREDS_KEY_PATH, 0o600)
     except Exception: pass
     ANON_CREDS_KEYS = {"pub": pub, "sk": sk}
-    print(f"[GHOSTLINK] Anonymous credential keypair generated (RSA-{sk['n'].bit_length()})")
+    print(f"[SHROUD] Anonymous credential keypair generated (RSA-{sk['n'].bit_length()})")
 
 
 _load_or_create_anon_creds_key()
@@ -244,9 +244,9 @@ DATA_KEY = None
 if AT_REST_AVAILABLE:
     try:
         DATA_KEY = at_rest.load_or_create_data_key(DATA_KEY_PATH)
-        print(f"[GHOSTLINK] At-rest data key loaded (AES-256-GCM)")
+        print(f"[SHROUD] At-rest data key loaded (AES-256-GCM)")
     except Exception as _dk_e:
-        print(f"[GHOSTLINK] WARN: at-rest data key unavailable: {_dk_e}")
+        print(f"[SHROUD] WARN: at-rest data key unavailable: {_dk_e}")
         DATA_KEY = None
 
 def ar_enc(s: str):
@@ -262,7 +262,7 @@ def ar_dec(b) -> str:
 # ── Config ───────────────────────────────────────────────────────────
 from fastapi.responses import FileResponse, StreamingResponse
 PORT = 58443
-DB_PATH = os.path.join(os.path.dirname(__file__), "ghostlink.db")
+DB_PATH = os.path.join(os.path.dirname(__file__), "shroud.db")
 FILE_DIR = os.path.join(os.path.dirname(__file__), "files")
 os.makedirs(FILE_DIR, exist_ok=True)
 SESSION_TIMEOUT = 3600  # 1 hour
@@ -288,7 +288,7 @@ def _stats_load():
             elif name == "cover_bytes":
                 COVER_BYTES = int(value)
         except Exception as e:
-            print(f"[GHOSTLINK] stats hydrate skipped {name}: {e}")
+            print(f"[SHROUD] stats hydrate skipped {name}: {e}")
 
 
 def _stats_flush():
@@ -305,7 +305,7 @@ def _stats_flush():
         )
         db.commit()
     except Exception as e:
-        print(f"[GHOSTLINK] stats flush error: {e}")
+        print(f"[SHROUD] stats flush error: {e}")
 
 
 def _stats_history_snapshot():
@@ -344,7 +344,7 @@ def _stats_history_snapshot():
         )
         db.commit()
     except Exception as e:
-        print(f"[GHOSTLINK] stats history snapshot error: {e}")
+        print(f"[SHROUD] stats history snapshot error: {e}")
 
 
 async def _stats_flusher():
@@ -377,9 +377,9 @@ async def _expiry_sweeper():
                 db.execute("DELETE FROM file_transfers WHERE id=?", (fid,))
             db.commit()
             if n_msg or file_rows:
-                print(f"[GHOSTLINK] expiry sweep: removed {n_msg} msgs, {len(file_rows)} files")
+                print(f"[SHROUD] expiry sweep: removed {n_msg} msgs, {len(file_rows)} files")
         except Exception as e:
-            print(f"[GHOSTLINK] expiry sweep error: {e}")
+            print(f"[SHROUD] expiry sweep error: {e}")
         await asyncio.sleep(60)
 
 
@@ -388,9 +388,9 @@ async def lifespan(ap):
     # Startup
     if not fips_self_test():
         raise RuntimeError("FIPS 140-2 self-test FAILED — server cannot start")
-    print(f"[GHOSTLINK] FIPS 140-2 self-test: PASSED")
-    print(f"[GHOSTLINK] PQ hybrid (ECDH-P384 + ML-KEM-1024): {'READY' if PQ_AVAILABLE else 'unavailable'}")
-    print(f"[GHOSTLINK] Server starting on port {PORT}")
+    print(f"[SHROUD] FIPS 140-2 self-test: PASSED")
+    print(f"[SHROUD] PQ hybrid (ECDH-P384 + ML-KEM-1024): {'READY' if PQ_AVAILABLE else 'unavailable'}")
+    print(f"[SHROUD] Server starting on port {PORT}")
     expired = db.execute(
         "SELECT id, storage_name FROM file_transfers WHERE expires_at < datetime('now') OR downloaded=1"
     ).fetchall()
@@ -401,9 +401,9 @@ async def lifespan(ap):
         db.execute("DELETE FROM file_transfers WHERE id=?", (row[0],))
     db.commit()
     if expired:
-        print(f"[GHOSTLINK] Cleaned up {len(expired)} expired/downloaded files")
+        print(f"[SHROUD] Cleaned up {len(expired)} expired/downloaded files")
     _stats_load()
-    print(f"[GHOSTLINK] Stats restored: {sum(REQ_COUNTS.values())} requests, {sum(ERR_COUNTS.values())} errors lifetime")
+    print(f"[SHROUD] Stats restored: {sum(REQ_COUNTS.values())} requests, {sum(ERR_COUNTS.values())} errors lifetime")
     sweep_task = asyncio.create_task(_expiry_sweeper())
     stats_task = asyncio.create_task(_stats_flusher())
     try:
@@ -414,9 +414,9 @@ async def lifespan(ap):
             try: await t
             except asyncio.CancelledError: pass
         _stats_flush()
-        print("[GHOSTLINK] Server shutting down (stats persisted)")
+        print("[SHROUD] Server shutting down (stats persisted)")
 
-app = FastAPI(title="GHOSTLINK Secure Messaging", version=SERVER_VERSION, lifespan=lifespan)
+app = FastAPI(title="SHROUD Secure Messaging", version=SERVER_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -660,6 +660,55 @@ def init_db():
         )
         db.commit()
     except: pass
+
+    # v2.4.6 — one-shot duplicate-device GC. Pre-2.4.6, every login on a
+    # given client created a new `devices` row, so users hit the per-user
+    # cap quickly with rows that represent the same physical device.
+    #
+    # Rule: within each (user_id, device_name, platform) cluster of >1
+    # rows, KEEP every row that has any message history AND keep the
+    # newest-registered row. Delete the rest (and their orphan prekeys).
+    # This is conservative: anything that ever touched message storage
+    # stays untouched. The only thing we prune are pure phantoms.
+    try:
+        clusters = db.execute(
+            "SELECT user_id, device_name, platform "
+            "FROM devices "
+            "GROUP BY user_id, device_name, platform "
+            "HAVING COUNT(*) > 1"
+        ).fetchall()
+        pruned = 0
+        for uid_, dname_, plat_ in clusters:
+            rows = db.execute(
+                "SELECT id FROM devices "
+                "WHERE user_id=? AND device_name=? AND platform=? "
+                "ORDER BY datetime(COALESCE(last_seen, registered_at)) DESC, registered_at DESC",
+                (uid_, dname_, plat_)
+            ).fetchall()
+            keep_newest = rows[0][0]
+            for (did_,) in rows[1:]:
+                used = db.execute(
+                    "SELECT 1 FROM messages "
+                    "WHERE sender_device_id=? OR recipient_device_id=? LIMIT 1",
+                    (did_, did_)
+                ).fetchone()
+                if used:
+                    # Real messages live here — leave it alone.
+                    continue
+                if did_ == keep_newest:
+                    continue
+                db.execute("DELETE FROM one_time_prekeys WHERE device_id=?", (did_,))
+                db.execute("DELETE FROM devices WHERE id=?", (did_,))
+                pruned += 1
+        if pruned:
+            db.commit()
+            try:
+                print(f"[init_db] v2.4.6 device GC: pruned {pruned} phantom device row(s)")
+            except Exception:
+                pass
+    except Exception as _e:
+        try: db.rollback()
+        except: pass
     # One-time prekeys (consumed on each new conversation init)
     try:
         db.executescript("""
@@ -725,7 +774,57 @@ def pad_bucket_for(plain_len: int) -> int:
 def is_valid_padded_size(n: int) -> bool:
     return n in PAD_BUCKETS or (n > PAD_BUCKETS[-1] and n % PAD_BUCKETS[-1] == 0)
 
-db = init_db()
+
+# v2.4.6 — per-thread sqlite3 connection.
+#
+# FastAPI runs sync deps (require_admin, route handlers without async)
+# inside a thread pool. Sharing a single sqlite3.Connection across
+# those workers races on cursors and the implicit transaction state,
+# producing the trio of errors we saw in production logs:
+#   sqlite3.InterfaceError: bad parameter or other API misuse
+#   sqlite3.OperationalError: cannot commit - no transaction is active
+#   TypeError: fromisoformat: argument must be str
+# (the last one is row[4] coming back garbled because another thread
+#  reset the cursor underneath us).
+#
+# WAL mode + per-thread connections is the canonical fix: every
+# thread gets its own connection, concurrent readers never block,
+# and the busy_timeout absorbs the brief writer contention.
+import threading as _threading
+
+class _PerThreadConn:
+    """sqlite3.Connection proxy that lazily opens one connection per
+    OS thread. Drop-in replacement for the previous global `db` —
+    every call site already uses .execute / .commit / .cursor."""
+    def __init__(self, path):
+        self._path = path
+        self._local = _threading.local()
+
+    def _c(self):
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = sqlite3.connect(self._path, check_same_thread=False, timeout=30)
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA foreign_keys=ON")
+            c.execute("PRAGMA busy_timeout=30000")
+            self._local.conn = c
+        return c
+
+    def execute(self, *a, **kw):       return self._c().execute(*a, **kw)
+    def executemany(self, *a, **kw):   return self._c().executemany(*a, **kw)
+    def executescript(self, *a, **kw): return self._c().executescript(*a, **kw)
+    def commit(self):                  return self._c().commit()
+    def rollback(self):                return self._c().rollback()
+    def cursor(self):                  return self._c().cursor()
+
+# Run schema migrations on a one-shot connection, then close it so its
+# WAL writes are durable. From here on every thread opens its own.
+_init_conn = init_db()
+try:
+    _init_conn.close()
+except Exception:
+    pass
+db = _PerThreadConn(DB_PATH)
 
 # ── Models ───────────────────────────────────────────────────────────
 def decrypt_auth_payload(session_id: str, client_pub_hex: str, nonce_hex: str, ct_hex: str, tag_hex: str) -> dict:
@@ -738,7 +837,7 @@ def decrypt_auth_payload(session_id: str, client_pub_hex: str, nonce_hex: str, c
         client_pub = deserialize_public_key(bytes.fromhex(client_pub_hex))
         raw = server_priv.exchange(ec.ECDH(), client_pub)
         hashed = hashlib.sha256(raw).digest()
-        key = hashlib.sha256(hashed + b"GHOSTLINK-AUTH-v1").digest()[:32]
+        key = hashlib.sha256(hashed + b"SHROUD-AUTH-v1").digest()[:32]
         nonce = bytes.fromhex(nonce_hex); ct = bytes.fromhex(ct_hex); tag = bytes.fromhex(tag_hex)
         plain = decrypt_aes_gcm(key, nonce, ct + tag)
         return json.loads(plain.decode('utf-8'))
@@ -981,7 +1080,7 @@ async def srp_challenge(request: Request):
     row = db.execute("SELECT srp_salt, srp_verifier FROM users WHERE username=?", (username,)).fetchone()
     if not row or not row[0] or not row[1]:
         # Always return a synthetic challenge so an attacker can't enumerate users
-        salt = hashlib.sha256(b"GHOSTLINK-decoy|" + username.encode()).digest()[:16]
+        salt = hashlib.sha256(b"SHROUD-decoy|" + username.encode()).digest()[:16]
         return {"session_id": "", "salt_hex": salt.hex(), "B_hex": format(secrets.randbelow(srp6a.N), "x")}
     salt = row[0]
     verifier = int.from_bytes(row[1], "big")
@@ -1375,7 +1474,7 @@ async def encrypted_auth_v2(request: Request):
     try:
         client_blob = bytes.fromhex(body.get("client_pubkey_blob", ""))
         shared = pq_hybrid.server_decapsulate(state, client_blob)
-        key = hashlib.sha256(shared + b"GHOSTLINK-AUTH-PQ-v1").digest()[:32]
+        key = hashlib.sha256(shared + b"SHROUD-AUTH-PQ-v1").digest()[:32]
         nonce = bytes.fromhex(body.get("nonce", ""))
         ct = bytes.fromhex(body.get("ciphertext", ""))
         tag = bytes.fromhex(body.get("tag", ""))
@@ -1390,6 +1489,7 @@ async def encrypted_auth_v2(request: Request):
     platform = payload.get("platform", "")
     is_register = payload.get("register", False)
     pub_key_hex = payload.get("public_key", "")
+    existing_did = (payload.get("existing_device_id", "") or "").strip()
 
     if is_register:
         if setting_get("registration_enabled", "1") != "1":
@@ -1409,9 +1509,6 @@ async def encrypted_auth_v2(request: Request):
         if derived.hex() != user[1]: raise HTTPException(401, "Invalid credentials")
 
     user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
-    count = db.execute("SELECT COUNT(*) FROM devices WHERE user_id=?", (user[0],)).fetchone()[0]
-    if count >= MAX_DEVICES_PER_USER and not is_register:
-        raise HTTPException(400, f"Maximum {MAX_DEVICES_PER_USER} devices per user")
     if platform not in ('windows','ios','android'):
         raise HTTPException(400, "Invalid platform")
     try:
@@ -1420,24 +1517,32 @@ async def encrypted_auth_v2(request: Request):
     except Exception:
         raise HTTPException(400, "Invalid public key format")
 
-    device_id = generate_device_id()
-    db.execute("INSERT INTO devices (id, user_id, device_name, platform, public_key, hwid) VALUES (?,?,?,?,?,?)",
-               (device_id, user[0], device_name, platform, pub_key_bytes, ""))
-    db.commit()
+    will_reuse = False
+    if existing_did and not is_register:
+        will_reuse = db.execute(
+            "SELECT 1 FROM devices WHERE id=? AND user_id=?",
+            (existing_did, user[0])
+        ).fetchone() is not None
+    if not will_reuse:
+        count = db.execute("SELECT COUNT(*) FROM devices WHERE user_id=?", (user[0],)).fetchone()[0]
+        if count >= MAX_DEVICES_PER_USER:
+            raise HTTPException(400, f"Maximum {MAX_DEVICES_PER_USER} devices per user")
+
+    device_id = _reuse_or_create_device(user[0], existing_did, device_name, platform, pub_key_bytes)
     return {"device_id": device_id, "user_id": user[0], "registered": True, "suite": "PQ-HYBRID-v1"}
 
 @app.get("/api/v1/version")
 async def get_version():
     """Client update check endpoint. Clients fetch this and compare to their
     embedded version string."""
-    base = "https://github.com/ExposingTheBadge/GhostLink/releases/latest"
+    base = "https://github.com/ExposingTheBadge/Shroud/releases/latest"
     return {
         "version": SERVER_VERSION,
         "minimum_supported": "1.3.0",
         "release_url": base,
-        "windows": f"{base}/download/GHOSTLINK.exe",
-        "android": f"{base}/download/GHOSTLINK.apk",
-        "linux":   f"{base}/download/ghostlink-linux",
+        "windows": f"{base}/download/SHROUD.exe",
+        "android": f"{base}/download/SHROUD.apk",
+        "linux":   f"{base}/download/shroud-linux",
         "changelog": (
             "2.4.0 — Pure-C Ed25519 verifier closes the third leg of the "
             "triple-hybrid server attestation (Ed25519 + ML-DSA-87 + "
@@ -1459,7 +1564,7 @@ async def get_version():
             "2.2.0 — Double Ratchet wired into live send/receive on "
             "Windows with X3DH prekey consumption. "
             "2.1.0 — Windows: new theme picker with 12 presets "
-            "(GHOSTLINK Dark/Light, Solarized Dark/Light, Nord, Dracula, "
+            "(SHROUD Dark/Light, Solarized Dark/Light, Nord, Dracula, "
             "Monokai, One Dark, Tokyo Night, Gruvbox, Cobalt, High "
             "Contrast) plus full Custom mode with per-color pickers — "
             "applies globally to every widget, not just the chat. "
@@ -1535,6 +1640,47 @@ async def change_password(req: ChangePasswordRequest):
     return {"changed": True, "username": req.username}
 
 # ── Encrypted Auth (no plaintext passwords ever) ────────────────────
+#
+# v2.4.6 — device reuse on login.
+#
+# Pre-2.4.6 every successful auth (register OR login) INSERTed a fresh
+# row into `devices`, so every relaunch made the same physical client
+# look like a brand new device. Users hit MAX_DEVICES_PER_USER (=25)
+# within a few weeks.
+#
+# Clients now persist `device_id` and pass it back as `existing_device_id`
+# on subsequent logins. If we recognise it (matches a row owned by the
+# authenticated user), we reuse that row and refresh public_key/last_seen.
+# Unknown / missing → fall back to the old INSERT path (legacy clients
+# and brand-new installs still work).
+def _reuse_or_create_device(user_id: str, existing_did: str, device_name: str,
+                            platform: str, pub_key_bytes: bytes) -> str:
+    """Return the device_id to send back to the client. Mutates `devices`."""
+    if existing_did:
+        row = db.execute(
+            "SELECT id FROM devices WHERE id=? AND user_id=?",
+            (existing_did, user_id)
+        ).fetchone()
+        if row:
+            db.execute(
+                "UPDATE devices SET public_key=?, device_name=?, platform=?, "
+                "last_seen=datetime('now') WHERE id=?",
+                (pub_key_bytes, device_name, platform, existing_did)
+            )
+            db.commit()
+            return existing_did
+    # No match: fresh install, lost local state, or someone trying to
+    # claim a device_id that isn't theirs. Issue a new row.
+    new_id = generate_device_id()
+    db.execute(
+        "INSERT INTO devices (id, user_id, device_name, platform, public_key, "
+        "hwid, last_seen) VALUES (?,?,?,?,?,?,datetime('now'))",
+        (new_id, user_id, device_name, platform, pub_key_bytes, "")
+    )
+    db.commit()
+    return new_id
+
+
 @app.post("/api/v1/auth")
 async def encrypted_auth(request: Request):
     """Encrypted registration/login. Password never transits in plaintext."""
@@ -1548,6 +1694,7 @@ async def encrypted_auth(request: Request):
     platform = payload.get("platform","")
     is_register = payload.get("register", False)
     pub_key_hex = payload.get("public_key","")
+    existing_did = (payload.get("existing_device_id","") or "").strip()
 
     # Register user if new account
     if is_register:
@@ -1570,12 +1717,8 @@ async def encrypted_auth(request: Request):
         if derived.hex() != user[1]:
             raise HTTPException(401, "Invalid credentials")
 
-    # Register device
+    # Register / reuse device
     user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
-    count = db.execute("SELECT COUNT(*) FROM devices WHERE user_id=?", (user[0],)).fetchone()[0]
-    if count >= MAX_DEVICES_PER_USER and not is_register:
-        raise HTTPException(400, f"Maximum {MAX_DEVICES_PER_USER} devices per user")
-
     if platform not in ('windows','ios','android'):
         raise HTTPException(400, "Invalid platform")
 
@@ -1585,10 +1728,20 @@ async def encrypted_auth(request: Request):
     except Exception:
         raise HTTPException(400, "Invalid public key format")
 
-    device_id = generate_device_id()
-    db.execute("INSERT INTO devices (id, user_id, device_name, platform, public_key, hwid) VALUES (?,?,?,?,?,?)",
-               (device_id, user[0], device_name, platform, pub_key_bytes, ""))
-    db.commit()
+    # Only block on the per-user device cap when we're actually about to
+    # create a new row. Reusing an existing device shouldn't trip it.
+    will_reuse = False
+    if existing_did and not is_register:
+        will_reuse = db.execute(
+            "SELECT 1 FROM devices WHERE id=? AND user_id=?",
+            (existing_did, user[0])
+        ).fetchone() is not None
+    if not will_reuse:
+        count = db.execute("SELECT COUNT(*) FROM devices WHERE user_id=?", (user[0],)).fetchone()[0]
+        if count >= MAX_DEVICES_PER_USER:
+            raise HTTPException(400, f"Maximum {MAX_DEVICES_PER_USER} devices per user")
+
+    device_id = _reuse_or_create_device(user[0], existing_did, device_name, platform, pub_key_bytes)
 
     server_priv, server_pub = generate_keypair()
     return {"device_id": device_id, "server_public_key": serialize_public_key(server_pub).hex(),
@@ -2567,11 +2720,11 @@ def audit_log(ip: str, event: str, detail: str = ""):
 def check_csrf(request: Request):
     """Validate CSRF token for state-changing admin operations."""
     token = request.headers.get("X-CSRF-Token", "")
-    cookie_token = request.cookies.get("ghostlink_csrf", "")
+    cookie_token = request.cookies.get("shroud_csrf", "")
     if not token or token != cookie_token:
         raise HTTPException(403, "CSRF validation failed")
 
-def get_admin_session(sid: str = Cookie(None, alias="ghostlink_sid")):
+def get_admin_session(sid: str = Cookie(None, alias="shroud_sid")):
     if not sid: return None
     row = db.execute(
         "SELECT id, ip, user_agent, login_at, last_activity, logged_out "
@@ -2589,14 +2742,14 @@ def get_admin_session(sid: str = Cookie(None, alias="ghostlink_sid")):
     db.commit()
     return row
 
-def require_admin(sid: str = Cookie(None, alias="ghostlink_sid")):
+def require_admin(sid: str = Cookie(None, alias="shroud_sid")):
     session = get_admin_session(sid)
     if not session:
         raise HTTPException(401, "Not authenticated")
     return session
 
 # v2.4.0 — CSRF gate for state-changing admin endpoints. Uses the cookie
-# pair set at login (ghostlink_csrf double-submit token). Admin GET routes
+# pair set at login (shroud_csrf double-submit token). Admin GET routes
 # don't need this; only POST/DELETE control + delete + setting flips do.
 def require_admin_csrf(request: Request, session=Depends(require_admin)):
     check_csrf(request)
@@ -2688,12 +2841,12 @@ async def admin_fingerprint_login(request: Request):
     db.commit()
 
     resp = JSONResponse({"ok": True, "session_id": sid})
-    resp.set_cookie(key="ghostlink_sid", value=sid, httponly=True, samesite="lax", max_age=SESSION_TIMEOUT_SEC, path="/")
+    resp.set_cookie(key="shroud_sid", value=sid, httponly=True, samesite="lax", max_age=SESSION_TIMEOUT_SEC, path="/")
     # Double-submit CSRF: the cookie MUST be readable by JS so admin.js
     # can echo it as X-CSRF-Token on writes. Same-origin policy keeps
     # other sites from reading it. httponly=True here was the v2.4.0
     # bug that broke every admin toggle — JS got "" and POSTs 403'd.
-    resp.set_cookie(key="ghostlink_csrf", value=csrf, httponly=False, samesite="strict", max_age=SESSION_TIMEOUT_SEC, path="/")
+    resp.set_cookie(key="shroud_csrf", value=csrf, httponly=False, samesite="strict", max_age=SESSION_TIMEOUT_SEC, path="/")
     return resp
 
 @app.post("/api/v1/admin/setup")
@@ -2733,7 +2886,7 @@ async def admin_logout(session=Depends(get_admin_session)):
         db.execute("UPDATE admin_sessions SET logged_out=1 WHERE id=?", (session[0],))
         db.commit()
     resp = JSONResponse({"logged_out": True})
-    resp.delete_cookie("ghostlink_sid", path="/")
+    resp.delete_cookie("shroud_sid", path="/")
     return resp
 
 # ─── Admin Dashboard backend (v2.4.0) ───────────────────────────────
@@ -3072,7 +3225,7 @@ async def admin_stats_audit(
         return PlainTextResponse(
             buf.getvalue(),
             media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="ghostlink-audit.csv"'},
+            headers={"Content-Disposition": 'attachment; filename="shroud-audit.csv"'},
         )
 
     failed_logins = [
@@ -3432,7 +3585,7 @@ def _ws_admin_session(ws: WebSocket):
     Returns the session row or None — caller is responsible for closing
     the socket if None. We can't use FastAPI dependency injection here
     because WebSockets aren't request-scoped the same way."""
-    sid = ws.cookies.get("ghostlink_sid")
+    sid = ws.cookies.get("shroud_sid")
     if not sid:
         # Fallback: some browsers don't attach cookies to WS upgrade
         # requests. Accept ?token=<session-id> as an alternative.
@@ -3451,7 +3604,7 @@ def _ws_admin_session(ws: WebSocket):
 async def admin_ws_token(session=Depends(require_admin)):
     """Return the session ID so the browser can pass it as a query parameter
     to the WebSocket endpoint.  The browser already proves auth by sending the
-    HttpOnly ghostlink_sid cookie with this HTTP request."""
+    HttpOnly shroud_sid cookie with this HTTP request."""
     return {"token": session[0]}
 
 
@@ -3460,7 +3613,7 @@ async def _admin_ws_handler(ws: WebSocket):
     when device_id == 'admin' (the catch-all device route would otherwise
     consume the connection before the explicit /ws/admin route fires)."""
     peer = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
-    has_sid = "ghostlink_sid" in ws.cookies
+    has_sid = "shroud_sid" in ws.cookies
     session = _ws_admin_session(ws)
     if not session:
         print(f"[admin_ws] REJECT {peer} — has_sid={has_sid} session=None", flush=True)
@@ -3654,10 +3807,10 @@ async def admin_dashboard(session=Depends(require_admin)):
 
 if __name__ == "__main__":
     import argparse, uvicorn
-    ap = argparse.ArgumentParser(description="GHOSTLINK secure messaging server")
+    ap = argparse.ArgumentParser(description="SHROUD secure messaging server")
     ap.add_argument(
         "--bind",
-        default=os.environ.get("GHOSTLINK_BIND", "0.0.0.0"),
+        default=os.environ.get("SHROUD_BIND", "0.0.0.0"),
         help="Interface to listen on. Use 127.0.0.1 for onion-only deployments "
              "where Tor is the only path into the server (recommended). "
              "Defaults to 0.0.0.0 for backwards compatibility.",
@@ -3665,14 +3818,14 @@ if __name__ == "__main__":
     ap.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("GHOSTLINK_PORT", PORT)),
+        default=int(os.environ.get("SHROUD_PORT", PORT)),
         help=f"TCP port to listen on (default {PORT}).",
     )
     args = ap.parse_args()
     init_db()
-    print(f"[GHOSTLINK] Database initialized")
-    print(f"[GHOSTLINK] Listening on {args.bind}:{args.port}")
+    print(f"[SHROUD] Database initialized")
+    print(f"[SHROUD] Listening on {args.bind}:{args.port}")
     if args.bind == "0.0.0.0":
-        print(f"[GHOSTLINK] WARNING: binding to all interfaces. For onion-only "
+        print(f"[SHROUD] WARNING: binding to all interfaces. For onion-only "
               f"deployments pass --bind 127.0.0.1 and let Tor handle external traffic.")
     uvicorn.run(app, host=args.bind, port=args.port, log_level="info")

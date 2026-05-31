@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Qt6 Client — Clean cross-platform desktop client
+ * SHROUD Qt6 Client — Clean cross-platform desktop client
  * Compile: cmake -B build && cmake --build build --config Release
  */
 #include <QtWidgets>
@@ -68,11 +68,11 @@ QString themeCSS(bool dark) {
 /* ===================================================================
  *  MAIN WINDOW
  * =================================================================== */
-class GhostlinkWindow : public QMainWindow {
+class ShroudWindow : public QMainWindow {
     Q_OBJECT
 public:
-    GhostlinkWindow() {
-        setWindowTitle("GHOSTLINK Secure Messenger");
+    ShroudWindow() {
+        setWindowTitle("SHROUD Secure Messenger");
         resize(880, 620);
         qApp->setStyleSheet(themeCSS(gDark));
 
@@ -149,7 +149,7 @@ private:
         QAction *ex = file->addAction("E&xit"); connect(ex, &QAction::triggered, this, &QWidget::close);
 
         QMenu *sett = menuBar()->addMenu("&Settings");
-        QAction *st = sett->addAction("&Settings..."); connect(st, &QAction::triggered, this, &GhostlinkWindow::openSettings);
+        QAction *st = sett->addAction("&Settings..."); connect(st, &QAction::triggered, this, &ShroudWindow::openSettings);
         QAction *th = sett->addAction(gDark ? "Switch to &Light Mode" : "Switch to &Dark Mode");
         connect(th, &QAction::triggered, [this, th]() {
             gDark = !gDark;
@@ -159,8 +159,8 @@ private:
 
         QMenu *help = menuBar()->addMenu("&Help");
         QAction *ab = help->addAction("&About"); connect(ab, &QAction::triggered, [this]() {
-            QMessageBox::about(this, "GHOSTLINK",
-                QString("GHOSTLINK v%1\n\nAES-256-GCM | ECDH P-384 | ML-KEM-1024\n"
+            QMessageBox::about(this, "SHROUD",
+                QString("SHROUD v%1\n\nAES-256-GCM | ECDH P-384 | ML-KEM-1024\n"
                         "Self-Destructing Messages | One-Time Files\n"
                         "No personal data. No metadata. No trace.").arg(CLIENT_VERSION));
         });
@@ -179,7 +179,7 @@ private:
         auto *cl = new QVBoxLayout(card);
         cl->setSpacing(12);
 
-        auto *title = new QLabel("<h2>GHOSTLINK Setup</h2>"); title->setAlignment(Qt::AlignCenter);
+        auto *title = new QLabel("<h2>SHROUD Setup</h2>"); title->setAlignment(Qt::AlignCenter);
         cl->addWidget(title);
 
         auto *uname = new QLineEdit; uname->setPlaceholderText("Username");
@@ -375,10 +375,10 @@ private:
             gDark = !gDark; qApp->setStyleSheet(themeCSS(gDark));
             themeBtn->setText(gDark ? "Light Mode" : "Dark Mode");
         });
-        connect(m_sideList, &QListWidget::itemDoubleClicked, this, &GhostlinkWindow::sideSelect);
-        connect(m_sendBtn, &QPushButton::clicked, this, &GhostlinkWindow::sendMessage);
-        connect(m_attachBtn, &QPushButton::clicked, this, &GhostlinkWindow::attachFile);
-        connect(m_msgInput, &QLineEdit::returnPressed, this, &GhostlinkWindow::sendMessage);
+        connect(m_sideList, &QListWidget::itemDoubleClicked, this, &ShroudWindow::sideSelect);
+        connect(m_sendBtn, &QPushButton::clicked, this, &ShroudWindow::sendMessage);
+        connect(m_attachBtn, &QPushButton::clicked, this, &ShroudWindow::attachFile);
+        connect(m_msgInput, &QLineEdit::returnPressed, this, &ShroudWindow::sendMessage);
         connect(search, &QLineEdit::textChanged, [=](const QString &t) {
             if (!m_tabGroups) { if (t.length() >= 2) searchContacts(t); else if (t.isEmpty()) loadContacts(); }
         });
@@ -622,7 +622,7 @@ private:
      * =============================================================== */
     void openSettings() {
         QDialog dlg(this);
-        dlg.setWindowTitle("GHOSTLINK Settings");
+        dlg.setWindowTitle("SHROUD Settings");
         dlg.setFixedSize(440, 500);
         auto *lay = new QVBoxLayout(&dlg);
 
@@ -672,7 +672,7 @@ private:
         nukeBtn->setStyleSheet("QPushButton { background-color: #cc0000; color: white; font-weight: bold; }");
         connect(nukeBtn, &QPushButton::clicked, [&dlg]() {
             if (QMessageBox::question(&dlg, "Confirm Nuke",
-                "Delete ALL data and the GHOSTLINK executable?\nThis is IRREVERSIBLE.",
+                "Delete ALL data and the SHROUD executable?\nThis is IRREVERSIBLE.",
                 QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
                 storage_delete_all();
                 QApplication::quit();
@@ -692,9 +692,9 @@ private:
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
-    app.setApplicationName("GHOSTLINK");
+    app.setApplicationName("SHROUD");
     app.setApplicationVersion(CLIENT_VERSION);
-    GhostlinkWindow w;
+    ShroudWindow w;
     w.show();
     return app.exec();
 }

@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/">
+    <file>shroud.png</file>
+    <file>shroud.ico</file>
+  </qresource>
+</RCC>

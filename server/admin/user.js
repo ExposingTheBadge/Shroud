@@ -2,11 +2,7 @@
 'use strict';
 
 function $(id) { return document.getElementById(id); }
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  })[c]);
-}
+/* esc(), api(), toast(), showModal() come from shared.js */
 function fmtSize(b) {
   if (!b && b !== 0) return '—';
   if (b < 1024)       return b + ' B';
@@ -42,19 +38,22 @@ async function load() {
     '</div><div class="lbl">' + esc(c[2]) + '</div></div>'
   ).join('');
 
-  /* Devices */
+  /* Devices. Row click → device drill-down. The Delete button is its
+     own column so clicking it doesn't navigate. */
   const devs = d.devices || [];
   $('devCountPill').textContent = devs.length;
   $('userDevices').innerHTML = devs.map(dv =>
-    '<tr class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' +
-    '<td>' + esc(dv.id.substring(0, 16)) + '</td>' +
-    '<td>' + esc(dv.platform) + '</td>' +
-    '<td>' + esc(dv.name) + '</td>' +
-    '<td>' + esc(dv.registered) + '</td>' +
-    '<td>' + esc(dv.last_seen) + '</td>' +
-    '<td><span class="tag ' + (dv.prekeys < 5 ? 'danger' : 'ok') + '">' +
-    dv.prekeys + '</span></td></tr>'
-  ).join('') || '<tr><td colspan="6" class="empty">no devices</td></tr>';
+    '<tr>' +
+    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' + esc(dv.id.substring(0, 16)) + '</td>' +
+    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' + esc(dv.platform) + '</td>' +
+    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' + esc(dv.name) + '</td>' +
+    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' + esc(dv.registered) + '</td>' +
+    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' + esc(dv.last_seen) + '</td>' +
+    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'"><span class="tag ' + (dv.prekeys < 5 ? 'danger' : 'ok') + '">' +
+    dv.prekeys + '</span></td>' +
+    '<td><button class="danger" onclick="deleteDevice(\'' + esc(dv.id) + '\', \'' + esc(dv.name) + '\')">Delete</button></td>' +
+    '</tr>'
+  ).join('') || '<tr><td colspan="7" class="empty">no devices</td></tr>';
 
   /* Friendships */
   const friends = d.friendships || [];
@@ -96,6 +95,25 @@ async function load() {
     '<td>' + esc(a.target) + '</td>' +
     '<td>' + esc(a.detail) + '</td></tr>'
   ).join('') || '<tr><td colspan="5" class="empty">none</td></tr>';
+}
+
+async function deleteDevice(devId, devName) {
+  const ok = await showModal({
+    title: 'Delete device',
+    body: 'Delete device <code>' + esc(devName || devId.substring(0, 16) + '…') + '</code>?',
+    impact: 'All queued messages to and from this device will be removed. ' +
+            'The user keeps their other devices.',
+    impactClass: 'warn',
+    confirmText: 'Yes, delete', confirmClass: 'danger',
+  });
+  if (!ok) return;
+  try {
+    await api('DELETE', '/api/v1/admin/devices/' + encodeURIComponent(devId));
+    toast('Device deleted', 'ok');
+    load();
+  } catch (e) {
+    toast('Delete failed: ' + (e && e.message ? e.message : 'unknown'), 'danger');
+  }
 }
 
 load();

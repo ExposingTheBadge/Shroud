@@ -1,6 +1,6 @@
 /*
- * GHOSTLINK Linux Client — GTK3, OpenSSL, libcurl
- * Compile: gcc -O2 -o ghostlink main.c `pkg-config --cflags --libs gtk+-3.0 openssl libcurl`
+ * SHROUD Linux Client — GTK3, OpenSSL, libcurl
+ * Compile: gcc -O2 -o shroud main.c `pkg-config --cflags --libs gtk+-3.0 openssl libcurl`
  */
 #include <gtk/gtk.h>
 #include <openssl/evp.h>
@@ -17,8 +17,8 @@
 
 #define SERVER_URL    "http://150.195.114.185:58443"
 #define APP_VERSION   "1.2.0"
-#define CONFIG_DIR    ".ghostlink"
-#define DOWNLOAD_DIR  "Downloads/GHOSTLINK"
+#define CONFIG_DIR    ".shroud"
+#define DOWNLOAD_DIR  "Downloads/SHROUD"
 #define AES_KEY_LEN   32
 #define AES_IV_LEN    12
 #define AES_TAG_LEN   16
@@ -263,7 +263,7 @@ static void build_registration(void) {
     gtk_widget_set_margin_start(box, 40); gtk_widget_set_margin_end(box, 40);
     gtk_widget_set_margin_top(box, 40);
 
-    GtkWidget *title = gtk_label_new("<big><b>GHOSTLINK Setup</b></big>");
+    GtkWidget *title = gtk_label_new("<big><b>SHROUD Setup</b></big>");
     gtk_label_set_use_markup(GTK_LABEL(title), TRUE);
     gtk_box_pack_start(GTK_BOX(box), title, FALSE, FALSE, 8);
 
@@ -358,7 +358,7 @@ int main(int argc, char **argv) {
     storage_init();
 
     main_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(main_window), "GHOSTLINK Secure Messenger");
+    gtk_window_set_title(GTK_WINDOW(main_window), "SHROUD Secure Messenger");
     gtk_window_set_default_size(GTK_WINDOW(main_window), 850, 600);
     g_signal_connect(main_window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
 

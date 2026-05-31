@@ -1,4 +1,11 @@
-# GHOSTLINK Changelog
+# SHROUD Changelog
+
+## v2.5.0 — Renamed from GHOSTLINK to SHROUD
+
+The project has been renamed. All identifiers, file names, package names,
+release artifacts, and documentation now refer to SHROUD. Historical
+release archives in `releases/` have been renamed in place; commit
+history before this point still references the prior name.
 
 ## v1.3.0 — May 24, 2026
 **Windows Client (Qt6)**
@@ -34,7 +41,7 @@
 **Cryptography**
 - Quantum-resistant hybrid key exchange: P-384 ECDH + ML-KEM-1024 (Kyber)
 - AES-256-GCM message encryption
-- Key derivation: SHA-256(SHA-256(ECDH_raw) + "GHOSTLINK-AUTH-v1")[:32]
+- Key derivation: SHA-256(SHA-256(ECDH_raw) + "SHROUD-AUTH-v1")[:32]
 - Windows CNG backend via NCrypt (BCRYPT_ECDH_P384_ALGORITHM)
 - AndroidKeyStore ECDH key exchange
 - liboqs Python bindings for ML-KEM-1024

@@ -1,5 +1,5 @@
 """
-GHOSTLINK TreeKEM — minimal MLS-style left-balanced binary tree key
+SHROUD TreeKEM — minimal MLS-style left-balanced binary tree key
 agreement (RFC 9420 §6 subset).
 
 Each leaf is one group member. Each internal node holds a secret derived
@@ -28,9 +28,9 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X
 
 X25519_LEN = 32
 SECRET_LEN = 32
-INFO_NODE = b"GHOSTLINK-TK-NODE"
-INFO_LEAF = b"GHOSTLINK-TK-LEAF"
-INFO_ROOT = b"GHOSTLINK-TK-ROOT"
+INFO_NODE = b"SHROUD-TK-NODE"
+INFO_LEAF = b"SHROUD-TK-LEAF"
+INFO_ROOT = b"SHROUD-TK-ROOT"
 
 
 def _hkdf(salt: bytes, ikm: bytes, info: bytes, length: int = 32) -> bytes:

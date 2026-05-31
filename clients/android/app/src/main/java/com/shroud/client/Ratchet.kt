@@ -1,4 +1,4 @@
-package com.ghostlink.client
+package com.shroud.client
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -13,7 +13,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * GHOSTLINK Double Ratchet — Kotlin port.
+ * SHROUD Double Ratchet — Kotlin port.
  *
  * Mirrors crypto/double_ratchet.py and clients/windows/ratchet.c. The
  * wire format is byte-exact across all three implementations:
@@ -39,7 +39,7 @@ object Ratchet {
     const val HEADER_LEN = 4 + X25519_LEN + 4 + 4
     const val MAX_SKIP = 256
 
-    private val INFO_RK = "GHOSTLINK-DR-RK".toByteArray()
+    private val INFO_RK = "SHROUD-DR-RK".toByteArray()
     private val rng = SecureRandom()
 
     data class SkippedKey(val dhrPub: ByteArray, val n: Int, val mk: ByteArray)
@@ -191,9 +191,9 @@ object Ratchet {
 
     // ── X3DH ─────────────────────────────────────────────────────────
     // Mirrors clients/windows/ratchet.c:ratchet_x3dh_{alice,bob}.
-    // SK = HKDF-SHA512(0, F || DH1 || DH2 [|| DH3 || DH4], "GHOSTLINK-X3DH-v1")
+    // SK = HKDF-SHA512(0, F || DH1 || DH2 [|| DH3 || DH4], "SHROUD-X3DH-v1")
     // where F = 32 bytes 0xFF (domain-separation prefix).
-    private val X3DH_INFO = "GHOSTLINK-X3DH-v1".toByteArray()
+    private val X3DH_INFO = "SHROUD-X3DH-v1".toByteArray()
 
     fun x3dhAlice(myIkPriv: ByteArray, myEkPriv: ByteArray,
                   peerIkPub: ByteArray, peerOpkPub: ByteArray?): ByteArray {

@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Windows OQS Signature Verifier
+ * SHROUD Windows OQS Signature Verifier
  * ========================================
  * Dynamically loads liboqs (oqs.dll) and exposes signature verification for
  * ML-DSA-87 + SPHINCS+-SHA2-256s-simple. Used to verify the server's
@@ -35,7 +35,7 @@ static BOOL ensure_oqs_loaded(void) {
     if (g_oqs_dll && p_oqs_sig_new && p_oqs_sig_verify) return TRUE;
     if (!g_oqs_dll) {
         g_oqs_dll = LoadLibraryA("oqs.dll");
-        if (!g_oqs_dll) g_oqs_dll = LoadLibraryA("D:\\GHOSTLINK\\oqs.dll");
+        if (!g_oqs_dll) g_oqs_dll = LoadLibraryA("D:\\SHROUD\\oqs.dll");
         if (!g_oqs_dll) return FALSE;
     }
     p_oqs_sig_new    = (oqs_sig_new_fn)   GetProcAddress(g_oqs_dll, "OQS_SIG_new");
@@ -61,7 +61,7 @@ BOOL oqs_sig_verify(const char *algorithm,
 }
 
 /* ────────────────────────────────────────────────────────────────────
- * GHOSTLINK triple-hybrid signature wire layout (matches crypto/hybrid_sig.py):
+ * SHROUD triple-hybrid signature wire layout (matches crypto/hybrid_sig.py):
  *   PK_BLOB:   4B 'SKB2' | 32B Ed25519 | 2592B ML-DSA-87 | 64B SPHINCS+
  *              total 2692 bytes
  *   SIG_BLOB:  4B 'SGB2' | 64B Ed25519 | 4627B ML-DSA-87 | 29792B SPHINCS+
@@ -88,7 +88,7 @@ BOOL oqs_sig_verify(const char *algorithm,
 #define HSIG_PK_MAGIC    0x32424B53UL  /* 'SKB2' LE */
 #define HSIG_SIG_MAGIC   0x32424753UL  /* 'SGB2' LE */
 
-BOOL ghostlink_verify_server_sig(const BYTE *pk_blob, DWORD pk_blob_len,
+BOOL shroud_verify_server_sig(const BYTE *pk_blob, DWORD pk_blob_len,
                                   const BYTE *sig_blob, DWORD sig_blob_len,
                                   const BYTE *message, DWORD message_len) {
     if (pk_blob_len != HSIG_PK_TOTAL || sig_blob_len != HSIG_SIG_TOTAL) return FALSE;

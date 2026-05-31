@@ -1,4 +1,4 @@
-/* GHOSTLINK admin login — fingerprint grid + password.
+/* SHROUD admin login — fingerprint grid + password.
  *
  * The fingerprint is a 256-hex-char value generated server-side on first
  * setup. Users paste it into the grid (anywhere — paste handler spreads

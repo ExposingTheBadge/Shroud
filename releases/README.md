@@ -1,6 +1,6 @@
 # Release archive
 
-Every published GHOSTLINK build is preserved here under `vX.Y.Z/`. This makes
+Every published SHROUD build is preserved here under `vX.Y.Z/`. This makes
 it easy to:
 - Diff binaries across versions
 - Reinstall a specific older release without hitting GitHub
@@ -11,10 +11,10 @@ it easy to:
 
 ```
 releases/
-  v1.0.0/  GHOSTLINK_v1.0.0.zip
+  v1.0.0/  SHROUD_v1.0.0.zip
   v1.1.0/  (TODO: rebuild from tag)
   v1.2.0/  (TODO)
-  v1.3.0/  GHOSTLINK-v1.3.0-win64.zip  (mirrored from GitHub release)
+  v1.3.0/  SHROUD-v1.3.0-win64.zip  (mirrored from GitHub release)
   v1.4.0/  (TODO)
   v1.5.0/  (TODO)
   v1.6.0/  (TODO)
@@ -36,8 +36,8 @@ releases/
    ./gradlew.bat assembleRelease
    ```
 4. Copy the artifacts into `releases/vX.Y.Z/`:
-   - `GHOSTLINK-vX.Y.Z-win64.exe` (or .zip if bundling Qt DLLs)
-   - `GHOSTLINK-vX.Y.Z.apk`
+   - `SHROUD-vX.Y.Z-win64.exe` (or .zip if bundling Qt DLLs)
+   - `SHROUD-vX.Y.Z.apk`
 5. Sign the manifest: `python release/sign_manifest.py --version X.Y.Z ...`
 6. Attach to GitHub release: `gh release create vX.Y.Z releases/vX.Y.Z/*`
 

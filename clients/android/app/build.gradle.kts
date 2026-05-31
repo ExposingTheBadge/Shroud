@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.ghostlink.client"
+    namespace = "com.shroud.client"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.ghostlink.client"
+        applicationId = "com.shroud.client"
         minSdk = 26
         targetSdk = 34
         versionCode = 19
@@ -18,10 +18,10 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file("ghostlink.keystore")
-            storePassword = System.getenv("GHOSTLINK_KEYSTORE_PASS") ?: "changeit"
-            keyAlias = "ghostlink"
-            keyPassword = System.getenv("GHOSTLINK_KEY_PASS") ?: "changeit"
+            storeFile = file("shroud.keystore")
+            storePassword = System.getenv("SHROUD_KEYSTORE_PASS") ?: "changeit"
+            keyAlias = "shroud"
+            keyPassword = System.getenv("SHROUD_KEY_PASS") ?: "changeit"
         }
     }
 

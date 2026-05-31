@@ -1,12 +1,12 @@
 """
-GHOSTLINK Triple-Hybrid Signature
+SHROUD Triple-Hybrid Signature
 =================================
 Ed25519 (classical) + ML-DSA-87 (lattice PQ, FIPS 204) + SPHINCS+-256s (hash-based PQ)
 combined as concurrent independent signatures. To forge, an attacker must break
 the discrete-log problem AND the lattice-LWE problem AND a generic hash function
 preimage at the 256-bit security level — three uncorrelated assumptions.
 
-Used to attest GHOSTLINK's server identity. The server holds one identity
+Used to attest SHROUD's server identity. The server holds one identity
 keypair forever; the public part is pinned by clients on first connect.
 
 Wire format
@@ -132,7 +132,7 @@ def fingerprint(pk_blob: bytes, digits: int = 32) -> str:
 
 def self_test() -> bool:
     pk, sk = keygen()
-    msg = b"GHOSTLINK identity attestation self-test"
+    msg = b"SHROUD identity attestation self-test"
     s = sign(msg, sk)
     if not verify(msg, s, pk): return False
     # Tampered message must fail

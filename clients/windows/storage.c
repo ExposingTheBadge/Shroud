@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Windows Storage — DPAPI-protected key storage
+ * SHROUD Windows Storage — DPAPI-protected key storage
  */
 #include "client.h"
 
@@ -15,14 +15,14 @@ BOOL storage_save_keypair(const char *device_id, KeyPair *kp) {
     /* DPAPI encrypt */
     DATA_BLOB inBlob = { blobLen, keyBlob };
     DATA_BLOB outBlob = {0};
-    if (!CryptProtectData(&inBlob, L"GHOSTLINK Identity Key", NULL, NULL, NULL,
+    if (!CryptProtectData(&inBlob, L"SHROUD Identity Key", NULL, NULL, NULL,
                           0, &outBlob))
         return FALSE;
 
-    /* Write to %APPDATA%\GHOSTLINK\identity.key */
+    /* Write to %APPDATA%\SHROUD\identity.key */
     WCHAR path[MAX_PATH];
     if (!GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH)) return FALSE;
-    wcscat_s(path, MAX_PATH, L"\\GHOSTLINK");
+    wcscat_s(path, MAX_PATH, L"\\SHROUD");
     CreateDirectoryW(path, NULL);
 
     WCHAR filepath[MAX_PATH];
@@ -41,7 +41,7 @@ BOOL storage_save_keypair(const char *device_id, KeyPair *kp) {
 BOOL storage_load_keypair(const char *device_id, KeyPair *kp) {
     WCHAR path[MAX_PATH];
     if (!GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH)) return FALSE;
-    wcscat_s(path, MAX_PATH, L"\\GHOSTLINK");
+    wcscat_s(path, MAX_PATH, L"\\SHROUD");
 
     WCHAR filepath[MAX_PATH];
     wsprintfW(filepath, L"%s\\identity.key", path);
@@ -85,7 +85,7 @@ BOOL storage_load_keypair(const char *device_id, KeyPair *kp) {
 
 BOOL storage_save_config(DeviceConfig *cfg) {
     HKEY hKey;
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK", 0, NULL,
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\SHROUD", 0, NULL,
                         REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS)
         return FALSE;
     RegSetValueExA(hKey, "DeviceID", 0, REG_SZ, (BYTE*)cfg->id, (DWORD)strlen(cfg->id) + 1);
@@ -97,7 +97,7 @@ BOOL storage_save_config(DeviceConfig *cfg) {
 
 BOOL storage_load_config(DeviceConfig *cfg) {
     HKEY hKey;
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK", 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\SHROUD", 0, KEY_READ, &hKey) != ERROR_SUCCESS)
         return FALSE;
     DWORD size = sizeof(cfg->id);
     RegQueryValueExA(hKey, "DeviceID", NULL, NULL, (BYTE*)cfg->id, &size);
@@ -111,7 +111,7 @@ BOOL storage_load_config(DeviceConfig *cfg) {
 
 BOOL storage_exists(void) {
     HKEY hKey;
-    BOOL exists = RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK", 0, KEY_READ, &hKey) == ERROR_SUCCESS;
+    BOOL exists = RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\SHROUD", 0, KEY_READ, &hKey) == ERROR_SUCCESS;
     if (exists) RegCloseKey(hKey);
     return exists;
 }
@@ -121,7 +121,7 @@ void app_instance_id(char *out, int outSize) {
     HKEY hKey;
     DWORD size = outSize;
     /* Try to read existing */
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\SHROUD", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
         if (RegQueryValueExA(hKey, "AppInstanceID", NULL, NULL, (BYTE*)out, &size) == ERROR_SUCCESS && out[0]) {
             RegCloseKey(hKey);
             return;
@@ -136,7 +136,7 @@ void app_instance_id(char *out, int outSize) {
         rand[8],rand[9],rand[10],rand[11],rand[12],rand[13],rand[14],rand[15]);
     out[outSize-1] = 0;
     /* Save */
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK", 0, NULL,
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\SHROUD", 0, NULL,
         REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
         RegSetValueExA(hKey, "AppInstanceID", 0, REG_SZ, (BYTE*)out, (DWORD)strlen(out)+1);
         RegCloseKey(hKey);
@@ -201,12 +201,12 @@ BOOL storage_load_blob(const wchar_t *path, BYTE **plain_out, DWORD *plain_len_o
 
 void storage_delete_all(void) {
     /* Delete registry key */
-    RegDeleteKeyA(HKEY_CURRENT_USER, "SOFTWARE\\GHOSTLINK");
+    RegDeleteKeyA(HKEY_CURRENT_USER, "SOFTWARE\\SHROUD");
 
     /* Delete identity key file */
     WCHAR path[MAX_PATH];
     if (GetEnvironmentVariableW(L"APPDATA", path, MAX_PATH)) {
-        wcscat_s(path, MAX_PATH, L"\\GHOSTLINK");
+        wcscat_s(path, MAX_PATH, L"\\SHROUD");
         WCHAR filepath[MAX_PATH];
         wsprintfW(filepath, L"%s\\identity.key", path);
         DeleteFileW(filepath);

@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Double Ratchet — Windows C port
+ * SHROUD Double Ratchet — Windows C port
  *
  * Mirrors crypto/double_ratchet.py. Provides forward + future secrecy for
  * each peer-to-peer conversation. On-disk state is written per conversation
@@ -13,8 +13,8 @@
  *     nonce    12B      AES-256-GCM nonce
  *     ct       var      AES-256-GCM ciphertext + tag
  */
-#ifndef GHOSTLINK_RATCHET_H
-#define GHOSTLINK_RATCHET_H
+#ifndef SHROUD_RATCHET_H
+#define SHROUD_RATCHET_H
 
 #include "client.h"
 
@@ -102,7 +102,7 @@ BOOL ratchet_compute_bootstrap(const BYTE my_priv[RATCHET_X25519_LEN],
 /* ── X3DH (Extended Triple Diffie-Hellman) ───────────────────────────
  *
  * Asynchronous handshake from Signal's X3DH spec, simplified for
- * GHOSTLINK's IK + OTP schema (no signed prekey — Ed25519 ownership
+ * SHROUD's IK + OTP schema (no signed prekey — Ed25519 ownership
  * proof on the IK already binds the bundle).
  *
  * Alice's input: her long-term identity priv (IK_A), a fresh ephemeral
@@ -117,7 +117,7 @@ BOOL ratchet_compute_bootstrap(const BYTE my_priv[RATCHET_X25519_LEN],
  *
  * SK = HKDF-SHA512(salt=0,
  *                  ikm = 0xFF*32 || DH1 || DH2 || [DH3 || DH4],
- *                  info = "GHOSTLINK-X3DH-v1",
+ *                  info = "SHROUD-X3DH-v1",
  *                  L = 32)
  *
  *   DH1 = X25519(IK_A_priv, IK_B_pub)     [Alice]
@@ -144,4 +144,4 @@ BOOL ratchet_x3dh_bob(const BYTE my_ik_priv[RATCHET_X25519_LEN],
                       const BYTE peer_ek_pub[RATCHET_X25519_LEN],
                       BYTE sk_out[RATCHET_KEY_LEN]);
 
-#endif /* GHOSTLINK_RATCHET_H */
+#endif /* SHROUD_RATCHET_H */

@@ -1,4 +1,4 @@
-package com.ghostlink.client
+package com.shroud.client
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -18,7 +18,7 @@ fun String.hexToBytes(): ByteArray = chunked(2).map { it.toInt(16).toByte() }.to
 object CryptoProvider {
 
     private const val KEYSTORE = "AndroidKeyStore"
-    private const val IDENTITY_ALIAS = "ghostlink_identity_p384"
+    private const val IDENTITY_ALIAS = "shroud_identity_p384"
     private const val AES_KEY_LEN = 32
 
     // ── ECDH P-384 Identity Keypair ────────────────────────────────
@@ -56,7 +56,7 @@ object CryptoProvider {
         ka.doPhase(peerPublic, true)
         val shared = ka.generateSecret()
         val hkdf = Mac.getInstance("HmacSHA256")
-        hkdf.init(SecretKeySpec("GHOSTLINK-ECDH-v1".toByteArray(), "HmacSHA256"))
+        hkdf.init(SecretKeySpec("SHROUD-ECDH-v1".toByteArray(), "HmacSHA256"))
         val prk = hkdf.doFinal(shared)
         return SecretKeySpec(prk.copyOf(AES_KEY_LEN), "AES")
     }

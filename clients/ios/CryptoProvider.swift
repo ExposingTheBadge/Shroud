@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 /// FIPS 140-2 compliant crypto operations using Apple CryptoKit (FIPS validated on A12+)
-struct GhostlinkCrypto {
+struct ShroudCrypto {
 
     // MARK: - ECDH P-384 Key Exchange
     static func generateIdentityKey() -> P384.KeyAgreement.PrivateKey {
@@ -18,7 +18,7 @@ struct GhostlinkCrypto {
         return sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,
             salt: Data(),
-            sharedInfo: "GHOSTLINK-ECDH-v1".data(using: .utf8)!,
+            sharedInfo: "SHROUD-ECDH-v1".data(using: .utf8)!,
             outputByteCount: 32
         )
     }
@@ -74,7 +74,7 @@ struct GhostlinkCrypto {
         let sig = Data(hexEncoded: envelope.sig)!
 
         guard hmacVerify(key: key, data: ciphertext, signature: sig) else {
-            throw GhostlinkError.integrityCheckFailed
+            throw ShroudError.integrityCheckFailed
         }
 
         let plaintext = try decryptAESGCM(key: key, nonce: nonce, ciphertext: ciphertext, tag: Data()) // tag embedded

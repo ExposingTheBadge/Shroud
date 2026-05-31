@@ -1,6 +1,6 @@
 # Multi-party release signing
 
-GHOSTLINK ships with `release/sign_manifest.py`, which produces a single
+SHROUD ships with `release/sign_manifest.py`, which produces a single
 hybrid signature (Ed25519 + ML-DSA-87 + SPHINCS+-256s) over each release.
 That binds a release to one server identity key.
 
@@ -59,7 +59,7 @@ the public learns the roster.
 ## Per-release flow
 
   1. Release captain builds artefacts as usual (e.g.
-     `releases/v2.3.0/GHOSTLINK-v2.3.0-win64.zip`).
+     `releases/v2.3.0/SHROUD-v2.3.0-win64.zip`).
 
   2. Each signer, on their own machine, runs:
      ```
@@ -67,7 +67,7 @@ the public learns the roster.
          --signer alice \
          --version 2.3.0 \
          --git-commit $(git rev-parse HEAD) \
-         --windows-zip releases/v2.3.0/GHOSTLINK-v2.3.0-win64.zip \
+         --windows-zip releases/v2.3.0/SHROUD-v2.3.0-win64.zip \
          --output /tmp/attest-alice.json
      ```
      Each `attest-*.json` is independent — signers don't need to coordinate
@@ -91,7 +91,7 @@ the public learns the roster.
 ```
 python release/multisig_verify.py \
     --bundle RELEASES-2.3.0.multisig.json \
-    --windows-zip GHOSTLINK-v2.3.0-win64.zip
+    --windows-zip SHROUD-v2.3.0-win64.zip
 ```
 
 The verifier exits 0 only when:
@@ -107,7 +107,7 @@ The verifier exits 0 only when:
 Adding, removing, or re-keying a signer changes `roster.json`. The new
 roster file MUST be checked in *and* attested by the previous roster's
 threshold. The mechanism is identical to a release attestation, but the
-"manifest" is just `{"product":"GHOSTLINK","roster":<new-roster-json>}`.
+"manifest" is just `{"product":"SHROUD","roster":<new-roster-json>}`.
 That gives a cryptographic chain from genesis: forging the roster requires
 forging M sigs at *every* historical roster transition, not just the
 current one.
@@ -115,7 +115,7 @@ current one.
 ## Trust model summary
 
 The single-sig (`sign_manifest.py`) path covers the "this is the
-GHOSTLINK server identity" claim — it binds a release to the project's
+SHROUD server identity" claim — it binds a release to the project's
 identity key. The multi-sig (`multisig.py`) path covers the "humans
 agree this is a real release" claim — it requires M independent
 signers to attest the same manifest, so no single compromised key can

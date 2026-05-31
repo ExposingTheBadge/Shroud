@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>GHOSTLINK Admin — Device</title>
+  <title>SHROUD Admin — Device</title>
   <link rel="stylesheet" href="/admin/static/admin.css">
 </head>
 <body>
@@ -12,6 +12,9 @@
   <div class="back" onclick="location='/admin#devices'">&larr; back to dashboard</div>
   <h1 id="devTitle">—</h1>
   <div class="sub" id="devSub">—</div>
+  <div style="margin-top:10px">
+    <button class="danger" id="devDeleteBtn" onclick="deleteThisDevice()">Delete this device</button>
+  </div>
 </div>
 
 <div class="grid" id="devCards" style="padding:14px 20px"></div>
@@ -45,6 +48,7 @@
   </table></div>
 </div>
 
+<script src="/admin/static/shared.js"></script>
 <script src="/admin/static/device.js"></script>
 </body>
 </html>

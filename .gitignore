@@ -33,9 +33,9 @@ tb_logs/
 data/
 
 # Server state
-server/ghostlink.db
-server/ghostlink.db-shm
-server/ghostlink.db-wal
+server/shroud.db
+server/shroud.db-shm
+server/shroud.db-wal
 server/files/
 server/identity.key
 server/audit.log
@@ -61,7 +61,7 @@ tmp/
 clients/qt6/build/
 clients/windows/build/
 clients/qt-test/
-GHOSTLINK_Explained.html
+SHROUD_Explained.html
 
 .claude/
 admin_js_check.js
@@ -75,3 +75,6 @@ release/signers/*.key
 # Agent / IDE skill runtime artifacts (per-developer, not project source)
 .agents/
 skills-lock.json
+
+# Per-developer Azure Artifact Signing scratch (rename scripts, etc.)
+.azure-signing/

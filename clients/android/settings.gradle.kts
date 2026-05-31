@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "GHOSTLINK"
+rootProject.name = "SHROUD"
 include(":app")

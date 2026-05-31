@@ -1,5 +1,5 @@
 """
-GHOSTLINK FIPS 140-2 Cryptographic Module
+SHROUD FIPS 140-2 Cryptographic Module
 Shared across server and all clients.
 Implements: AES-256-GCM, ECDH P-384, PBKDF2-HMAC-SHA256, HMAC-SHA256/384/512
 FIPS 140-2 validated algorithms only. No non-FIPS primitives.
@@ -134,7 +134,7 @@ def compute_shared_secret(private_key: ec.EllipticCurvePrivateKey,
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=b"GHOSTLINK-ECDH-v1",
+        info=b"SHROUD-ECDH-v1",
         backend=default_backend()
     )
     return hkdf.derive(shared)
@@ -203,7 +203,7 @@ def hybrid_key_exchange_encaps(ecdh_priv, ecdh_pub_peer, kyber_pk):
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=b"GHOSTLINK-HYBRID-PQ-v2",
+        info=b"SHROUD-HYBRID-PQ-v2",
         backend=default_backend()
     )
     session_key = hkdf.derive(combined)
@@ -225,7 +225,7 @@ def hybrid_key_exchange_decaps(ecdh_priv, ecdh_pub_peer, kyber_ct, kyber_sk):
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=b"GHOSTLINK-HYBRID-PQ-v2",
+        info=b"SHROUD-HYBRID-PQ-v2",
         backend=default_backend()
     )
     return hkdf.derive(combined)
@@ -253,4 +253,4 @@ def fips_self_test() -> bool:
 if __name__ == "__main__":
     assert fips_self_test(), "FIPS self-test FAILED"
     print("FIPS 140-2 self-test: PASSED")
-    print("GHOSTLINK Crypto Module Ready")
+    print("SHROUD Crypto Module Ready")

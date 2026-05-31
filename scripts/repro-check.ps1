@@ -50,11 +50,11 @@ if (-not $SkipServer) {
     docker buildx build --no-cache --pull `
         --output type=docker `
         -f Dockerfile.repro `
-        -t "ghostlink-server:repro-$Version" .  2>&1 | Tee-Object -FilePath "$env:TEMP\repro-server.log"
+        -t "shroud-server:repro-$Version" .  2>&1 | Tee-Object -FilePath "$env:TEMP\repro-server.log"
     if ($LASTEXITCODE -eq 0) {
-        $id = (docker image inspect --format='{{.Id}}' "ghostlink-server:repro-$Version").Trim()
+        $id = (docker image inspect --format='{{.Id}}' "shroud-server:repro-$Version").Trim()
         $localSha = $id -replace '^sha256:', ''
-        $want = Get-ExpectedSha "ghostlink-server.docker"
+        $want = Get-ExpectedSha "shroud-server.docker"
         if ($localSha -eq $want) {
             Write-Host "[repro] server: OK  ($localSha)"
         } else {
@@ -83,7 +83,7 @@ if (-not $SkipAndroid) {
         $apk = "clients\android\app\build\outputs\apk\release\app-release-unsigned.apk"
         if (Test-Path $apk) {
             $localSha = (Get-FileHash -Algorithm SHA256 $apk).Hash.ToLower()
-            $want = Get-ExpectedSha "ghostlink-android.unsigned.apk"
+            $want = Get-ExpectedSha "shroud-android.unsigned.apk"
             if ($localSha -eq $want) {
                 Write-Host "[repro] android: OK  ($localSha)"
             } else {

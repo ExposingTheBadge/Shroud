@@ -3,8 +3,8 @@ import CryptoKit
 
 // MARK: - App Entry
 @main
-struct GhostlinkApp: App {
-    @StateObject private var client = GhostlinkClient()
+struct ShroudApp: App {
+    @StateObject private var client = ShroudClient()
 
     var body: some Scene {
         WindowGroup {
@@ -18,7 +18,7 @@ struct GhostlinkApp: App {
 }
 
 // MARK: - Client State
-class GhostlinkClient: ObservableObject {
+class ShroudClient: ObservableObject {
     @Published var isRegistered = false
     @Published var deviceID = ""
     @Published var username = ""
@@ -57,7 +57,7 @@ class GhostlinkClient: ObservableObject {
         )
 
         guard let did = userResp["device_id"] as? String else {
-            throw GhostlinkError.registrationFailed
+            throw ShroudError.registrationFailed
         }
 
         // Save securely
@@ -101,7 +101,7 @@ struct ChatGroup: Identifiable, Codable {
     let createdAt: String
 }
 
-enum GhostlinkError: Error {
+enum ShroudError: Error {
     case registrationFailed
     case encryptionFailed
     case decryptionFailed

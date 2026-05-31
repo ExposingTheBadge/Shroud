@@ -1,4 +1,4 @@
-package com.ghostlink.client
+package com.shroud.client
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -13,7 +13,7 @@ object NetworkClient {
     private const val ENC = "2f 3c 3b 23 6e 63 66 7f 7e 77 66 7e 6a 61 62 78 7f 7f 69 79 77 66 6e 79 71 7a 7f 74"
     private val BASE: String by lazy { decode(ENC) }
     private fun decode(hex: String): String {
-        val key = "GHOSTLINK"
+        val key = "SHROUD"
         val bytes = hex.split(" ").map { it.toInt(16) }.toIntArray()
         for (i in bytes.indices) bytes[i] = bytes[i] xor key[i % key.length].code
         return String(bytes.map { it.toChar() }.toCharArray())

@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Windows TPM 2.0 — Detection, Status, and Key Sealing
+ * SHROUD Windows TPM 2.0 — Detection, Status, and Key Sealing
  */
 #include "client.h"
 #include <tbs.h>
@@ -84,7 +84,7 @@ BOOL tpm_seal_key(const BYTE *keyData, DWORD keyLen, const char *label) {
         /* Create a TPM-backed persistent key */
         NCRYPT_KEY_HANDLE hKey = NULL;
         s = NCryptCreatePersistedKey(hProv, &hKey,
-            BCRYPT_RSA_ALGORITHM, L"GHOSTLINK_TPM_SEAL", 0,
+            BCRYPT_RSA_ALGORITHM, L"SHROUD_TPM_SEAL", 0,
             NCRYPT_OVERWRITE_KEY_FLAG);
         if (BCRYPT_SUCCESS(s)) {
             s = NCryptFinalizeKey(hKey, 0);
@@ -103,7 +103,7 @@ BOOL tpm_seal_key(const BYTE *keyData, DWORD keyLen, const char *label) {
     DATA_BLOB inBlob = { keyLen, (BYTE*)keyData };
     DATA_BLOB outBlob = {0};
 
-    if (!CryptProtectData(&inBlob, L"GHOSTLINK TPM Seal",
+    if (!CryptProtectData(&inBlob, L"SHROUD TPM Seal",
         NULL, NULL, NULL, CRYPTPROTECT_LOCAL_MACHINE, &outBlob))
         return FALSE;
 
@@ -111,7 +111,7 @@ BOOL tpm_seal_key(const BYTE *keyData, DWORD keyLen, const char *label) {
     if (!GetEnvironmentVariableW(L"APPDATA", filepath, MAX_PATH)) {
         LocalFree(outBlob.pbData); return FALSE;
     }
-    wcscat_s(filepath, MAX_PATH, L"\\GHOSTLINK");
+    wcscat_s(filepath, MAX_PATH, L"\\SHROUD");
     CreateDirectoryW(filepath, NULL);
 
     WCHAR fullPath[MAX_PATH];
@@ -132,7 +132,7 @@ BOOL tpm_seal_key(const BYTE *keyData, DWORD keyLen, const char *label) {
 BOOL tpm_unseal_key(BYTE **keyData, DWORD *keyLen, const char *label) {
     WCHAR filepath[MAX_PATH];
     if (!GetEnvironmentVariableW(L"APPDATA", filepath, MAX_PATH)) return FALSE;
-    wcscat_s(filepath, MAX_PATH, L"\\GHOSTLINK");
+    wcscat_s(filepath, MAX_PATH, L"\\SHROUD");
 
     WCHAR fullPath[MAX_PATH];
     wsprintfW(fullPath, L"%s\\tpm_sealed.dat", filepath);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/repro-check.sh — verify that a released GHOSTLINK build can be
+# scripts/repro-check.sh — verify that a released SHROUD build can be
 # reproduced byte-for-byte from this repository.
 #
 # Run AFTER you have a release manifest locally (RELEASES-<ver>.multisig.json).
@@ -80,15 +80,15 @@ if [[ $SKIP_SERVER -eq 0 ]]; then
     docker buildx build --no-cache --pull \
         --output type=docker \
         -f Dockerfile.repro \
-        -t "ghostlink-server:repro-${VERSION}" \
+        -t "shroud-server:repro-${VERSION}" \
         . >/tmp/repro-server.log 2>&1 || {
             echo "[repro] server build failed; see /tmp/repro-server.log" >&2
             fail=1
         }
     if [[ $fail -eq 0 ]]; then
-        local_id=$(docker image inspect --format='{{.Id}}' "ghostlink-server:repro-${VERSION}")
+        local_id=$(docker image inspect --format='{{.Id}}' "shroud-server:repro-${VERSION}")
         local_sha=${local_id#sha256:}
-        want=$(expected_sha "ghostlink-server.docker")
+        want=$(expected_sha "shroud-server.docker")
         if [[ "$local_sha" == "$want" ]]; then
             echo "[repro] server: OK  ($local_sha)"
         else
@@ -115,7 +115,7 @@ if [[ $SKIP_ANDROID -eq 0 ]]; then
     apk=clients/android/app/build/outputs/apk/release/app-release-unsigned.apk
     if [[ -f "$apk" ]]; then
         local_sha=$(sha256sum "$apk" | awk '{print $1}')
-        want=$(expected_sha "ghostlink-android.unsigned.apk")
+        want=$(expected_sha "shroud-android.unsigned.apk")
         if [[ "$local_sha" == "$want" ]]; then
             echo "[repro] android: OK  ($local_sha)"
         else

@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct MessageListView: View {
-    @ObservedObject var client: GhostlinkClient
+    @ObservedObject var client: ShroudClient
     @State private var selectedContact = 0
     @State private var messageText = ""
     @State private var showContacts = false
@@ -51,7 +51,7 @@ struct MessageListView: View {
                 }
                 .padding()
             }
-            .navigationTitle("GHOSTLINK")
+            .navigationTitle("SHROUD")
             .navigationBarTitleDisplayMode(.inline)
         }
     }
@@ -97,7 +97,7 @@ struct MessageRow: View {
 
 // MARK: - Contacts Sheet
 struct ContactsSheet: View {
-    @ObservedObject var client: GhostlinkClient
+    @ObservedObject var client: ShroudClient
     @State private var searchQuery = ""
 
     var body: some View {
@@ -125,7 +125,7 @@ struct ContactsSheet: View {
 
 // MARK: - Groups Sheet
 struct GroupsSheet: View {
-    @ObservedObject var client: GhostlinkClient
+    @ObservedObject var client: ShroudClient
     @State private var newGroupName = ""
 
     var body: some View {

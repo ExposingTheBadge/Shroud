@@ -5,8 +5,8 @@ Run from the repo root after producing the release artifacts:
     python release/sign_manifest.py \
         --git-commit $(git rev-parse HEAD) \
         --server-image sha256:abcd... \
-        --windows-exe   path/to/GHOSTLINK.exe \
-        --android-apk   path/to/GHOSTLINK.apk
+        --windows-exe   path/to/SHROUD.exe \
+        --android-apk   path/to/SHROUD.apk
 
 The output is a `RELEASES-<version>.txt` plus a `.sig` file. Anyone holding
 the server identity fingerprint can verify the manifest with the matching
@@ -38,7 +38,7 @@ def main():
     args = ap.parse_args()
 
     manifest = {
-        "product": "GHOSTLINK",
+        "product": "SHROUD",
         "version": args.version,
         "git_commit": args.git_commit,
         "built_at_utc": int(time.time()),

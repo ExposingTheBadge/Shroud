@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct RegistrationView: View {
-    @ObservedObject var client: GhostlinkClient
+    @ObservedObject var client: ShroudClient
     @State private var username = ""
     @State private var password = ""
     @State private var deviceName = UIDevice.current.name
@@ -43,7 +43,7 @@ struct RegistrationView: View {
                     .disabled(username.count < 3 || password.count < 12 || isRegistering)
                 }
             }
-            .navigationTitle("GHOSTLINK Setup")
+            .navigationTitle("SHROUD Setup")
             .navigationBarTitleDisplayMode(.inline)
         }
     }

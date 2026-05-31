@@ -1,5 +1,5 @@
 """
-GHOSTLINK Post-Quantum Hybrid Key Exchange
+SHROUD Post-Quantum Hybrid Key Exchange
 ==========================================
 ECDH P-384 (classical) + ML-KEM-1024 (lattice PQ) cascaded through HKDF-SHA512.
 Closes the "Harvest Now, Decrypt Later" attack: an adversary recording today's
@@ -27,7 +27,7 @@ from .ml_kem_1024 import ml_kem_keygen, ml_kem_encaps, ml_kem_decaps, PK_SIZE as
 MAGIC_SERVER_PUB = 0x32474B50
 MAGIC_CLIENT_PUB = 0x32434B50
 EC_XY_LEN = 96
-CONTEXT = b"GHOSTLINK-PQ-HYBRID-v1"
+CONTEXT = b"SHROUD-PQ-HYBRID-v1"
 
 
 def gen_server_keypair():

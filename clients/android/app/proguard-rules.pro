@@ -1,6 +1,6 @@
-# GHOSTLINK ProGuard Rules
--keep class com.ghostlink.client.** { *; }
--keepclassmembers class com.ghostlink.client.** { *; }
+# SHROUD ProGuard Rules
+-keep class com.shroud.client.** { *; }
+-keepclassmembers class com.shroud.client.** { *; }
 -dontwarn javax.crypto.**
 -dontwarn java.security.**
 -dontwarn com.google.errorprone.annotations.**

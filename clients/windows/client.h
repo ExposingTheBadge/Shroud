@@ -1,10 +1,10 @@
 /*
- * GHOSTLINK Windows Client — FIPS 140-2 Native C
- * Compile: build.bat (vcvars64 + cl /O2 /MT *.c /Fe:GHOSTLINK.exe)
+ * SHROUD Windows Client — FIPS 140-2 Native C
+ * Compile: build.bat (vcvars64 + cl /O2 /MT *.c /Fe:SHROUD.exe)
  */
 
-#ifndef GHOSTLINK_CLIENT_H
-#define GHOSTLINK_CLIENT_H
+#ifndef SHROUD_CLIENT_H
+#define SHROUD_CLIENT_H
 
 #define UNICODE
 #define _UNICODE
@@ -31,7 +31,7 @@
 #pragma comment(lib, "comdlg32.lib")
 
 /* ── Configuration ────────────────────────────────────────────────── */
-/* XOR-encrypted with key "GHOSTLINK" */
+/* XOR-encrypted with key "SHROUD" */
 #define SERVER_HOST_ENC   {0x2f,0x3c,0x3b,0x23,0x6e,0x63,0x66,0x7f,0x7e,0x77,0x66,0x7e,0x6a,0x61,0x62,0x78,0x7f,0x7f,0x69,0x79,0x77,0x66,0x6e,0x79,0x71,0x7a,0x7f,0x74,0x00}
 void network_decode_host(WCHAR *out, int outLen);
 #define SERVER_PORT       58443
@@ -47,7 +47,7 @@ void network_decode_host(WCHAR *out, int outLen);
 #define MAX_PASSWORD      128
 #define MAX_DEVICE_NAME   64
 #define MAX_MESSAGE_BODY  4096
-#define MSG_CACHE_FILE    "D:\\GHOSTLINK\\msgcache.enc"
+#define MSG_CACHE_FILE    "D:\\SHROUD\\msgcache.enc"
 
 /* ── Types ─────────────────────────────────────────────────────────── */
 typedef struct {
@@ -98,7 +98,7 @@ int    crypto_keypair_origin(void);
  *                       (4B magic 'PKG2' + 4B ec_len(96) + 96B ec_xy + 4B kem_len(1568) + 1568B kem_pk)
  *   client_blob_out:    receives 4B 'PKC2' + 96B ec_xy + 1568B kem_ct = 1668 bytes
  *   client_blob_len:    in: capacity, out: written
- *   session_key_out:    32-byte HKDF-SHA512(ECDH_shared || KEM_shared, "GHOSTLINK-PQ-HYBRID-v1") */
+ *   session_key_out:    32-byte HKDF-SHA512(ECDH_shared || KEM_shared, "SHROUD-PQ-HYBRID-v1") */
 BOOL   crypto_pq_hybrid_client(const BYTE *server_blob, DWORD server_blob_len,
                                BYTE *client_blob_out, DWORD *client_blob_len_io,
                                BYTE session_key_out[32]);
@@ -177,7 +177,7 @@ BOOL oqs_sig_verify(const char *algorithm,
                     const BYTE *message, DWORD message_len,
                     const BYTE *signature, DWORD signature_len,
                     const BYTE *public_key);
-BOOL ghostlink_verify_server_sig(const BYTE *pk_blob, DWORD pk_blob_len,
+BOOL shroud_verify_server_sig(const BYTE *pk_blob, DWORD pk_blob_len,
                                   const BYTE *sig_blob, DWORD sig_blob_len,
                                   const BYTE *message, DWORD message_len);
 
@@ -211,4 +211,4 @@ void   tpm_status_string(char *buf, int bufSize);
 /* ── Security Status Display ──────────────────────────────────────── */
 void   UpdateSecurityStatus(void);
 
-#endif /* GHOSTLINK_CLIENT_H */
+#endif /* SHROUD_CLIENT_H */

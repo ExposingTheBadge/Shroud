@@ -1,12 +1,12 @@
-# GHOSTLINK
+# SHROUD
 
 > Post-quantum, end-to-end encrypted, blind-relay messaging — for Windows, Android, and iOS.
 
-## What is GHOSTLINK?
+## What is SHROUD?
 
-GHOSTLINK is a secure messenger built for people who don't want to trust the server. You install the app, register an account, and the app generates cryptographic keys that **never leave your device**. Messages you send are encrypted on *your* device, travel through the GHOSTLINK relay as opaque ciphertext, and are decrypted only on the recipient's device. The server can't read them, your ISP can't read them, and a future quantum computer that intercepts them today can't read them either.
+SHROUD is a secure messenger built for people who don't want to trust the server. You install the app, register an account, and the app generates cryptographic keys that **never leave your device**. Messages you send are encrypted on *your* device, travel through the SHROUD relay as opaque ciphertext, and are decrypted only on the recipient's device. The server can't read them, your ISP can't read them, and a future quantum computer that intercepts them today can't read them either.
 
-Unlike most messengers, GHOSTLINK is built with three uncommon design choices:
+Unlike most messengers, SHROUD is built with three uncommon design choices:
 
 1. **The server is intentionally dumb.** It stores nothing about you. No phone number, no email, no contact list, no message history. It forwards encrypted bytes and deletes them on delivery.
 2. **Every cryptographic primitive runs in hybrid classical + post-quantum mode.** If either family of math is broken — today's classical curves or tomorrow's quantum-resistant lattices — your messages remain protected.
@@ -102,21 +102,21 @@ Because the only way to make a promise of confidentiality you can keep is to arc
 
 ### Windows
 
-1. Open [Releases](https://github.com/ExposingTheBadge/GhostLink/releases) and download the latest `GHOSTLINK-v<version>-win64.zip` and `SHA256SUMS.txt`.
+1. Open [Releases](https://github.com/ExposingTheBadge/Shroud/releases) and download the latest `SHROUD-v<version>-win64.zip` and `SHA256SUMS.txt`.
 2. (Optional but recommended) verify the download — see [Verifying a Release](#verifying-a-release).
 3. Extract the zip anywhere — Program Files, your desktop, a USB stick, it doesn't matter.
-4. Run `ghostlink.exe`.
+4. Run `shroud.exe`.
    - Windows shows **"Verified publisher: Brent Gordon"** — that's the Authenticode signature from Azure Artifact Signing.
    - If you see "Windows protected your PC" the first time, click *More info → Run anyway* (this happens with all new signed apps until they accumulate SmartScreen reputation).
 
 ### Android
 
-1. Download `GHOSTLINK-v<version>.apk` from Releases.
+1. Download `SHROUD-v<version>.apk` from Releases.
 2. (Optional) verify the APK SHA-256 against `SHA256SUMS.txt`.
 3. Sideload via your file manager. You'll need *Install unknown apps* enabled for whichever launcher you use.
 4. Open the app and register.
 
-> GHOSTLINK is **not on Google Play** and won't be. Play Store distribution requires Google to act as an intermediary trust point, which conflicts with the project's "no operator trust" principle.
+> SHROUD is **not on Google Play** and won't be. Play Store distribution requires Google to act as an intermediary trust point, which conflicts with the project's "no operator trust" principle.
 
 ### iOS
 
@@ -169,7 +169,7 @@ If you've enabled **multi-device** and you're on a fresh device, see *Link a sec
 
 1. On the device you're already signed in to, open **Settings → Devices → Link new device**.
 2. A 6-digit code + QR code appears. It's good for 5 minutes.
-3. On the new device, install GHOSTLINK and choose **Sign in → Link from existing device**.
+3. On the new device, install SHROUD and choose **Sign in → Link from existing device**.
 4. Scan the QR or type the code.
 5. The two devices perform an encrypted handshake **directly through the relay** — the server sees the handshake go by but can't decrypt it. After verification, your encrypted vault is replicated to the new device.
 
@@ -215,15 +215,15 @@ This is irreversible. There is no "Are you sure I'm sure?" confirm-by-typing flo
 If you have Tor running locally (default SOCKS5 on `127.0.0.1:9050`):
 
 1. **Settings → Network → Route through Tor**, enable it.
-2. The client will start using SOCKS5. If you also configure the GHOSTLINK relay as a hidden service in your `torrc` (see [`docs/tor.md`](docs/tor.md) and [`docs/torrc.example`](docs/torrc.example)), traffic stays inside Tor end-to-end.
+2. The client will start using SOCKS5. If you also configure the SHROUD relay as a hidden service in your `torrc` (see [`docs/tor.md`](docs/tor.md) and [`docs/torrc.example`](docs/torrc.example)), traffic stays inside Tor end-to-end.
 
 ---
 
 ## Security
 
-This section documents **every cryptographic primitive in GHOSTLINK** and why it's there. If you don't care about the details, skip to the next section.
+This section documents **every cryptographic primitive in SHROUD** and why it's there. If you don't care about the details, skip to the next section.
 
-### Threat model — what GHOSTLINK protects against
+### Threat model — what SHROUD protects against
 
 | Threat                                                         | Protected? |
 |---------------------------------------------------------------|------------|
@@ -276,9 +276,9 @@ Every message uses a one-shot key derived from a chain (the Double Ratchet). If 
 
 Every release ships with:
 
-1. **Authenticode signature** on `ghostlink.exe` from Microsoft Azure Artifact Signing (publisher: Brent Gordon). Verified by Windows on every launch.
+1. **Authenticode signature** on `shroud.exe` from Microsoft Azure Artifact Signing (publisher: Brent Gordon). Verified by Windows on every launch.
 2. **SHA-256 checksums** of every distribution artifact in `SHA256SUMS.txt`.
-3. **Hybrid identity signature** (`sign_manifest.py`) — single key, proves "this came from the GHOSTLINK identity".
+3. **Hybrid identity signature** (`sign_manifest.py`) — single key, proves "this came from the SHROUD identity".
 4. **Threshold multi-signature** (`multisig.py`) — M-of-N independent signers attest the manifest. Compromise of fewer than M signing keys cannot forge a release. Full protocol in [`docs/multisig-releases.md`](docs/multisig-releases.md).
 
 ### Reproducibility
@@ -293,7 +293,7 @@ The server image and Android APK are fully reproducible — anyone can rebuild f
 
 ```powershell
 # Windows
-Get-FileHash GHOSTLINK-v2.4.6-win64.zip -Algorithm SHA256
+Get-FileHash SHROUD-v2.4.6-win64.zip -Algorithm SHA256
 # Compare to SHA256SUMS.txt
 ```
 
@@ -305,18 +305,18 @@ sha256sum --check SHA256SUMS.txt
 ### Authenticode (Windows only)
 
 ```powershell
-Get-AuthenticodeSignature .\ghostlink.exe | Format-List Status, SignerCertificate
+Get-AuthenticodeSignature .\shroud.exe | Format-List Status, SignerCertificate
 # Status should be Valid; signer should be Brent Gordon
 ```
 
-Or right-click `ghostlink.exe` → **Properties → Digital Signatures**.
+Or right-click `shroud.exe` → **Properties → Digital Signatures**.
 
 ### Multi-party threshold signature
 
 ```bash
 python release/multisig_verify.py \
     --bundle RELEASES-2.4.6.multisig.json \
-    --windows-zip GHOSTLINK-v2.4.6-win64.zip
+    --windows-zip SHROUD-v2.4.6-win64.zip
 ```
 
 Exits 0 only when ≥ M valid sigs over the same canonicalized manifest are present and the local file's hash matches.
@@ -333,7 +333,7 @@ Rebuilds the server image + APK, strips the APK signing block, compares all hash
 
 ## Self-hosting the Server
 
-You don't have to use the default GHOSTLINK relay. If you'd rather run your own:
+You don't have to use the default SHROUD relay. If you'd rather run your own:
 
 1. Get a small VPS (1 CPU, 1 GB RAM is fine; the server is I/O-bound).
 2. Get a TLS cert for your domain (Let's Encrypt is fine).
@@ -341,14 +341,14 @@ You don't have to use the default GHOSTLINK relay. If you'd rather run your own:
    ```bash
    docker buildx build --no-cache --pull \
        --output type=docker -f Dockerfile.repro \
-       -t ghostlink-server:repro .
+       -t shroud-server:repro .
    ```
 4. Run it, exposing port `58443`:
    ```bash
-   docker run -d --name ghostlink \
+   docker run -d --name shroud \
        -p 58443:58443 \
-       -v ghostlink-data:/var/lib/ghostlink \
-       ghostlink-server:repro
+       -v shroud-data:/var/lib/shroud \
+       shroud-server:repro
    ```
 5. Point your clients at `https://your-domain:58443/`.
 
@@ -370,7 +370,7 @@ cd clients/windows && cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmak
 cd clients/android && ./gradlew --no-daemon assembleRelease -PsourceDateEpoch=1700000000
 
 # Server (reproducible Docker)
-docker buildx build --no-cache --pull --output type=docker -f Dockerfile.repro -t ghostlink-server:repro .
+docker buildx build --no-cache --pull --output type=docker -f Dockerfile.repro -t shroud-server:repro .
 ```
 
 Full per-platform requirements, deployment steps, and reproducibility notes are in [`BUILD-REPRODUCIBILITY.md`](BUILD-REPRODUCIBILITY.md). The Windows CI build is defined in [`.github/workflows/release-windows.yml`](.github/workflows/release-windows.yml) and is the canonical source of truth.
@@ -379,7 +379,7 @@ Full per-platform requirements, deployment steps, and reproducibility notes are 
 
 ## License
 
-GHOSTLINK is licensed under the **GNU General Public License v3.0 or later (GPL-3.0-or-later)**. See [`LICENSE`](LICENSE) for the full text.
+SHROUD is licensed under the **GNU General Public License v3.0 or later (GPL-3.0-or-later)**. See [`LICENSE`](LICENSE) for the full text.
 
 Short version: you can use it, study it, modify it, redistribute it, and run your own server, freely. If you distribute a modified version, you must release your changes under the same license. This is intentional — it keeps the cryptographic and trust properties verifiable in any downstream fork.
 
@@ -387,7 +387,7 @@ Short version: you can use it, study it, modify it, redistribute it, and run you
 
 ## Acknowledgments
 
-GHOSTLINK builds on a lot of others' work:
+SHROUD builds on a lot of others' work:
 
 - **[Open Quantum Safe (liboqs)](https://openquantumsafe.org/)** — reference implementations of ML-KEM, ML-DSA, and SPHINCS+.
 - **NIST PQC standardization** — ML-KEM (Kyber), ML-DSA (Dilithium), and SLH-DSA (SPHINCS+).
@@ -401,7 +401,7 @@ GHOSTLINK builds on a lot of others' work:
 
 ## Project links
 
-- **Releases:** https://github.com/ExposingTheBadge/GhostLink/releases
-- **Issues / bugs:** https://github.com/ExposingTheBadge/GhostLink/issues
+- **Releases:** https://github.com/ExposingTheBadge/Shroud/releases
+- **Issues / bugs:** https://github.com/ExposingTheBadge/Shroud/issues
 - **Security disclosure:** `security@fuseobd.com` (do not file public issues for security bugs)
 - **Active development branch:** `master`

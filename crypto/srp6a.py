@@ -1,5 +1,5 @@
 """
-GHOSTLINK SRP-6a Augmented PAKE
+SHROUD SRP-6a Augmented PAKE
 ===============================
 Per RFC 5054, group 3072-bit (N_3072). The server never sees the user's
 password — not even in transit, not even at decryption time. Only a

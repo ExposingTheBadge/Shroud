@@ -1,7 +1,7 @@
 """
-GHOSTLINK icon generator — lattice-based cryptography motif.
+SHROUD icon generator — lattice-based cryptography motif.
 
-Produces ghostlink.png (256x256) and ghostlink.ico (multi-resolution).
+Produces shroud.png (256x256) and shroud.ico (multi-resolution).
 Design: hexagonal lattice cluster with glowing central core suggesting
 ML-KEM-1024 (lattice-based post-quantum) key encapsulation.
 """
@@ -200,7 +200,7 @@ def main():
     large = draw_icon(MASTER)
     small = draw_icon_small(MASTER)
 
-    png_path = os.path.join(OUT_DIR, "ghostlink.png")
+    png_path = os.path.join(OUT_DIR, "shroud.png")
     large.resize((256, 256), Image.LANCZOS).save(png_path, "PNG")
     print(f"wrote {png_path}")
 
@@ -212,7 +212,7 @@ def main():
         + [large.resize((n, n), Image.LANCZOS) for n in large_sizes]
     )
     all_sizes = small_sizes + large_sizes
-    ico_path = os.path.join(OUT_DIR, "ghostlink.ico")
+    ico_path = os.path.join(OUT_DIR, "shroud.ico")
     # Build a proper multi-entry ICO manually. PIL 12's save() collapses to
     # a single entry whether or not append_images is set, so we hand-write
     # the ICONDIR/ICONDIRENTRY headers and embed each image as PNG.

@@ -7,9 +7,9 @@
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="GHOSTLINK"
+        android:label="SHROUD"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Ghostlink"
+        android:theme="@style/Theme.Shroud"
         android:usesCleartextTraffic="true">
 
         <activity

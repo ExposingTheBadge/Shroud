@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Windows Network — WinHTTP REST client
+ * SHROUD Windows Network — WinHTTP REST client
  *
  * Supports an optional SOCKS5 proxy so users can route every request through
  * a local Tor daemon (default 127.0.0.1:9050). WinHTTP gained native SOCKS5
@@ -19,7 +19,7 @@ static WCHAR cur_proxy[128] = { 0 };  /* empty = direct */
 
 void network_decode_host(WCHAR *out, int outLen) {
     BYTE enc[] = SERVER_HOST_ENC;
-    char key[] = "GHOSTLINK";
+    char key[] = "SHROUD";
     int len = sizeof(enc) - 1; /* minus null terminator */
     for (int i = 0; i < len && i < outLen - 1; i++)
         out[i] = (WCHAR)(enc[i] ^ key[i % 8]);
@@ -28,12 +28,12 @@ void network_decode_host(WCHAR *out, int outLen) {
 
 static HINTERNET open_session(const WCHAR *proxy) {
     if (proxy && *proxy) {
-        return WinHttpOpen(L"GHOSTLINK/1.0",
+        return WinHttpOpen(L"SHROUD/1.0",
                            WINHTTP_ACCESS_TYPE_NAMED_PROXY,
                            proxy,
                            WINHTTP_NO_PROXY_BYPASS, 0);
     }
-    return WinHttpOpen(L"GHOSTLINK/1.0",
+    return WinHttpOpen(L"SHROUD/1.0",
                        WINHTTP_ACCESS_TYPE_NO_PROXY,
                        WINHTTP_NO_PROXY_NAME,
                        WINHTTP_NO_PROXY_BYPASS, 0);

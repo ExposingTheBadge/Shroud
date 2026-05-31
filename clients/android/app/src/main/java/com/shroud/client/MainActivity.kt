@@ -1,4 +1,4 @@
-package com.ghostlink.client
+package com.shroud.client
 
 import android.app.Application
 import android.content.Context
@@ -65,7 +65,7 @@ private val DarkColors = darkColorScheme(
 /* Theme presets parallel to the Windows v2.1 picker. Switched at runtime
  * via colorSchemeFor(name); the choice is persisted in prefs. */
 private fun colorSchemeFor(name: String): androidx.compose.material3.ColorScheme = when (name) {
-    "GHOSTLINK Light" -> androidx.compose.material3.lightColorScheme(
+    "SHROUD Light" -> androidx.compose.material3.lightColorScheme(
         primary = Color(0xFFff8c1e), background = Color(0xFFFFFFFF),
         surface = Color(0xFFF5F5F0), surfaceVariant = Color(0xFFF0F0E8),
         onPrimary = Color.White, onBackground = Color(0xFF1A1A1A),
@@ -117,7 +117,7 @@ private fun colorSchemeFor(name: String): androidx.compose.material3.ColorScheme
 }
 
 val THEME_NAMES = listOf(
-    "GHOSTLINK Dark", "GHOSTLINK Light",
+    "SHROUD Dark", "SHROUD Light",
     "Solarized Dark", "Nord", "Dracula", "Monokai",
     "Tokyo Night", "Gruvbox Dark", "High Contrast",
 )
@@ -133,7 +133,7 @@ class MainActivity : ComponentActivity() {
             android.view.WindowManager.LayoutParams.FLAG_SECURE,
         )
         setContent {
-            val vm: GhostlinkVM = viewModel(factory = GhostlinkVM.Factory(application))
+            val vm: ShroudVM = viewModel(factory = ShroudVM.Factory(application))
 
             // Re-lock the app whenever the process goes to background
             // (also fires on screen-off if the app is foregrounded). The
@@ -167,7 +167,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-class GhostlinkVM(application: Application) : AndroidViewModel(application) {
+class ShroudVM(application: Application) : AndroidViewModel(application) {
     var isRegistered by mutableStateOf(false)
     var deviceID by mutableStateOf("")
     var username by mutableStateOf("")
@@ -290,13 +290,13 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
             .setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM).build()
         androidx.security.crypto.EncryptedSharedPreferences.create(
             application,
-            "ghostlink_prefs_enc",
+            "shroud_prefs_enc",
             masterKey,
             androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
         )
     } catch (e: Throwable) {
-        application.getSharedPreferences("ghostlink_prefs", Context.MODE_PRIVATE)
+        application.getSharedPreferences("shroud_prefs", Context.MODE_PRIVATE)
     }
 
     init {
@@ -598,21 +598,27 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
                 identityKey = withContext(Dispatchers.IO) { CryptoProvider.generateIdentityKey() }
                 val ourPubHex = CryptoProvider.exportPublicKey(identityKey!!).toHex()
 
-                // 3. Derive auth key: SHA-256(ECDH_shared + "GHOSTLINK-AUTH-v1")[:32]
+                // 3. Derive auth key: SHA-256(ECDH_shared + "SHROUD-AUTH-v1")[:32]
                 val ka = javax.crypto.KeyAgreement.getInstance("ECDH")
                 ka.init(identityKey!!.private)
                 ka.doPhase(serverPub, true)
                 val shared = ka.generateSecret()
                 val md = java.security.MessageDigest.getInstance("SHA-256")
                 md.update(shared); val hashed = md.digest()
-                md.reset(); md.update(hashed); md.update("GHOSTLINK-AUTH-v1".toByteArray())
+                md.reset(); md.update(hashed); md.update("SHROUD-AUTH-v1".toByteArray())
                 val authKey = javax.crypto.spec.SecretKeySpec(md.digest().copyOf(32), "AES")
 
                 // 4. Build + encrypt auth payload
+                //    v2.4.6 — include the persisted device_id on login so the
+                //    server reuses our existing row instead of inserting a
+                //    new one every time (which would burn through the
+                //    25-device-per-user cap on relogin).
+                val existingDid = if (isReg) "" else (prefs.getString("device_id", "") ?: "")
                 val payload = JSONObject().apply {
                     put("username", u); put("password", p)
                     put("device_name", d); put("platform", "android")
                     put("register", isReg); put("public_key", ourPubHex)
+                    put("existing_device_id", existingDid)
                 }.toString().toByteArray()
                 val (nonce, ct, tag) = CryptoProvider.encryptAESGCM(authKey, payload)
 
@@ -882,7 +888,7 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
                     val secHex = poll.optString("secondary_pubkey_hex", "")
                     if (secHex.isBlank() || secHex == "null") continue
                     val shared = Ratchet.x25519Dh(priv, secHex.hexToBytes())
-                    val key = Ratchet.hkdfSha512(ByteArray(64), shared, "GHOSTLINK-DEVLINK-v1".toByteArray(), 32)
+                    val key = Ratchet.hkdfSha512(ByteArray(64), shared, "SHROUD-DEVLINK-v1".toByteArray(), 32)
                     val keySpec = javax.crypto.spec.SecretKeySpec(key, "AES")
                     val friendsResp = NetworkClient.post("/api/v1/friends/list", JSONObject().apply { put("device_id", deviceID) })
                     val bundle = JSONObject().apply {
@@ -890,7 +896,7 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
                         put("username", username)
                         put("primary_device_id", deviceID)
                         put("friends", friendsResp.optJSONArray("friends") ?: org.json.JSONArray())
-                        put("note", "GHOSTLINK device-link snapshot. Import-only; does not grant credentials.")
+                        put("note", "SHROUD device-link snapshot. Import-only; does not grant credentials.")
                     }.toString().toByteArray()
                     val (iv, ct, tag) = CryptoProvider.encryptAESGCM(keySpec, bundle)
                     val blob = iv + tag + ct
@@ -931,7 +937,7 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
                     val blob = NetworkClient.getBytes("/api/v1/devices/link/$id/payload") ?: continue
                     if (blob.size < 12 + 16 + 1) continue
                     val shared = Ratchet.x25519Dh(priv, primaryPub)
-                    val key = Ratchet.hkdfSha512(ByteArray(64), shared, "GHOSTLINK-DEVLINK-v1".toByteArray(), 32)
+                    val key = Ratchet.hkdfSha512(ByteArray(64), shared, "SHROUD-DEVLINK-v1".toByteArray(), 32)
                     val keySpec = javax.crypto.spec.SecretKeySpec(key, "AES")
                     val iv = blob.copyOfRange(0, 12)
                     val tag = blob.copyOfRange(12, 28)
@@ -959,7 +965,7 @@ class GhostlinkVM(application: Application) : AndroidViewModel(application) {
 
     class Factory(private val app: Application) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T = GhostlinkVM(app) as T
+        override fun <T : ViewModel> create(modelClass: Class<T>): T = ShroudVM(app) as T
     }
 }
 
@@ -976,7 +982,7 @@ data class Msg(
  * 4+ digits, confirm. Stores PBKDF2 hash in EncryptedSharedPreferences.
  */
 @Composable
-fun PinSetupScreen(vm: GhostlinkVM) {
+fun PinSetupScreen(vm: ShroudVM) {
     var p1 by remember { mutableStateOf("") }
     var p2 by remember { mutableStateOf("") }
     var err by remember { mutableStateOf<String?>(null) }
@@ -1033,7 +1039,7 @@ fun PinSetupScreen(vm: GhostlinkVM) {
  * attempts call vm.tryUnlock which wipes the session on the third miss.
  */
 @Composable
-fun PinUnlockScreen(vm: GhostlinkVM) {
+fun PinUnlockScreen(vm: ShroudVM) {
     var pin by remember { mutableStateOf("") }
     var err by remember { mutableStateOf<String?>(null) }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
@@ -1116,7 +1122,7 @@ fun TooltipIconButton(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AuthScreen(vm: GhostlinkVM) {
+fun AuthScreen(vm: ShroudVM) {
     var u by remember { mutableStateOf("") }; var p by remember { mutableStateOf("") }
     var d by remember { mutableStateOf(android.os.Build.MODEL) }
     var showReg by remember { mutableStateOf(false) }
@@ -1125,7 +1131,7 @@ fun AuthScreen(vm: GhostlinkVM) {
 
     Scaffold { pad ->
         Column(Modifier.fillMaxSize().padding(pad).padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("GHOSTLINK", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
+            Text("SHROUD", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(24.dp))
             OutlinedTextField(u, { u = it }, label = { Text("Username") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             Spacer(Modifier.height(8.dp))
@@ -1145,7 +1151,7 @@ fun AuthScreen(vm: GhostlinkVM) {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class,
        androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-fun ChatScreen(vm: GhostlinkVM) {
+fun ChatScreen(vm: ShroudVM) {
     var showSide by remember { mutableStateOf(false) }
     var tab by remember { mutableIntStateOf(0) }
     var searchQ by remember { mutableStateOf("") }
@@ -1571,7 +1577,7 @@ private fun mdToAnnotated(s: String, baseColor: androidx.compose.ui.graphics.Col
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsDialog(vm: GhostlinkVM, onDismiss: () -> Unit, onLinkDevice: () -> Unit) {
+fun SettingsDialog(vm: ShroudVM, onDismiss: () -> Unit, onLinkDevice: () -> Unit) {
     var tab by remember { mutableIntStateOf(0) }
     val tabs = listOf("Appearance", "Messages", "Security", "Help")
 
@@ -1620,7 +1626,7 @@ fun SettingsDialog(vm: GhostlinkVM, onDismiss: () -> Unit, onLinkDevice: () -> U
 }
 
 @Composable
-private fun AppearanceTab(vm: GhostlinkVM) {
+private fun AppearanceTab(vm: ShroudVM) {
     Column {
         Text("Theme", style = MaterialTheme.typography.titleSmall)
         Text("Applies on next app open for the full effect, but most surfaces update immediately.",
@@ -1640,7 +1646,7 @@ private fun AppearanceTab(vm: GhostlinkVM) {
 }
 
 @Composable
-private fun MessagesTab(vm: GhostlinkVM) {
+private fun MessagesTab(vm: ShroudVM) {
     var enabled by remember { mutableStateOf(vm.disappearEnabled) }
     var mins by remember { mutableIntStateOf(vm.disappearSeconds / 60) }
     var secs by remember { mutableIntStateOf(vm.disappearSeconds % 60) }
@@ -1691,7 +1697,7 @@ private fun NumberStepper(value: Int, onChange: (Int) -> Unit, suffix: String, e
 }
 
 @Composable
-private fun SecurityTab(vm: GhostlinkVM, onLinkDevice: () -> Unit) {
+private fun SecurityTab(vm: ShroudVM, onLinkDevice: () -> Unit) {
     Column {
         Text("Multi-device", style = MaterialTheme.typography.titleSmall)
         Text("Link this account to another device using a short code. The server only sees ephemeral X25519 pubkeys + opaque ciphertext.",
@@ -1712,7 +1718,7 @@ private fun SecurityTab(vm: GhostlinkVM, onLinkDevice: () -> Unit) {
 @Composable
 private fun HelpTab() {
     Column {
-        Text("GHOSTLINK — Quick reference", style = MaterialTheme.typography.titleSmall)
+        Text("SHROUD — Quick reference", style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(8.dp))
         @Composable fun section(t: String, body: String) {
             Text(t, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
@@ -1734,6 +1740,6 @@ private fun HelpTab() {
             "'Server in maintenance' — operator paused the system, sends are 503'd. Wait + retry.\n" +
             "'Server offline' — heartbeat is failing; check connectivity.")
         section("Source",
-            "https://github.com/ExposingTheBadge/GhostLink")
+            "https://github.com/ExposingTheBadge/Shroud")
     }
 }

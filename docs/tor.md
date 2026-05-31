@@ -1,10 +1,10 @@
-# Running GHOSTLINK over Tor
+# Running SHROUD over Tor
 
-GHOSTLINK ships with end-to-end encrypted message contents from v1, but the
+SHROUD ships with end-to-end encrypted message contents from v1, but the
 network layer (TLS over a clearnet IP) still leaks two pieces of metadata to
 anyone watching the wire:
 
-  - **Who is talking to GHOSTLINK at all** — the destination IP + port is
+  - **Who is talking to SHROUD at all** — the destination IP + port is
     visible to every router between the client and the server.
   - **Server location** — the operator's hosting provider, ASN, and rough
     geographic location can be derived from the IP.
@@ -13,7 +13,7 @@ A Tor v3 hidden service (`.onion`) closes both gaps. The client speaks to
 `<56-char>.onion:58443`, Tor wraps the traffic in three onion-encryption
 layers, and neither the network nor the server learns the other's location.
 
-Tier 6 of the GHOSTLINK roadmap has shipped two pieces toward this:
+Tier 6 of the SHROUD roadmap has shipped two pieces toward this:
 
   - **v1.5** — admin-toggleable `onion_only` mode that rejects any request
     whose Host header is not a `.onion` address.
@@ -27,23 +27,23 @@ This document is the deployment guide for both halves.
 Tor protects:
 
   - **Server-IP confidentiality.** Even if the client's host or local network
-    is compromised, an attacker cannot reach the GHOSTLINK server directly —
+    is compromised, an attacker cannot reach the SHROUD server directly —
     they can only reach the Tor entry guard.
   - **Client-IP confidentiality.** The server only ever sees connections
     arriving from `127.0.0.1` (the local Tor daemon on the server box). It
     has no way to log the client's real IP.
-  - **Censorship resistance.** Networks that block GHOSTLINK's public IP
+  - **Censorship resistance.** Networks that block SHROUD's public IP
     cannot block the onion address without blocking all of Tor.
 
 Tor does **not** protect against:
 
-  - **A compromised server.** All of GHOSTLINK's existing server-trust
+  - **A compromised server.** All of SHROUD's existing server-trust
     assumptions still apply — the operator can still see whatever they could
     see before (envelope metadata, message timing, sender/recipient device
     IDs). Tor is a network-layer fix, not a server-trust fix.
   - **Traffic-confirmation attacks** against a global passive adversary. If
     someone watches both the client's guard and the server's host, timing
-    correlation can still de-anonymize the conversation. GHOSTLINK's
+    correlation can still de-anonymize the conversation. SHROUD's
     fixed-bucket padding (v1.7) makes this measurably harder but not
     impossible.
   - **Malware on the endpoint.** Tor doesn't help if either device is owned.
@@ -60,10 +60,10 @@ sudo apt-get install tor
 
 ### 2. Configure the hidden service
 
-Append to `/etc/tor/torrc` (or drop into `/etc/tor/torrc.d/ghostlink.conf`):
+Append to `/etc/tor/torrc` (or drop into `/etc/tor/torrc.d/shroud.conf`):
 
 ```
-HiddenServiceDir /var/lib/tor/ghostlink/
+HiddenServiceDir /var/lib/tor/shroud/
 HiddenServicePort 58443 127.0.0.1:58443
 HiddenServiceVersion 3
 ```
@@ -72,7 +72,7 @@ Restart Tor and read out the new onion address:
 
 ```
 sudo systemctl restart tor
-sudo cat /var/lib/tor/ghostlink/hostname
+sudo cat /var/lib/tor/shroud/hostname
 ```
 
 Treat the file `hostname` as low-sensitivity (it's publicly advertised) and
@@ -81,7 +81,7 @@ that key can impersonate your hidden service. Owner-only permissions are
 applied automatically by the Tor daemon; do not back it up to anywhere less
 trusted than the host itself.
 
-### 3. Bind the GHOSTLINK server to localhost
+### 3. Bind the SHROUD server to localhost
 
 ```
 python -m server.server --bind 127.0.0.1
@@ -90,7 +90,7 @@ python -m server.server --bind 127.0.0.1
 Or via the environment:
 
 ```
-GHOSTLINK_BIND=127.0.0.1 python -m server.server
+SHROUD_BIND=127.0.0.1 python -m server.server
 ```
 
 Binding to `127.0.0.1` means only the local Tor daemon can connect — there
@@ -114,7 +114,7 @@ curl -X POST https://<onion>/api/v1/admin/control/onion-only \
 
 ### 5. Systemd hardening (optional but recommended)
 
-Drop-in at `/etc/systemd/system/ghostlink.service.d/hardening.conf`:
+Drop-in at `/etc/systemd/system/shroud.service.d/hardening.conf`:
 
 ```
 [Service]
@@ -124,7 +124,7 @@ ProtectHome=yes
 NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX AF_INET
 SystemCallArchitectures=native
-ReadWritePaths=/opt/ghostlink/server /opt/ghostlink/server/files
+ReadWritePaths=/opt/shroud/server /opt/shroud/server/files
 CapabilityBoundingSet=
 ```
 
@@ -132,7 +132,7 @@ Reload and restart:
 
 ```
 sudo systemctl daemon-reload
-sudo systemctl restart ghostlink
+sudo systemctl restart shroud
 ```
 
 ## Client deployment (Windows)
@@ -188,7 +188,7 @@ If you lock yourself out of the admin dashboard with the onion-only toggle
 on:
 
   1. SSH to the box.
-  2. `sqlite3 server/ghostlink.db "UPDATE server_settings SET value='0' WHERE key='onion_only';"`
+  2. `sqlite3 server/shroud.db "UPDATE server_settings SET value='0' WHERE key='onion_only';"`
   3. Restart the server.
 
 That's why admin paths are exempt from the middleware — local-loopback

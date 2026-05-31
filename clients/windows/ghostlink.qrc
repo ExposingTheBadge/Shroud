@@ -1,6 +1,0 @@
-<RCC>
-  <qresource prefix="/">
-    <file>ghostlink.png</file>
-    <file>ghostlink.ico</file>
-  </qresource>
-</RCC>

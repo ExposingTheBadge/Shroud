@@ -1,5 +1,5 @@
 """
-GHOSTLINK multi-party signature verifier.
+SHROUD multi-party signature verifier.
 
 Verifies a combined attestation bundle produced by `multisig.py gather`.
 Exits 0 only when:
@@ -10,7 +10,7 @@ Exits 0 only when:
 
 Usage:
     python release/multisig_verify.py --bundle RELEASES-2.3.0.multisig.json
-    python release/multisig_verify.py --bundle ... --windows-zip GHOSTLINK.zip
+    python release/multisig_verify.py --bundle ... --windows-zip SHROUD.zip
 
 We intentionally avoid trusting CLI flags for the roster — the verifier
 reads it from inside the bundle. That binds the roster to the same
@@ -54,7 +54,7 @@ def main():
     args = ap.parse_args()
 
     bundle = json.loads(Path(args.bundle).read_text())
-    if bundle.get("format") != "ghostlink-multisig-v1":
+    if bundle.get("format") != "shroud-multisig-v1":
         sys.exit("FAIL: unknown bundle format")
 
     roster = bundle["roster"]

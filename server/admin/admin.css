@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────────────────────────────
- * GHOSTLINK admin dashboard — extracted from server.py v2.4.0
+ * SHROUD admin dashboard — extracted from server.py v2.4.0
  *
  * Palette is intentionally narrow: --accent for primary, --ok / --warn /
  * --danger / --purple for status, two shades of background and one border.
@@ -566,6 +566,19 @@ tr.clickable:hover td {
   font-weight: 600;
 }
 .modal button:hover { filter: brightness(1.1); }
+
+/* ─── Generic danger button (used outside top bar / modals) ──────── */
+button.danger {
+  background: var(--danger);
+  color: #fff;
+  border: 1px solid var(--danger);
+  border-radius: 5px;
+  padding: 5px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: Consolas, monospace;
+}
+button.danger:hover { filter: brightness(1.1); }
 
 /* ─── Toast ──────────────────────────────────────────────────────── */
 .toast-stack {

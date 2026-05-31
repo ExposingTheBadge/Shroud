@@ -1,4 +1,4 @@
-package com.ghostlink.client
+package com.shroud.client
 
 import android.content.Context
 import org.json.JSONObject

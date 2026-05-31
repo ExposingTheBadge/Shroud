@@ -1,4 +1,4 @@
-# GHOSTLINK server dependencies — pinned for reproducible builds.
+# SHROUD server dependencies — pinned for reproducible builds.
 # Hashes must match what's installed in the local dev environment.
 # Regenerate with: pip-compile --generate-hashes requirements-server.in
 #

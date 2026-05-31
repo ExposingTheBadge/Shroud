@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Windows Crypto — FIPS 140-2 via CNG
+ * SHROUD Windows Crypto — FIPS 140-2 via CNG
  */
 #include "client.h"
 #include "ratchet.h"
@@ -236,7 +236,7 @@ BOOL crypto_auth_derive_key(NCRYPT_KEY_HANDLE my_priv, const BYTE *peer_blob, DW
     if (!crypto_derive_shared_secret(my_priv, &pk, shared)) return FALSE;
     BYTE buf[AES_KEY_LEN + 17];
     memcpy(buf, shared, AES_KEY_LEN);
-    memcpy(buf + AES_KEY_LEN, "GHOSTLINK-AUTH-v1", 17);
+    memcpy(buf + AES_KEY_LEN, "SHROUD-AUTH-v1", 17);
     return crypto_sha256(buf, sizeof(buf), key_out);
 }
 
@@ -428,12 +428,12 @@ BOOL crypto_pq_hybrid_client(const BYTE *server_blob, DWORD server_blob_len,
     if (!kyber_encaps(kem_ct, kem_shared, server_kem_pk)) return FALSE;
 
     /* 5. HKDF-SHA512 over (ec_shared || kem_shared) with 64 zero-byte salt
-          and info = "GHOSTLINK-PQ-HYBRID-v1". 32-byte output. */
+          and info = "SHROUD-PQ-HYBRID-v1". 32-byte output. */
     BYTE ikm[48 + 32];
     memcpy(ikm, ec_shared, 48);
     memcpy(ikm + 48, kem_shared, 32);
     BYTE salt[64] = {0};
-    const BYTE info[] = "GHOSTLINK-PQ-HYBRID-v1";
+    const BYTE info[] = "SHROUD-PQ-HYBRID-v1";
     if (!ratchet_hkdf_sha512(salt, 64, ikm, sizeof(ikm), info, sizeof(info) - 1,
                              session_key_out, 32))
         return FALSE;

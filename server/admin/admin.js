@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────────────────────────────
- * GHOSTLINK admin dashboard — v2.4.0
+ * SHROUD admin dashboard — v2.4.0
  *
  * Architecture notes:
  *   - One module, no build step, no framework. Vanilla DOM updates.
@@ -11,7 +11,7 @@
  *     (audit, errors, failed-logins) get pushed live over /ws/admin so
  *     they update the instant something happens, not on the next tick.
  *   - All POST/DELETE admin endpoints expect the X-CSRF-Token header set
- *     to the ghostlink_csrf cookie value (matches server check_csrf).
+ *     to the shroud_csrf cookie value (matches server check_csrf).
  * ───────────────────────────────────────────────────────────────────── */
 
 'use strict';
@@ -34,8 +34,8 @@ const state = {
   pendingGotoUntil: 0,
 };
 
-const LS_INTERVAL   = 'ghostlink.admin.interval';
-const LS_LAST_TAB   = 'ghostlink.admin.lastTab';
+const LS_INTERVAL   = 'shroud.admin.interval';
+const LS_LAST_TAB   = 'shroud.admin.lastTab';
 
 /* ─── DOM helpers ─────────────────────────────────────────────────── */
 function $(id) { return document.getElementById(id); }
@@ -61,14 +61,14 @@ function getCookie(name) {
 }
 
 /* ─── HTTP with CSRF on writes ──────────────────────────────────────
- *  Writes echo the ghostlink_csrf cookie back as X-CSRF-Token
+ *  Writes echo the shroud_csrf cookie back as X-CSRF-Token
  *  (double-submit). Any non-2xx response is thrown so the caller can
  *  show an honest failure toast — silently treating 403/503 as success
  *  is what made the v2.4.0 maintenance toggle appear to do nothing. */
 async function api(method, path, body) {
   const opts = { method, headers: {} };
   if (method !== 'GET') {
-    const csrf = getCookie('ghostlink_csrf');
+    const csrf = getCookie('shroud_csrf');
     if (csrf) opts.headers['X-CSRF-Token'] = csrf;
   }
   if (body !== undefined) {
@@ -698,11 +698,22 @@ async function delDev(id) {
   refresh();
 }
 async function delUser(id, name, devices) {
-  const typed = prompt('To delete user "' + name + '" and ALL their data (' +
-                       devices + ' device(s), messages, groups, friendships),\ntype the username to confirm:');
-  if (typed !== name) return;
-  await api('DELETE', '/api/v1/admin/users/' + id);
-  toast('User deleted: ' + name, 'ok');
+  const ok = await showModal({
+    title: 'Delete user',
+    body: 'Delete <code>' + esc(name) + '</code> and ALL their data?',
+    impact: devices + ' device(s), all messages, groups, friendships, and ' +
+            'pending files will be wiped. Audit log retains the action.',
+    impactClass: 'danger',
+    confirmText: 'Yes, delete', confirmClass: 'danger',
+  });
+  if (!ok) return;
+  try {
+    await api('DELETE', '/api/v1/admin/users/' + id);
+    toast('User deleted: ' + name, 'ok');
+  } catch (e) {
+    toast('Delete failed: ' + (e && e.message ? e.message : 'unknown'), 'danger');
+    return;
+  }
   refresh();
 }
 async function killSess(id) {

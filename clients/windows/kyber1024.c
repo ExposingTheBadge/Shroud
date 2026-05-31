@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Windows Kyber-1024 — Post-Quantum KEM via liboqs
+ * SHROUD Windows Kyber-1024 — Post-Quantum KEM via liboqs
  * Links against oqs.dll (NIST-validated ML-KEM-1024 implementation)
  */
 #include "client.h"
@@ -27,7 +27,7 @@ BOOL kyber_init(void) {
     hOqsDll = LoadLibraryA("oqs.dll");
     if (!hOqsDll) {
         /* Try alongside EXE */
-        hOqsDll = LoadLibraryA("D:\\GHOSTLINK\\oqs.dll");
+        hOqsDll = LoadLibraryA("D:\\SHROUD\\oqs.dll");
     }
     if (!hOqsDll) return FALSE;
 

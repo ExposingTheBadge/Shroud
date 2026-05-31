@@ -1,5 +1,5 @@
 /*
- * GHOSTLINK Double Ratchet — Windows C port
+ * SHROUD Double Ratchet — Windows C port
  *
  * Mirrors crypto/double_ratchet.py 1:1. Uses BCrypt for HMAC-SHA512 and
  * AES-256-GCM. X25519 keys are produced via BCrypt's BCRYPT_ECDH_ALGORITHM
@@ -173,7 +173,7 @@ BOOL ratchet_hkdf_sha512(const BYTE *salt, DWORD salt_len,
 #define hkdf_sha512 ratchet_hkdf_sha512
 
 /* ── KDF helpers (match crypto/double_ratchet.py exactly) ────────── */
-static const BYTE INFO_RK[] = "GHOSTLINK-DR-RK";
+static const BYTE INFO_RK[] = "SHROUD-DR-RK";
 static BOOL kdf_rk(const BYTE rk[32], const BYTE dh[32], BYTE new_rk[32], BYTE new_ck[32]) {
     BYTE out[64];
     if (!hkdf_sha512(rk, 32, dh, 32, INFO_RK, sizeof(INFO_RK) - 1, out, 64)) return FALSE;
@@ -411,20 +411,20 @@ BOOL ratchet_compute_bootstrap(const BYTE my_priv[32], const BYTE peer_pub[32],
                                 BYTE shared_out[32]) {
     BYTE dh[32];
     if (!ratchet_x25519_dh(my_priv, peer_pub, dh)) return FALSE;
-    static const BYTE info[] = "GHOSTLINK-RATCHET-BOOT-v1";
+    static const BYTE info[] = "SHROUD-RATCHET-BOOT-v1";
     BYTE salt[64] = {0};
     return ratchet_hkdf_sha512(salt, 64, dh, 32, info, sizeof(info) - 1, shared_out, 32);
 }
 
 /* ── X3DH ───────────────────────────────────────────────────────────
  * Derives the session root key as
- *   SK = HKDF-SHA512(0, F || DH1 || DH2 [|| DH3 || DH4], "GHOSTLINK-X3DH-v1")
+ *   SK = HKDF-SHA512(0, F || DH1 || DH2 [|| DH3 || DH4], "SHROUD-X3DH-v1")
  * where F is 32 bytes of 0xFF (Signal-style domain-separation prefix
  * that prevents the X3DH output from colliding with raw DH output of any
  * other protocol). DH3/DH4 are only included when a one-time prekey is
  * available; otherwise we degrade gracefully to a 2-DH handshake. */
 
-static const BYTE X3DH_INFO[] = "GHOSTLINK-X3DH-v1";
+static const BYTE X3DH_INFO[] = "SHROUD-X3DH-v1";
 #define X3DH_KM_MAX (32 + 32 * 4)
 
 static BOOL x3dh_finalize(const BYTE *km, DWORD km_len, BYTE sk_out[32]) {
