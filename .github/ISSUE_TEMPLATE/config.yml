@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: mailto:security@fuseobd.com
+    about: Email security reports directly. Do NOT use public issues for security bugs.
+  - name: Security policy
+    url: https://github.com/ExposingTheBadge/Shroud/blob/master/SECURITY.md
+    about: Read the security disclosure policy.
+  - name: Contributing guide
+    url: https://github.com/ExposingTheBadge/Shroud/blob/master/CONTRIBUTING.md
+    about: Read before opening a PR. Hard rules first.

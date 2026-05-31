@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "SHROUD Share",
+  "version": "0.1.0",
+  "description": "Sign and send SHROUD messages from any web page.",
+  "author": "Brent Gordon",
+  "homepage_url": "https://github.com/ExposingTheBadge/Shroud",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SHROUD Share"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

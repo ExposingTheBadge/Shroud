@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SHROUD Share</title>
+  <style>
+    body { font-family: system-ui, sans-serif; width: 320px; padding: 12px; }
+    h1 { font-size: 14px; margin: 0 0 8px 0; }
+    label { display: block; font-size: 12px; margin-top: 8px; }
+    select, textarea, input { width: 100%; box-sizing: border-box; }
+    button { margin-top: 8px; padding: 6px 10px; cursor: pointer; }
+    .status { margin-top: 8px; font-size: 12px; min-height: 18px; }
+    .ok { color: green; }
+    .err { color: #b00020; }
+  </style>
+</head>
+<body>
+  <h1>SHROUD Share</h1>
+  <label for="contact">To:</label>
+  <select id="contact"></select>
+  <label for="body">Message:</label>
+  <textarea id="body" rows="6"></textarea>
+  <button id="send">Send</button>
+  <div class="status" id="status"></div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
