@@ -1,0 +1,195 @@
+name: Release Windows (signed)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version part to bump"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  QT_VERSION: 6.9.2
+  AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+  AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+  AZURE_ARTIFACT_SIGNING_CERT_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_CERT_PROFILE }}
+
+jobs:
+  build-sign-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump version
+        id: bump
+        shell: pwsh
+        run: |
+          $bump = "${{ github.event.inputs.bump }}"
+          $current = (Get-Content VERSION -Raw).Trim()
+          $parts = $current.Split('.')
+          $major = [int]$parts[0]
+          $minor = [int]$parts[1]
+          $patch = [int]$parts[2]
+
+          switch ($bump) {
+            "major" { $major++; $minor = 0; $patch = 0 }
+            "minor" { $minor++; $patch = 0 }
+            "patch" { $patch++ }
+          }
+
+          $ver = "$major.$minor.$patch"
+          $ver | Set-Content VERSION -NoNewline
+
+          # Keep CMakeLists.txt project() version in sync
+          $cmake = Get-Content clients/windows/CMakeLists.txt -Raw
+          $cmake = $cmake -replace 'project\(GHOSTLINK VERSION \d+\.\d+\.\d+', "project(GHOSTLINK VERSION $ver"
+          Set-Content clients/windows/CMakeLists.txt -Value $cmake -NoNewline
+
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=v$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: ""
+          cache: true
+
+      - name: Configure CMake
+        shell: pwsh
+        working-directory: clients/windows
+        run: |
+          cmake -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_FLAGS="/Brepro" `
+            -DCMAKE_CXX_FLAGS="/Brepro" `
+            -DCMAKE_EXE_LINKER_FLAGS="/Brepro"
+
+      - name: Build ghostlink.exe
+        shell: pwsh
+        working-directory: clients/windows
+        run: cmake --build build --config Release
+
+      - name: Deploy Qt DLLs (windeployqt)
+        shell: pwsh
+        working-directory: clients/windows
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          Copy-Item "build/ghostlink.exe" "dist/ghostlink.exe"
+          windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw "dist/ghostlink.exe"
+
+      - name: Azure login (OIDC federated)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign ghostlink.exe with Azure Artifact Signing
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          endpoint: ${{ env.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ env.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_ARTIFACT_SIGNING_CERT_PROFILE }}
+          files-folder: clients/windows/dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Package release zip
+        id: package
+        shell: pwsh
+        working-directory: clients/windows
+        run: |
+          $ver = "${{ steps.bump.outputs.version }}"
+          $zipName = "GHOSTLINK-v$ver-win64.zip"
+          Compress-Archive -Path "dist/*" -DestinationPath $zipName -Force
+
+          $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zipName" | Set-Content "SHA256SUMS.txt" -NoNewline
+
+          "zip=clients/windows/$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "sha=clients/windows/SHA256SUMS.txt" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "zipname=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.bump.outputs.tag }}"
+          $prevTag = git describe --tags --abbrev=0 "$tag^" 2>$null
+          if (-not $prevTag) { $prevTag = "" }
+
+          if ($prevTag) {
+            $commits = git log "$prevTag..HEAD" --pretty=format:"- %s" --no-merges
+          } else {
+            $commits = git log HEAD --pretty=format:"- %s" --no-merges
+          }
+          if (-not $commits) { $commits = "- Internal updates and improvements" }
+
+          $body = @"
+          ## Changes
+
+          $commits
+
+          ### Windows
+          Download ``${{ steps.package.outputs.zipname }}`` below and extract. ``ghostlink.exe`` is Authenticode-signed; Windows shows **Verified publisher: Brent Gordon**.
+
+          Verify the zip hash against ``SHA256SUMS.txt`` before extracting.
+
+          > Android APK and the threshold multisig manifest are added manually after this build per the project's reproducibility process — see [BUILD-REPRODUCIBILITY.md](https://github.com/${{ github.repository }}/blob/main/BUILD-REPRODUCIBILITY.md).
+
+          "@
+
+          if ($prevTag) {
+            $body += "`n**Full Changelog:** https://github.com/${{ github.repository }}/compare/$prevTag...$tag"
+          }
+
+          $delim = "EOF_NOTES_$([guid]::NewGuid().ToString('N'))"
+          "body<<$delim" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $body | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $delim | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Commit version bump
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add VERSION clients/windows/CMakeLists.txt
+          git commit -m "v${{ steps.bump.outputs.version }} - signed Windows release"
+          git tag "${{ steps.bump.outputs.tag }}"
+          git push origin HEAD:${{ github.ref_name }}
+          git push origin "${{ steps.bump.outputs.tag }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump.outputs.tag }}
+          name: GHOSTLINK ${{ steps.bump.outputs.tag }}
+          body: ${{ steps.notes.outputs.body }}
+          files: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.sha }}
