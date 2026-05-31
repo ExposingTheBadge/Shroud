@@ -1858,6 +1858,13 @@ def _guard_maintenance():
 
 
 # ── Send Message ─────────────────────────────────────────────────────
+# Sunset date for the legacy unsealed send endpoint (Rule 1 violation).
+# Set in 2026 to give existing clients time to upgrade to /messages/send-sealed.
+# After this date, /messages/send returns 410 Gone.
+LEGACY_SEND_SUNSET = "Wed, 31 Dec 2026 00:00:00 GMT"
+LEGACY_SEND_DEPRECATION = "@1748736000"  # RFC 9745: unix timestamp prefix
+
+
 @app.post("/api/v1/messages/send")
 async def send_message(request: Request):
     """Relay an encrypted message. Server never sees plaintext.
@@ -1914,7 +1921,29 @@ async def send_message(request: Request):
     )
     db.execute("UPDATE devices SET last_seen=datetime('now') WHERE id=?", (sender_id,))
     db.commit()
-    return {"message_id": msg_id, "relayed": True, "v": env_ver, "expires_at": expires_at}
+    # Legacy unsealed path leaks the sender_device_id to the server, which
+    # violates Rule 1 of the SHROUD threat model. Newer clients should call
+    # /api/v1/messages/send-sealed instead. We attach deprecation headers
+    # (RFC 9745 + RFC 8594) so client developers see this in their logs.
+    return JSONResponse(
+        content={
+            "message_id": msg_id,
+            "relayed": True,
+            "v": env_ver,
+            "expires_at": expires_at,
+            "deprecation_notice": (
+                "POST /api/v1/messages/send is deprecated because it reveals "
+                "sender_device_id to the relay. Migrate to "
+                "/api/v1/messages/send-sealed before 2026-12-31."
+            ),
+        },
+        headers={
+            "Deprecation": LEGACY_SEND_DEPRECATION,
+            "Sunset": LEGACY_SEND_SUNSET,
+            "Link": '</api/v1/messages/send-sealed>; rel="successor-version"',
+            "Warning": '299 - "SHROUD: legacy sender-revealing path; migrate to /messages/send-sealed"',
+        },
+    )
 
 
 # ── Rotating pickup tokens ────────────────────────────────────────
