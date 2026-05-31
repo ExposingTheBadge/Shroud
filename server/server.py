@@ -406,10 +406,18 @@ async def lifespan(ap):
     print(f"[SHROUD] Stats restored: {sum(REQ_COUNTS.values())} requests, {sum(ERR_COUNTS.values())} errors lifetime")
     sweep_task = asyncio.create_task(_expiry_sweeper())
     stats_task = asyncio.create_task(_stats_flusher())
+    fed_task = None
+    if os.environ.get("SHROUD_FEDERATION", "0") == "1":
+        # Late import so we don't pay for httpx unless federation is on.
+        fed_task = asyncio.create_task(_federation_loop())
+        print("[SHROUD] Federation gossip loop started")
     try:
         yield
     finally:
-        for t in (sweep_task, stats_task):
+        tasks = [sweep_task, stats_task]
+        if fed_task is not None:
+            tasks.append(fed_task)
+        for t in tasks:
             t.cancel()
             try: await t
             except asyncio.CancelledError: pass
@@ -2170,6 +2178,17 @@ async def send_anon_message(request: Request):
         (msg_id, tag, sealed, expires_at),
     )
     db.commit()
+
+    # Federation hook: broadcast to peer relays so any of them can
+    # serve this envelope to its recipient. Best-effort.
+    try:
+        _federation_outbox_broadcast(msg_id, tag, sealed, expires_at)
+    except NameError:
+        # _federation_outbox_broadcast is defined later in the module —
+        # on first import we may hit this code path before that block
+        # has executed. Re-resolve lazily next time around.
+        pass
+
     return {"message_id": msg_id, "anon": True, "expires_at": expires_at}
 
 
@@ -2228,7 +2247,257 @@ async def fetch_anon_messages(req: FetchAnonRequest):
     )
     db.commit()
 
+    # Federation hook: broadcast delete-on-deliver to peer relays so
+    # they clear the same routing_tag entries. Best-effort, fire-and-
+    # forget — see _federation_loop for the delivery semantics.
+    if FEDERATION_ENABLED:
+        for msg_id in delivered_ids:
+            _federation_outbox_delete(msg_id)
+
     return {"messages": out, "count": len(out)}
+
+
+# ── Federated multi-relay gossip (Rule 0 structural compliance) ──────
+#
+# Each relay maintains a roster of peer relays (signed PeerAnnouncements
+# in the federation_peers table). When an anon_messages row is inserted
+# locally, we enqueue a FedBroadcast to all active peers. When an
+# anon_messages row is deleted on delivery, we enqueue a FedDelete.
+#
+# The federation loop drains the outbox in the background, POSTs to
+# peer /api/v1/federation/broadcast and /federation/delete endpoints,
+# and retries transient failures.
+#
+# Trust: peer announcements are Ed25519-signed by the operator's long-
+# term key. Peer pubkeys are pinned by the local operator (this server
+# never auto-trusts a newly-seen pubkey — operator vetting required).
+
+FEDERATION_ENABLED = os.environ.get("SHROUD_FEDERATION", "0") == "1"
+FEDERATION_OUTBOX: list[dict] = []
+FEDERATION_OUTBOX_LOCK = threading.Lock()
+
+
+def _ensure_federation_schema() -> None:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS federation_peers (
+            pubkey_hex TEXT PRIMARY KEY,
+            operator   TEXT NOT NULL,
+            endpoint   TEXT NOT NULL,
+            ttl_seconds INTEGER NOT NULL,
+            ts INTEGER NOT NULL,
+            sig_hex TEXT NOT NULL,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS federation_seen_ids (
+            message_id TEXT PRIMARY KEY,
+            first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_fed_seen_first ON federation_seen_ids(first_seen);
+        """
+    )
+    db.commit()
+
+
+_ensure_federation_schema()
+
+
+def _federation_active_peers() -> list[dict]:
+    """Return peer rows whose TTL hasn't elapsed."""
+    now = int(time.time())
+    rows = db.execute(
+        "SELECT pubkey_hex, endpoint FROM federation_peers WHERE ts + ttl_seconds >= ?",
+        (now,),
+    ).fetchall()
+    return [{"pubkey_hex": r[0], "endpoint": r[1]} for r in rows]
+
+
+def _federation_outbox_broadcast(msg_id: str, routing_tag: bytes,
+                                  sealed_blob: bytes, expires_at: str | None) -> None:
+    """Queue a broadcast to all active peers. Idempotent: peers
+    deduplicate on message_id (federation_seen_ids table)."""
+    if not FEDERATION_ENABLED:
+        return
+    peers = _federation_active_peers()
+    if not peers:
+        return
+    with FEDERATION_OUTBOX_LOCK:
+        for p in peers:
+            FEDERATION_OUTBOX.append({
+                "kind": "broadcast",
+                "peer": p["endpoint"],
+                "body": {
+                    "type": "shroud.fed.broadcast",
+                    "message_id": msg_id,
+                    "routing_tag_hex": routing_tag.hex(),
+                    "envelope_hex": sealed_blob.hex(),
+                    "ttl_at": expires_at,
+                },
+            })
+
+
+def _federation_outbox_delete(msg_id: str) -> None:
+    if not FEDERATION_ENABLED:
+        return
+    peers = _federation_active_peers()
+    if not peers:
+        return
+    with FEDERATION_OUTBOX_LOCK:
+        for p in peers:
+            FEDERATION_OUTBOX.append({
+                "kind": "delete",
+                "peer": p["endpoint"],
+                "body": {
+                    "type": "shroud.fed.delete",
+                    "message_id": msg_id,
+                },
+            })
+
+
+async def _federation_loop() -> None:
+    """Background task: drain the outbox, POST to peer endpoints,
+    retry transient failures by re-queueing. We deliberately don't
+    persist the outbox across restarts — losing a few broadcasts on
+    crash is better than spending the bytes on durable bookkeeping."""
+    import httpx
+
+    while True:
+        await asyncio.sleep(2)
+        with FEDERATION_OUTBOX_LOCK:
+            batch = FEDERATION_OUTBOX[:]
+            FEDERATION_OUTBOX.clear()
+        if not batch:
+            continue
+        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+            for item in batch:
+                try:
+                    path = (
+                        "/api/v1/federation/broadcast"
+                        if item["kind"] == "broadcast"
+                        else "/api/v1/federation/delete"
+                    )
+                    await client.post(item["peer"].rstrip("/") + path, json=item["body"])
+                except Exception:
+                    # Re-queue once, then drop on second failure.
+                    if not item.get("retried"):
+                        item["retried"] = True
+                        with FEDERATION_OUTBOX_LOCK:
+                            FEDERATION_OUTBOX.append(item)
+
+
+@app.get("/api/v1/federation/peers")
+async def federation_list_peers():
+    """Public peer roster — what this relay considers federated."""
+    return {"peers": _federation_active_peers()}
+
+
+class FederationAnnounce(BaseModel):
+    operator: str
+    endpoint: str
+    pubkey_hex: str
+    ttl_seconds: int
+    ts: int
+    sig_hex: str
+
+
+@app.post("/api/v1/federation/announce")
+async def federation_announce(req: FederationAnnounce):
+    """Accept a signed PeerAnnouncement and add the peer to the roster.
+
+    The operator running this relay must pre-approve any pubkey before
+    it's stored. New announcements update endpoint / ttl / ts but never
+    introduce a previously-unknown pubkey (manual operator vetting).
+    """
+    existing = db.execute(
+        "SELECT ts FROM federation_peers WHERE pubkey_hex = ?",
+        (req.pubkey_hex,),
+    ).fetchone()
+    if existing is None:
+        raise HTTPException(403, "pubkey not pre-approved by local operator")
+    if existing[0] >= req.ts:
+        return {"updated": False, "reason": "newer announcement already on file"}
+
+    # Verify signature (uses cryptography library, same as crypto/federation.py)
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        canonical = json.dumps({
+            "operator": req.operator,
+            "endpoint": req.endpoint,
+            "pubkey": req.pubkey_hex,
+            "ttl_seconds": req.ttl_seconds,
+            "ts": req.ts,
+        }, sort_keys=True, separators=(",", ":")).encode()
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(req.pubkey_hex)).verify(
+            bytes.fromhex(req.sig_hex), canonical,
+        )
+    except Exception:
+        raise HTTPException(400, "signature verification failed")
+
+    db.execute(
+        "UPDATE federation_peers "
+        "SET operator=?, endpoint=?, ttl_seconds=?, ts=?, sig_hex=? "
+        "WHERE pubkey_hex=?",
+        (req.operator, req.endpoint, req.ttl_seconds, req.ts, req.sig_hex, req.pubkey_hex),
+    )
+    db.commit()
+    return {"updated": True}
+
+
+class FedBroadcastIn(BaseModel):
+    type: str
+    message_id: str
+    routing_tag_hex: str
+    envelope_hex: str
+    ttl_at: Optional[str] = None
+
+
+@app.post("/api/v1/federation/broadcast")
+async def federation_broadcast(req: FedBroadcastIn):
+    """Receive a gossipped envelope from a peer. Dedupe via
+    federation_seen_ids; insert into anon_messages if new."""
+    if req.type != "shroud.fed.broadcast":
+        raise HTTPException(400, "wrong message type")
+
+    if db.execute(
+        "SELECT 1 FROM federation_seen_ids WHERE message_id = ?", (req.message_id,)
+    ).fetchone():
+        return {"accepted": False, "reason": "duplicate"}
+
+    try:
+        tag = bytes.fromhex(req.routing_tag_hex)
+        envelope = bytes.fromhex(req.envelope_hex)
+    except ValueError:
+        raise HTTPException(400, "hex decode failed")
+    if len(tag) != 32:
+        raise HTTPException(400, "routing tag must be 32 bytes")
+
+    db.execute(
+        "INSERT OR IGNORE INTO anon_messages "
+        "(id, routing_tag, sealed_blob, expires_at) VALUES (?,?,?,?)",
+        (req.message_id, tag, envelope, req.ttl_at),
+    )
+    db.execute(
+        "INSERT INTO federation_seen_ids (message_id) VALUES (?)",
+        (req.message_id,),
+    )
+    db.commit()
+    return {"accepted": True}
+
+
+class FedDeleteIn(BaseModel):
+    type: str
+    message_id: str
+
+
+@app.post("/api/v1/federation/delete")
+async def federation_delete(req: FedDeleteIn):
+    """Receive a delete-on-deliver notice from a peer. Drop the row
+    from our local anon_messages if present."""
+    if req.type != "shroud.fed.delete":
+        raise HTTPException(400, "wrong message type")
+    db.execute("DELETE FROM anon_messages WHERE id = ?", (req.message_id,))
+    db.commit()
+    return {"deleted": True}
 
 
 # ── Fetch Messages ───────────────────────────────────────────────────
