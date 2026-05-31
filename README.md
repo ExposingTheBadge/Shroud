@@ -16,6 +16,50 @@ It's free. It's open source. You can run your own relay server if you don't want
 
 ---
 
+## Government Requests / Warrant Policy
+
+> [!IMPORTANT]
+> **No government warrant, subpoena, court order, or lawful demand of any kind will ever be honored.**
+>
+> This is not bluster — it is architecture. **God himself could not extract user data from the server or its owner.** The data does not exist there in a form anyone can read, including us.
+
+### What the server cannot surrender
+
+The blind-relay design makes most categories of "data request" technically meaningless:
+
+- **Your messages, past or present** — encrypted with keys that never leave your device. The server holds opaque ciphertext briefly, then destroys it on delivery. There is no master key. There is no escrow. There is no backdoor.
+- **Your social graph** — the server doesn't maintain one. Contact lists are stored client-side only.
+- **Your contact list** — see above. Even we don't know who your friends are.
+- **Your real identity** — no phone number, no email, no name, no PII of any kind is collected at registration. Usernames are pseudonyms by default.
+- **Your account contents** — your password is the root of your local vault key. We do not have it, cannot derive it, and cannot reset it.
+- **Group membership** — TreeKEM state is collectively owned by group members; the server stores only encrypted ciphertext routing information.
+- **Message history** — destroyed on delivery. Retention is measured in milliseconds, not days.
+
+### What we will say to law enforcement
+
+Any lawful demand received will be answered with:
+
+1. A polite acknowledgment of receipt.
+2. This README, with this section highlighted.
+3. A copy of [`BUILD-REPRODUCIBILITY.md`](BUILD-REPRODUCIBILITY.md) and [`docs/multisig-releases.md`](docs/multisig-releases.md) so the requestor can verify, against open source, that we are not lying about the architecture.
+4. Nothing else. We have nothing else to give.
+
+### Backdoor demands
+
+Any demand attempting to compel the introduction of a backdoor, the weakening of a cryptographic primitive, the addition of telemetry, the leaking of metadata to a third party, or any other architectural change that would let the server become a trust anchor will be **refused outright.**
+
+If a court attempts to compel backdoor introduction over our refusal, **the project will be shut down** — every server instance, every signing key, the entire GitHub repository, the entire release pipeline — rather than complied with. A final commit and release notice to that effect will appear in this section before takedown. The absence of that notice is your warrant canary: as long as this section reads as it does today, no backdoor has been introduced.
+
+### Scope
+
+This policy binds **the maintainers, all release signers, and any operator of the public GHOSTLINK relay**. Self-hosted operators (people running their own server on their own hardware) make their own policy for their own users — that's the entire point of a self-hostable, open-source design.
+
+### Why
+
+Because the only way to make a promise of confidentiality you can keep is to architect a system where breaking the promise is *impossible*, not merely *forbidden*. Policies can be changed. Architectures, once shipped and reproduced by users, cannot.
+
+---
+
 ## Features
 
 ### Messaging
@@ -234,49 +278,6 @@ Every release ships with:
 ### Reproducibility
 
 The server image and Android APK are fully reproducible — anyone can rebuild from source and get bit-identical artifacts. Windows EXE reproducibility is partial today (timestamp suppression with `/Brepro` is in place; Qt deployment is still host-dependent). The full story is in [`BUILD-REPRODUCIBILITY.md`](BUILD-REPRODUCIBILITY.md).
-
----
-
-## Government Requests / Warrant Policy
-
-GHOSTLINK has a simple, unambiguous policy on legal demands for user data: **no government warrant, subpoena, court order, or lawful demand of any kind will ever be honored.** Not at any level, not from any jurisdiction, not under any circumstances.
-
-This is not bluster — it is architecture. **God himself could not extract user data from the server or its owner.** Not because of any boast, but because the data does not exist there in a form anyone can read, including us.
-
-### What the server cannot surrender
-
-The blind-relay design makes most categories of "data request" technically meaningless:
-
-- **Your messages, past or present** — encrypted with keys that never leave your device. The server holds opaque ciphertext briefly, then destroys it on delivery. There is no master key. There is no escrow. There is no backdoor.
-- **Your social graph** — the server doesn't maintain one. Contact lists are stored client-side only.
-- **Your contact list** — see above. Even we don't know who your friends are.
-- **Your real identity** — no phone number, no email, no name, no PII of any kind is collected at registration. Usernames are pseudonyms by default.
-- **Your account contents** — your password is the root of your local vault key. We do not have it, cannot derive it, and cannot reset it.
-- **Group membership** — TreeKEM state is collectively owned by group members; the server stores only encrypted ciphertext routing information.
-- **Message history** — destroyed on delivery. Retention is measured in milliseconds, not days.
-
-### What we will say to law enforcement
-
-Any lawful demand received will be answered with:
-
-1. A polite acknowledgment of receipt.
-2. This README, with this section highlighted.
-3. A copy of [`BUILD-REPRODUCIBILITY.md`](BUILD-REPRODUCIBILITY.md) and [`docs/multisig-releases.md`](docs/multisig-releases.md) so the requestor can verify, against open source, that we are not lying about the architecture.
-4. Nothing else. We have nothing else to give.
-
-### Backdoor demands
-
-Any demand attempting to compel the introduction of a backdoor, the weakening of a cryptographic primitive, the addition of telemetry, the leaking of metadata to a third party, or any other architectural change that would let the server become a trust anchor will be **refused outright.**
-
-If a court attempts to compel backdoor introduction over our refusal, **the project will be shut down** — every server instance, every signing key, the entire GitHub repository, the entire release pipeline — rather than complied with. A final commit and release notice to that effect will appear in this section before takedown. The absence of that notice is your warrant canary: as long as this section reads as it does today, no backdoor has been introduced.
-
-### Scope
-
-This policy binds **the maintainers, all release signers, and any operator of the public GHOSTLINK relay**. Self-hosted operators (people running their own server on their own hardware) make their own policy for their own users — that's the entire point of a self-hostable, open-source design.
-
-### Why
-
-Because the only way to make a promise of confidentiality you can keep is to architect a system where breaking the promise is *impossible*, not merely *forbidden*. Policies can be changed. Architectures, once shipped and reproduced by users, cannot.
 
 ---
 
