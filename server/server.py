@@ -2082,6 +2082,155 @@ async def send_sealed_message(request: Request):
     db.commit()
     return {"message_id": msg_id, "sealed": True, "v": env_ver, "expires_at": expires_at}
 
+
+# ── Anonymous routing (Rule 1 + Rule 2 compliant) ────────────────────
+#
+# The /api/v1/messages/send-anon and /api/v1/messages/fetch-anon endpoints
+# together implement the routing-tag protocol documented in
+# crypto/anon_routing.py:
+#
+#   - Sender computes a 32-byte routing tag derived from the per-pair
+#     X3DH root + current epoch. Server stores the message keyed by
+#     that tag. Server has NO map from tag -> identity.
+#   - Recipient enumerates their tags across all contacts and current
+#     epoch (+/-1 for clock skew) and polls. Server returns matching
+#     messages and DELETES THEM immediately (Rule 2 — no metadata after
+#     delivery).
+#   - Sender identity lives inside the sealed-envelope payload, not in
+#     any header or routing field (Rule 1).
+#
+# Schema lives in its own table so legacy device_id paths cannot
+# accidentally read or write anonymous rows.
+
+def _ensure_anon_schema() -> None:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS anon_messages (
+            id TEXT PRIMARY KEY,
+            routing_tag BLOB NOT NULL,
+            sealed_blob BLOB NOT NULL,
+            server_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_anon_routing_tag ON anon_messages(routing_tag);
+        CREATE INDEX IF NOT EXISTS idx_anon_expires
+            ON anon_messages(expires_at) WHERE expires_at IS NOT NULL;
+        """
+    )
+    db.commit()
+
+
+_ensure_anon_schema()
+
+
+@app.post("/api/v1/messages/send-anon")
+async def send_anon_message(request: Request):
+    """Anonymous-routing send. Body is the sealed-envelope wire bytes
+    described in crypto/anon_routing.py. Routing tag goes in the header.
+
+    Required headers:
+      X-Routing-Tag: 64 hex chars (32 bytes)
+    Optional headers:
+      X-Expires-In: seconds       Disappearing-message TTL
+      X-Envelope-Version: 2       v2 envelopes must hit a padding bucket
+    """
+    _guard_maintenance()
+
+    tag_hex = request.headers.get("X-Routing-Tag", "")
+    if len(tag_hex) != 64:
+        raise HTTPException(400, "X-Routing-Tag must be 64 hex chars (32 bytes)")
+    try:
+        tag = bytes.fromhex(tag_hex)
+    except ValueError:
+        raise HTTPException(400, "X-Routing-Tag must be valid hex")
+
+    sealed = await request.body()
+    if not sealed:
+        raise HTTPException(400, "Empty sealed envelope")
+
+    env_ver = int(request.headers.get("X-Envelope-Version", "2") or 2)
+    if env_ver >= 2 and not is_valid_padded_size(len(sealed)):
+        raise HTTPException(400, f"v2 envelope must hit padding bucket {PAD_BUCKETS}")
+
+    expires_in = request.headers.get("X-Expires-In", "")
+    expires_at = None
+    if expires_in:
+        try:
+            secs = max(1, min(int(expires_in), 30 * 86400))
+            expires_at = (
+                datetime.now(tz=timezone.utc) + timedelta(seconds=secs)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+
+    msg_id = uuid.uuid4().hex
+    db.execute(
+        "INSERT INTO anon_messages (id, routing_tag, sealed_blob, expires_at) "
+        "VALUES (?,?,?,?)",
+        (msg_id, tag, sealed, expires_at),
+    )
+    db.commit()
+    return {"message_id": msg_id, "anon": True, "expires_at": expires_at}
+
+
+class FetchAnonRequest(BaseModel):
+    tags: List[str] = Field(default_factory=list, description="hex-encoded routing tags")
+
+
+@app.post("/api/v1/messages/fetch-anon")
+async def fetch_anon_messages(req: FetchAnonRequest):
+    """Anonymous fetch. Caller submits a list of routing tags (typically
+    one per contact across {prev, current, next} epochs). Server returns
+    every message under any of those tags AND DELETES THEM IMMEDIATELY
+    (Rule 2 — destroyed on delivery; no retention).
+
+    Tag enumeration scope is rate-limited to 1024 tags per request to
+    bound the cost of a flood. Recipients with more than 1024 active
+    conversations must paginate by sub-setting their tag list per call.
+    """
+    if not req.tags:
+        return {"messages": []}
+    if len(req.tags) > 1024:
+        raise HTTPException(400, "submit at most 1024 tags per call")
+
+    try:
+        tag_blobs = [bytes.fromhex(t) for t in req.tags]
+    except ValueError:
+        raise HTTPException(400, "tags must be hex-encoded")
+
+    for tb in tag_blobs:
+        if len(tb) != 32:
+            raise HTTPException(400, "tags must be 32 bytes each")
+
+    # SQLite IN-list with parameterized blobs.
+    placeholders = ",".join("?" for _ in tag_blobs)
+    rows = db.execute(
+        f"SELECT id, sealed_blob, server_ts FROM anon_messages "
+        f"WHERE routing_tag IN ({placeholders}) "
+        f"ORDER BY server_ts ASC LIMIT 200",
+        tag_blobs,
+    ).fetchall()
+
+    if not rows:
+        return {"messages": []}
+
+    out = []
+    delivered_ids = []
+    for msg_id, blob, ts in rows:
+        out.append({"id": msg_id, "sealed": blob.hex(), "ts": str(ts)})
+        delivered_ids.append(msg_id)
+
+    # Rule 2 — destroyed on delivery. No retention, no audit row, no copy.
+    placeholders = ",".join("?" for _ in delivered_ids)
+    db.execute(
+        f"DELETE FROM anon_messages WHERE id IN ({placeholders})",
+        delivered_ids,
+    )
+    db.commit()
+
+    return {"messages": out, "count": len(out)}
+
+
 # ── Fetch Messages ───────────────────────────────────────────────────
 @app.post("/api/v1/messages/fetch")
 async def fetch_messages(req: GetMessagesRequest):
