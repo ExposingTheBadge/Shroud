@@ -18,6 +18,7 @@ set(WIN_MODULES
     ratchet.c
     oqs_sig.c
     ed25519.c
+    anon_routing.c
 )
 
 add_executable(shroud

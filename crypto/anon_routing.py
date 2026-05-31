@@ -209,7 +209,11 @@ def seal(payload: bytes, recipient_x25519_pub: bytes) -> bytes:
 
     nonce = os.urandom(NONCE_BYTES)
     aead = AESGCM(key)
-    ct_and_tag = aead.encrypt(nonce, payload, eph_pub + recipient_x25519_pub)
+    # No AAD: eph_pub and recipient_pub are already bound into the KDF
+    # input above, so substituting either yields a different key and the
+    # GCM auth tag check fails. AAD here would be redundant and would
+    # complicate the C port (existing crypto_aes_gcm helper has no AAD).
+    ct_and_tag = aead.encrypt(nonce, payload, None)
 
     return bytes([SEALED_VERSION]) + eph_pub + nonce + ct_and_tag
 
@@ -246,7 +250,7 @@ def unseal(sealed: bytes, my_x25519_priv: bytes) -> bytes:
     key = _hkdf_expand(prk, b"key", 32)
 
     aead = AESGCM(key)
-    return aead.decrypt(nonce, ct_and_tag, eph_pub + my_pub)
+    return aead.decrypt(nonce, ct_and_tag, None)
 
 
 # ── Self-test ────────────────────────────────────────────────────────
