@@ -1,0 +1,28 @@
+#!/bin/bash
+# cloud-init user-data — runs at first boot of the parent instance.
+# Bootstraps SHROUD's parent-side services and launches the enclave.
+
+set -euxo pipefail
+
+export SHROUD_REGION=${region}
+export SHROUD_S3_BUCKET=${s3_bucket}
+export SHROUD_EXPECTED_PCR0=${expected_pcr0}
+export SHROUD_RELAY_PORT=${relay_port}
+export SHROUD_EIF_KEY=shroud-enclave.eif
+export SHROUD_ENCLAVE_CPUS=2
+export SHROUD_ENCLAVE_MEMORY=4096
+export SHROUD_ENCLAVE_CID=16
+
+# Pull SHROUD parent-side scripts from the artifacts bucket.
+mkdir -p /opt/shroud
+for f in parent-bootstrap.sh parent-config-server.py parent-kms-proxy.py; do
+    aws s3 cp "s3://${s3_bucket}/parent-scripts/$f" "/opt/shroud/$f" --region ${region}
+done
+chmod +x /opt/shroud/parent-bootstrap.sh
+
+# Install Python deps the parent scripts need.
+dnf install -y python3-pip
+pip3 install boto3
+
+# Run the bootstrap (it's idempotent — safe across reboots).
+exec /opt/shroud/parent-bootstrap.sh

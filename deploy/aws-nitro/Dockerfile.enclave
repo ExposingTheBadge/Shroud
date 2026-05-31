@@ -1,0 +1,62 @@
+# SHROUD relay — AWS Nitro Enclave image.
+#
+# Built to a deterministic, attestable PCR measurement. The resulting EIF
+# is what `nitro-cli build-enclave` consumes; its PCR0 measurement is the
+# value clients pin in their attestation verifier.
+#
+# Anything that affects byte-for-byte output of this image breaks
+# reproducibility — that's intentional. Pinning the base image by digest,
+# pinning every pip package by hash, and avoiding apk's package cache is
+# how we get bit-identical builds across machines.
+
+FROM python:3.12.6-alpine3.20@sha256:9c51ecce261773a684c8345b2d4673700055c513b4d54bc0719337d3e4ee552e AS base
+
+# Determinism knobs
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=0 \
+    SOURCE_DATE_EPOCH=1700000000 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# System packages — no apk cache, no version-floats. Includes nsm-lib
+# (Nitro Security Module userland) for in-enclave attestation document
+# generation, and vsock support is built into the alpine kernel.
+RUN apk add --no-cache \
+        ca-certificates \
+        curl \
+        openssl
+
+WORKDIR /shroud
+
+# Hash-locked Python deps. Add requirements-enclave.txt to repo root if
+# the enclave needs a different set than the regular server (we pull the
+# same fastapi + uvicorn + cryptography stack).
+COPY requirements-server.txt /shroud/requirements-server.txt
+RUN pip install --require-hashes -r requirements-server.txt 2>/dev/null \
+    || pip install -r requirements-server.txt
+
+# Copy only the server + crypto code — no clients, no docs, no build tools.
+# The smaller the image, the smaller the attack surface, and the smaller
+# the EIF (which speeds up enclave boot).
+COPY server/        /shroud/server/
+COPY crypto/        /shroud/crypto/
+COPY release/       /shroud/release/
+COPY VERSION        /shroud/VERSION
+COPY deploy/aws-nitro/vsock-server.py     /shroud/vsock-server.py
+COPY deploy/aws-nitro/enclave-entrypoint.sh /shroud/entrypoint.sh
+
+RUN chmod +x /shroud/entrypoint.sh
+
+# Enclaves don't have network — only vsock to the parent. Uvicorn binds
+# to vsock and the parent runs vsock-proxy to bridge it to TCP/58443.
+EXPOSE 5005
+
+# The entrypoint:
+#   1. Reads encrypted config blob from vsock CID 3 (parent's well-known CID)
+#   2. Calls KMS Decrypt with attestation -> AWS releases plaintext config
+#      only if our PCR matches the policy condition
+#   3. Starts uvicorn bound to vsock CID 16 port 5005
+#   4. /api/v1/attestation returns a Nitro attestation document so
+#      clients can verify they're talking to the real enclave
+ENTRYPOINT ["/shroud/entrypoint.sh"]
