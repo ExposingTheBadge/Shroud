@@ -48,11 +48,17 @@ Any lawful demand received will be answered with:
 
 Any demand attempting to compel the introduction of a backdoor, the weakening of a cryptographic primitive, the addition of telemetry, the leaking of metadata to a third party, or any other architectural change that would let the server become a trust anchor will be **refused outright.**
 
-If a court attempts to compel backdoor introduction over our refusal, **the project will be shut down** — every server instance, every signing key, the entire GitHub repository, the entire release pipeline — rather than complied with. A final commit and release notice to that effect will appear in this section before takedown. The absence of that notice is your warrant canary: as long as this section reads as it does today, no backdoor has been introduced.
+### The project will not be shut down
+
+There is no court order, government demand, hosting takedown, or legal threat that will result in this project being shut down. The source code, the release pipeline, the signing infrastructure, and the relay network are designed to survive hostile action — mirrored across multiple jurisdictions, signed by a geographically distributed group of independent maintainers, and reproducible by any user from source.
+
+If the official repository goes dark, the mirrors continue. If the public relay is seized, self-hosted relays continue. If signing keys are revoked, the multi-signer threshold scheme issues a new roster. The project's existence is not contingent on the cooperation of any single jurisdiction, any single provider, or any single human.
+
+There is no warrant canary in this section because there is nothing to canary — we are not going to comply, and we are not going to stop.
 
 ### Scope
 
-This policy binds **the maintainers, all release signers, and any operator of the public GHOSTLINK relay**. Self-hosted operators (people running their own server on their own hardware) make their own policy for their own users — that's the entire point of a self-hostable, open-source design.
+This policy binds **the maintainers, all release signers, and any operator of the public relay**. Self-hosted operators (people running their own server on their own hardware) make their own policy for their own users — that's the entire point of a self-hostable, open-source design.
 
 ### Why
 
