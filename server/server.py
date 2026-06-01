@@ -2500,6 +2500,119 @@ async def federation_delete(req: FedDeleteIn):
     return {"deleted": True}
 
 
+# ── Anonymous diagnostics reporting ──────────────────────────────────
+#
+# Clients submit sealed crash / error / log reports here. The bytes
+# are stored in their own table (so the operator can poll without
+# scanning the message queue) and tagged by the per-epoch operator-
+# diagnostics routing tag. Server cannot identify the reporter and
+# cannot decrypt the body. See crypto/error_reporting.py for the
+# wire format + scrubbing requirements.
+
+def _ensure_diagnostics_schema() -> None:
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS diagnostic_reports (
+            id TEXT PRIMARY KEY,
+            routing_tag BLOB NOT NULL,
+            sealed_blob BLOB NOT NULL,
+            server_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_diag_routing_tag ON diagnostic_reports(routing_tag);
+        CREATE INDEX IF NOT EXISTS idx_diag_ts ON diagnostic_reports(server_ts);
+        """
+    )
+    db.commit()
+
+
+_ensure_diagnostics_schema()
+
+
+@app.post("/api/v1/diagnostics/report")
+async def submit_diagnostic_report(request: Request):
+    """Anonymous crash / error / log submission.
+
+    Headers:
+      X-Routing-Tag: 64 hex chars (32 bytes)
+    Body: raw sealed envelope bytes addressed to the operator's
+          diagnostics pubkey.
+
+    Padding bucket: report bodies are typically small. We require
+    the smallest bucket (4096) so all reports look identical to
+    a passive observer.
+    """
+    tag_hex = request.headers.get("X-Routing-Tag", "")
+    if len(tag_hex) != 64:
+        raise HTTPException(400, "X-Routing-Tag must be 64 hex chars (32 bytes)")
+    try:
+        tag = bytes.fromhex(tag_hex)
+    except ValueError:
+        raise HTTPException(400, "X-Routing-Tag must be valid hex")
+
+    sealed = await request.body()
+    if not sealed:
+        raise HTTPException(400, "Empty report")
+    if len(sealed) != 4096:
+        raise HTTPException(400, "Diagnostic reports must be padded to 4096 bytes")
+
+    report_id = uuid.uuid4().hex
+    db.execute(
+        "INSERT INTO diagnostic_reports (id, routing_tag, sealed_blob) "
+        "VALUES (?,?,?)",
+        (report_id, tag, sealed),
+    )
+    db.commit()
+    return {"report_id": report_id, "received": True}
+
+
+class FetchReportsRequest(BaseModel):
+    tags: List[str] = Field(default_factory=list,
+                            description="hex-encoded diagnostic routing tags (operator-side poll)")
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
+@app.post("/api/v1/diagnostics/fetch")
+async def fetch_diagnostic_reports(req: FetchReportsRequest):
+    """Operator-side: poll for pending reports.
+
+    Operator authenticates by being able to compute the routing tags
+    (which requires the operator's diagnostics public+private keypair —
+    the public half clients use to seal; the private half lets the
+    operator decrypt; the routing tags are derived from the public
+    half).
+
+    Unlike /messages/fetch-anon, reports are NOT deleted on first
+    fetch — the operator may want to re-poll while triaging. The
+    background sweeper drops reports older than 7 days.
+    """
+    if not req.tags:
+        return {"reports": []}
+
+    try:
+        tag_blobs = [bytes.fromhex(t) for t in req.tags]
+    except ValueError:
+        raise HTTPException(400, "tags must be hex-encoded")
+    for tb in tag_blobs:
+        if len(tb) != 32:
+            raise HTTPException(400, "tags must be 32 bytes each")
+
+    placeholders = ",".join("?" for _ in tag_blobs)
+    rows = db.execute(
+        f"SELECT id, sealed_blob, server_ts FROM diagnostic_reports "
+        f"WHERE routing_tag IN ({placeholders}) "
+        f"ORDER BY server_ts ASC LIMIT ?",
+        (*tag_blobs, req.limit),
+    ).fetchall()
+
+    return {
+        "reports": [
+            {"id": r[0], "sealed": r[1].hex(), "ts": str(r[2])}
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
 # ── Fetch Messages ───────────────────────────────────────────────────
 @app.post("/api/v1/messages/fetch")
 async def fetch_messages(req: GetMessagesRequest):

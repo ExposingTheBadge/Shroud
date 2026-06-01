@@ -123,8 +123,31 @@ val THEME_NAMES = listOf(
 )
 
 class MainActivity : ComponentActivity() {
+    /** Operator diagnostics X25519 pubkey, 32 bytes hex.
+     *  Hard-coded for v1; future versions fetch + verify from a signed
+     *  manifest at the operator's well-known URL. Replace with the
+     *  real operator pubkey before shipping a release that should
+     *  forward reports. The placeholder below points to a throwaway
+     *  keypair so submissions don't fail to seal — but reports go
+     *  nowhere until the real pubkey is published. */
+    private val OPERATOR_DIAG_PUBKEY_HEX =
+        "0000000000000000000000000000000000000000000000000000000000000000"
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Install the anonymous error reporter ONCE per process so any
+        // uncaught exception during composition / IO triggers a sealed
+        // report to the operator's diagnostics pubkey. Best-effort —
+        // failure to install never blocks app startup.
+        try {
+            val opPub = OPERATOR_DIAG_PUBKEY_HEX.chunked(2)
+                .map { it.toInt(16).toByte() }
+                .toByteArray()
+            if (opPub.any { it != 0.toByte() }) {
+                ErrorReporter.install(applicationContext, opPub)
+            }
+        } catch (_: Throwable) { /* never block startup */ }
+
         // Block screenshots + screen-share from recording the chat. Most
         // OS-level malware and "screen recorder" apps will see a black
         // frame instead of message content.

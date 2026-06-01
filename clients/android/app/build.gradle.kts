@@ -33,7 +33,10 @@ android {
             signingConfig = signingConfigs.getByName("release")
         }
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            // Use the default Android debug keystore so emulator + local
+            // testing works out of the box. Release signing is gated
+            // behind SHROUD_KEYSTORE_PASS so it still uses the real key.
+            isDebuggable = true
         }
     }
 
