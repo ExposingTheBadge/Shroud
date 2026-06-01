@@ -365,6 +365,16 @@ async def _expiry_sweeper():
             # Expired device-link sessions (also wipes any payload that never
             # got picked up — payloads contain identity material).
             db.execute("DELETE FROM device_link_sessions WHERE expires_at < datetime('now')")
+            # Diagnostic reports older than 7 days. Operator should be
+            # polling and triaging well within that window.
+            try:
+                db.execute(
+                    "DELETE FROM diagnostic_reports "
+                    "WHERE server_ts < datetime('now', '-7 days')"
+                )
+            except Exception:
+                # Table may not exist yet on very-old upgrades.
+                pass
             # Expired files
             file_rows = db.execute(
                 "SELECT id, storage_name FROM file_transfers WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
