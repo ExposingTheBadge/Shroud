@@ -6,6 +6,24 @@ import CryptoKit
 struct ShroudApp: App {
     @StateObject private var client = ShroudClient()
 
+    // Operator diagnostics X25519 pubkey (32 bytes hex). Bake the real
+    // operator pubkey in here before shipping a release that should
+    // forward anonymous error reports. Placeholder all-zeros means
+    // ErrorReporter skips submission — installed but inert.
+    private let OPERATOR_DIAG_PUBKEY_HEX =
+        "0000000000000000000000000000000000000000000000000000000000000000"
+
+    init() {
+        // Install the anonymous crash + signal reporter once per app
+        // launch. The pubkey is checked for non-zero inside install();
+        // if zero, the reporter is wired but submission is a no-op.
+        if let opPub = Data(hexString: OPERATOR_DIAG_PUBKEY_HEX),
+           opPub.count == 32,
+           opPub.contains(where: { $0 != 0 }) {
+            ErrorReporter.install(operatorPubkey: opPub)
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             if client.isRegistered {
@@ -14,6 +32,23 @@ struct ShroudApp: App {
                 RegistrationView(client: client)
             }
         }
+    }
+}
+
+// Hex helper used by ErrorReporter setup. Kept in this file because
+// the existing Data hex helpers (if any) live elsewhere in the iOS app
+// target and we want this file self-contained.
+extension Data {
+    init?(hexString: String) {
+        let chars = Array(hexString)
+        guard chars.count % 2 == 0 else { return nil }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(chars.count / 2)
+        for i in stride(from: 0, to: chars.count, by: 2) {
+            guard let b = UInt8(String(chars[i...i + 1]), radix: 16) else { return nil }
+            bytes.append(b)
+        }
+        self.init(bytes)
     }
 }
 

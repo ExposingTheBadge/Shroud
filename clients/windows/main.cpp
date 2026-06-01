@@ -3141,11 +3141,24 @@ private:
 
 #include "main.moc"
 
+/* Operator diagnostics X25519 pubkey (32 bytes). Replace with the
+ * real operator pubkey before shipping a release that should forward
+ * anonymous error reports. Placeholder all-zeros means
+ * error_reporter_install() is wired but submission is a no-op. */
+static const BYTE g_operator_diag_pubkey[32] = {0};
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName("SHROUD");
     app.setApplicationVersion(CLIENT_VERSION);
     app.setWindowIcon(QIcon(":/shroud.png"));
+
+    /* Install the anonymous crash reporter as early as possible so SEH
+     * faults during window construction get captured. The pubkey is
+     * checked for non-zero inside install(); zero pubkey means the
+     * filter is wired but submission is skipped. */
+    error_reporter_install(g_operator_diag_pubkey,
+                           "https://44.202.225.57:58443");
 
     CryptoSplash splash;
     splash.show();
