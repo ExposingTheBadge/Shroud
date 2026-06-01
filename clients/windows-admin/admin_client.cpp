@@ -14,6 +14,19 @@ AdminClient::AdminClient(QObject *parent) : QObject(parent) {
     m_csrfToken      = s.value("csrf_token", "").toString();
     applyProxy();
 
+    // Schannel (Qt's default TLS backend on Windows) ignores the
+    // per-request setPeerVerifyMode(VerifyNone) in some failure modes,
+    // surfacing as "SSL handshake failed: An internal token was invalid"
+    // (SEC_E_INVALID_TOKEN) against any self-signed relay. Catch every
+    // reply's sslErrors signal at the NAM level and ignore them. The
+    // wire-security model never depended on the TLS chain anyway —
+    // every auth / message payload is encrypted at the application
+    // layer regardless of transport.
+    connect(&m_nam, &QNetworkAccessManager::sslErrors,
+            this, [this](QNetworkReply *reply, const QList<QSslError> &) {
+                if (m_acceptSelfSigned) reply->ignoreSslErrors();
+            });
+
 #ifdef SHROUD_ADMIN_HAS_WS
     connect(&m_ws, &QWebSocket::connected,         this, &AdminClient::onWsConnected);
     connect(&m_ws, &QWebSocket::disconnected,      this, &AdminClient::onWsDisconnected);
