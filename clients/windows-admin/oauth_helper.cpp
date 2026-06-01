@@ -72,18 +72,31 @@ void OAuthHelper::clear() {
 QString OAuthHelper::authorizeUrl() const {
     QString challenge = b64url(QCryptographicHash::hash(
         m_codeVerifier.toUtf8(), QCryptographicHash::Sha256));
-    QUrl u(AUTH_URL);
-    QUrlQuery q;
-    q.addQueryItem("code",                 "true");
-    q.addQueryItem("client_id",            CLIENT_ID);
-    q.addQueryItem("response_type",        "code");
-    q.addQueryItem("redirect_uri",         redirectUri());
-    q.addQueryItem("scope",                SCOPES);
-    q.addQueryItem("code_challenge",       challenge);
-    q.addQueryItem("code_challenge_method","S256");
-    q.addQueryItem("state",                m_state);
-    u.setQuery(q);
-    return u.toString();
+
+    // QUrlQuery::addQueryItem only encodes characters Qt considers
+    // unsafe in a generic query string — it leaves ':' and '/' alone.
+    // Anthropic's OAuth validator requires strict percent-encoding of
+    // redirect_uri and scope (matching what Claude Code emits via
+    // encodeURIComponent), otherwise rejects with 'Invalid request
+    // format' before even reaching the consent screen. Build the URL
+    // by hand so we control encoding per parameter.
+    auto enc = [](const QString &s) -> QString {
+        return QString::fromUtf8(QUrl::toPercentEncoding(s));
+    };
+    return QString("%1?code=true"
+                   "&client_id=%2"
+                   "&response_type=code"
+                   "&redirect_uri=%3"
+                   "&scope=%4"
+                   "&code_challenge=%5"
+                   "&code_challenge_method=S256"
+                   "&state=%6")
+        .arg(AUTH_URL)
+        .arg(QString::fromUtf8(CLIENT_ID))
+        .arg(enc(redirectUri()))
+        .arg(enc(QString::fromUtf8(SCOPES)))
+        .arg(challenge)       // base64url is already URL-safe
+        .arg(m_state);        // base64url is already URL-safe
 }
 
 void OAuthHelper::start(std::function<void(bool, const QString &)> cb) {
