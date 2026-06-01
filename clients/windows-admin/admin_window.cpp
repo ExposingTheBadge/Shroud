@@ -13,6 +13,8 @@
 #include "tabs/errors_tab.h"
 #include "tabs/devices_tab.h"
 #include "tabs/audit_tab.h"
+#include "tabs/identity_tab.h"
+#include "tabs/user_detail_dialog.h"
 #include <QVBoxLayout>
 #include <QApplication>
 #include <QIcon>
@@ -39,6 +41,7 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
     m_errors     = new ErrorsTab(m_client);
     m_devices    = new DevicesTab(m_client);
     m_audit      = new AuditTab(m_client);
+    m_identity   = new IdentityTab(m_client);
 
     m_tabs->addTab(m_federation, "Federation");
     m_tabs->addTab(m_stats,      "Stats");
@@ -48,6 +51,7 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
     m_tabs->addTab(m_devices,    "Devices");
     m_tabs->addTab(m_bans,       "Bans");
     m_tabs->addTab(m_audit,      "Audit");
+    m_tabs->addTab(m_identity,   "Identity");
     m_tabs->addTab(m_diag,       "Diagnostics");
     m_tabs->addTab(m_manifest,   "Manifest");
     m_tabs->addTab(m_ssh,        "Relays (SSH)");
@@ -82,6 +86,19 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
     connect(m_devices, &DevicesTab::banHwidRequested, this, [this](const QString &hwid) {
         m_bans->prefillUsername(hwid);
         m_tabs->setCurrentWidget(m_bans);
+    });
+
+    // Users → double-click / "Open user details" → UserDetailDialog
+    connect(m_users, &UsersTab::openUserRequested, this,
+            [this](const QString &userId, const QString &username) {
+        auto *dlg = new UserDetailDialog(m_client, userId, username, this);
+        connect(dlg, &UserDetailDialog::banUserRequested,
+                this, [this](const QString &u) {
+            m_bans->prefillUsername(u);
+            m_tabs->setCurrentWidget(m_bans);
+        });
+        dlg->setAttribute(Qt::WA_DeleteOnClose);
+        dlg->show();
     });
 
     connect(m_client, &AdminClient::wsConnected,    this, &AdminWindow::onWsConnected);

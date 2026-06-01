@@ -33,6 +33,8 @@ set(ADMIN_SOURCES
     tabs/errors_tab.cpp
     tabs/devices_tab.cpp
     tabs/audit_tab.cpp
+    tabs/user_detail_dialog.cpp
+    tabs/identity_tab.cpp
 )
 
 set(ADMIN_HEADERS
@@ -52,6 +54,8 @@ set(ADMIN_HEADERS
     tabs/errors_tab.h
     tabs/devices_tab.h
     tabs/audit_tab.h
+    tabs/user_detail_dialog.h
+    tabs/identity_tab.h
 )
 
 add_executable(shroud-admin

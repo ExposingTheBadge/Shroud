@@ -10,6 +10,7 @@ public:
     explicit UsersTab(AdminClient *client, QWidget *parent = nullptr);
 signals:
     void banUserRequested(const QString &username);  // jumped to BansTab
+    void openUserRequested(const QString &userId, const QString &username);
 private slots:
     void refresh();
     void onBanSelected();

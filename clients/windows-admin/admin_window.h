@@ -24,6 +24,7 @@ class SettingsTab;
 class ErrorsTab;
 class DevicesTab;
 class AuditTab;
+class IdentityTab;
 
 class AdminWindow : public QMainWindow {
     Q_OBJECT
@@ -55,6 +56,7 @@ private:
     ErrorsTab       *m_errors;
     DevicesTab      *m_devices;
     AuditTab        *m_audit;
+    IdentityTab     *m_identity;
 
     QLabel *m_userBadge, *m_deviceBadge, *m_errorBadge;
 };

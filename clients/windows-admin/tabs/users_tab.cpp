@@ -41,6 +41,15 @@ UsersTab::UsersTab(AdminClient *client, QWidget *parent)
     connect(m_refreshBtn, &QPushButton::clicked, this, &UsersTab::refresh);
     connect(m_banBtn,     &QPushButton::clicked, this, &UsersTab::onBanSelected);
     connect(m_deleteBtn,  &QPushButton::clicked, this, &UsersTab::onDeleteSelected);
+    // Double-click opens the user-detail dialog.
+    connect(m_table, &QTableWidget::cellDoubleClicked,
+            [this](int row, int) {
+        if (row < 0) return;
+        QString uname = m_table->item(row, 0)->text();
+        QString uid   = m_table->item(row, 5)->text();
+        emit openUserRequested(uid, uname);
+    });
+
     // Right-click context menu on a user row — quickest path to a ban.
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_table, &QTableWidget::customContextMenuRequested,
@@ -49,9 +58,16 @@ UsersTab::UsersTab(AdminClient *client, QWidget *parent)
         if (!item) return;
         QString username = m_table->item(item->row(), 0)->text();
         QMenu menu(this);
+        auto *openAct   = menu.addAction("Open user details");
+        menu.addSeparator();
         auto *banAct    = menu.addAction("Ban user (cascades HWIDs)…");
         auto *deleteAct = menu.addAction("Delete user…");
         auto *chosen    = menu.exec(m_table->viewport()->mapToGlobal(pos));
+        if (chosen == openAct) {
+            QString uid = m_table->item(item->row(), 5)->text();
+            emit openUserRequested(uid, username);
+            return;
+        }
         if (chosen == banAct) {
             bool ok = false;
             QString reason = QInputDialog::getText(
