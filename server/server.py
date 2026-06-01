@@ -1754,10 +1754,33 @@ async def get_operator_manifest():
     )
 
 
+def _load_changelog_md() -> str:
+    """Read the project CHANGELOG.md so the version endpoint can return
+    real Markdown instead of a hand-curated wall-of-text. Clients render
+    it as Markdown. Falls back to a one-line summary if the file is
+    missing."""
+    paths = [
+        os.path.join(_REPO_ROOT, "CHANGELOG.md"),
+        os.path.join(os.getcwd(), "CHANGELOG.md"),
+    ]
+    for p in paths:
+        try:
+            if os.path.exists(p):
+                with open(p, encoding="utf-8") as f:
+                    text = f.read()
+                # Cap at ~24KB so a runaway changelog can't blow the
+                # version-check response.
+                return text[:24576]
+        except Exception:
+            continue
+    return f"v{SERVER_VERSION} — see GitHub releases for details."
+
+
 @app.get("/api/v1/version")
 async def get_version():
     """Client update check endpoint. Clients fetch this and compare to their
-    embedded version string."""
+    embedded version string. Returns the project CHANGELOG.md as the
+    changelog field — clients render it as Markdown."""
     base = "https://github.com/ExposingTheBadge/Shroud/releases/latest"
     return {
         "version": SERVER_VERSION,
@@ -1766,7 +1789,13 @@ async def get_version():
         "windows": f"{base}/download/SHROUD.exe",
         "android": f"{base}/download/SHROUD.apk",
         "linux":   f"{base}/download/shroud-linux",
-        "changelog": (
+        "changelog": _load_changelog_md(),
+    }
+
+
+# Old hand-curated changelog string kept here as a fallback reference but
+# no longer returned. Will be removed in a future cleanup.
+_LEGACY_CHANGELOG_BLOB = (
             "2.4.0 — Pure-C Ed25519 verifier closes the third leg of the "
             "triple-hybrid server attestation (Ed25519 + ML-DSA-87 + "
             "SPHINCS+ all verified per handshake — no DLL needed for "
@@ -1813,8 +1842,7 @@ async def get_version():
             "auto-purged after pickup. Pure-C Ed25519 verifier deferred "
             "to v2.1 — current attestation path verifies ML-DSA-87 + "
             "SPHINCS+ and the Ed25519 leg is covered by fingerprint pin."
-        ),
-    }
+)
 
 @app.post("/api/v1/heartbeat")
 async def heartbeat(req: GetMessagesRequest):

@@ -1,16 +1,90 @@
 # SHROUD Changelog
 
-## Unreleased
+## v2.6 — Tor-default, federation dashboard, MSI, operator manifest v2
 
-- **Windows MSI installer.** Releases now ship `SHROUD-v<ver>-win64.msi`
-  alongside the existing zip. Built with Advanced Installer 19.x; signed
-  with the same Azure Artifact Signing cert as `shroud.exe`. Installs to
-  `Program Files\SHROUD\`, registers in *Apps & Features*, supports
-  Major Upgrade. CI integration in
-  [`.github/workflows/release-windows.yml`](.github/workflows/release-windows.yml);
-  build script + docs at
-  [`clients/windows/installer/`](clients/windows/installer/) and
-  [`docs/windows-installer.md`](docs/windows-installer.md).
+**Windows**
+
+- **MSI installer** alongside the portable zip. Built with Advanced
+  Installer 19.x and Authenticode-signed by Azure Artifact Signing —
+  Windows shows *Verified publisher: Brent Gordon* both for the MSI
+  itself and the `shroud.exe` it installs. Adds Start Menu + Desktop
+  shortcuts, proper *Apps & Features* uninstall, and Major Upgrade
+  semantics.
+- Anonymous-routing wrapper (`shroud::AnonClient` in `anon_client.{h,cpp}`)
+  exposes `sendSealed` / `fetchMessages` with the same shape as the
+  Android and iOS ports. Lives next to the existing legacy paths so
+  call sites can adopt it incrementally without a risky in-place flip.
+
+**Server / federation**
+
+- New public `GET /api/v1/relay-stats` per relay — operational
+  telemetry: version, git SHA, uptime, federation peer count, Tor
+  .onion address, traffic counters, disk + load. No PII, no auth.
+- New admin `GET /api/v1/admin/federation` — fans out to every peer's
+  `/relay-stats` plus self and returns an aggregated health view.
+  Tolerates per-peer outages (marked unreachable rather than blowing
+  up the response).
+- New **Federation** tab in the admin dashboard renders the live grid
+  with one card per relay: version, uptime, traffic, disk/load, and
+  the Tor v3 hidden service address.
+- Tor v3 hidden services provisioned on all 4 production relays
+  (us-east-1, us-east-2, us-west-2, eu-west-1). `tools/tor_setup.sh`
+  now handles Amazon Linux 2023 (installs from `rpm.torproject.org`
+  with `--nodeps` to skip the EPEL-only `torsocks` dep).
+- **Username + HWID banning system** (`/api/v1/admin/bans`).
+  Banning a username cascades the ban to every hardware ID seen on
+  devices linked to that user — banned accounts can't just re-register
+  from the same machine. Enforcement runs at the top of `/api/v1/auth`
+  and `/api/v1/register` before any password check.
+- **Anonymous error reporting** has a real operator key (no longer all
+  zeros): reports filed by shipped clients are sealed to a published
+  X25519 pubkey and decryptable via
+  `python -m tools.diagnostics_inbox poll`. End-to-end verified
+  against production: Rule 3 PII scrub (UUIDs, emails, IPv4, POSIX
+  usernames) confirmed.
+
+**Operator manifest → v2 (`shroud.operator.v2`)**
+
+- Per-peer optional `onion_endpoint`
+- `relay_onion_endpoint` for the home relay
+- `tor_socks_proxy` (default `127.0.0.1:9050`)
+- `prefer_tor_by_default` — `true`; clients honour this and ride
+  `.onion` endpoints when the local SOCKS5 proxy is reachable,
+  falling back to clearnet otherwise.
+
+**Clients (Tor on by default)**
+
+- Android `MainActivity.kt`, iOS `ShroudApp.swift`, Windows `main.cpp`
+  all bake `PREFER_TOR_DEFAULT = true` plus the manifest pin
+  `2fb11de360a0cf6baa35d6785c3945658ae6d64823041729798a2b689ce00ca0`.
+- iOS gets a new `NetworkClientAnon.swift` (static `sendSealedAnon` /
+  `fetchMessagesAnon`) mirroring the Android and Windows wrappers.
+
+**Release pipeline**
+
+- Major version bumps in `release-windows.yml` now require typing
+  `CONFIRM-MAJOR-BUMP` in a separate input — patch/minor still
+  single-click.
+- Release notes Markdown now actually renders. PowerShell
+  array-to-string with `$OFS = ' '` was collapsing every commit onto
+  one line; switched to explicit `-join "\`n"` and array-built body
+  with ASCII (no BOM) output.
+- Version-check endpoint now returns the real `CHANGELOG.md` as the
+  `changelog` field instead of a hand-curated wall of text — the
+  client's update screen renders proper Markdown again.
+
+**Docs**
+
+- [`docs/federation-deploy.md`](docs/federation-deploy.md) — operator
+  runbook for the live deploy: roster, peer onboarding, pubkey
+  rotation, us-east-2 IGW gotcha, file-perms troubleshooting.
+- [`docs/windows-installer.md`](docs/windows-installer.md) — what the
+  MSI does and does not do, identifiers, verify recipe.
+- [`tests/federation_live.py`](tests/federation_live.py) — sealed
+  envelope to us-east-1 lands at the other 3 regions in ~3s.
+- [`tests/diagnostics_live.py`](tests/diagnostics_live.py) — sealed
+  PII-laden report decrypts cleanly with the operator's key; Rule 3
+  scrub verified.
 
 ## v2.5.x — Anonymous routing protocol + 8 platform clients
 
