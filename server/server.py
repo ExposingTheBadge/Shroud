@@ -262,7 +262,10 @@ def ar_dec(b) -> str:
 # ── Config ───────────────────────────────────────────────────────────
 from fastapi.responses import FileResponse, StreamingResponse
 PORT = 58443
-DB_PATH = os.path.join(os.path.dirname(__file__), "shroud.db")
+DB_PATH = os.environ.get(
+    "SHROUD_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "shroud.db"),
+)
 FILE_DIR = os.path.join(os.path.dirname(__file__), "files")
 os.makedirs(FILE_DIR, exist_ok=True)
 SESSION_TIMEOUT = 3600  # 1 hour
