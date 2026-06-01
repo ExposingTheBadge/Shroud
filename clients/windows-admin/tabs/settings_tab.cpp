@@ -8,6 +8,10 @@
 #include <QLabel>
 #include <QSettings>
 #include <QDir>
+#include <QMessageBox>
+#include <QApplication>
+#include <QClipboard>
+#include <QFont>
 #include <QJsonArray>
 #include <QJsonObject>
 
@@ -45,17 +49,42 @@ SettingsTab::SettingsTab(AdminClient *client, QWidget *parent)
     fl->addRow("Manifest signing keyfile", m_manifestKeyfile);
     l->addLayout(fl);
 
-    // Login group — alternative to pasting a cookie
+    // Admin auth uses a 256-char hex fingerprint (minted at first-time
+    // setup via /api/v1/admin/setup), not username/password. If the
+    // relay has never been set up, "First-time setup" mints + returns
+    // a fingerprint. Save it — it cannot be recovered.
+    auto *authInfo = new QLabel(
+        "<b>Admin auth:</b> 256-char hex fingerprint (minted by First-time setup) "
+        "plus an optional password. First-time setup mints a fingerprint that "
+        "<u>cannot be recovered</u> — save it somewhere safe.");
+    authInfo->setWordWrap(true);
+    authInfo->setStyleSheet("padding:6px;color:#bbb;background:#222;border-left:3px solid #ffb74d");
+    l->addWidget(authInfo);
+
+    auto *fpBar = new QHBoxLayout;
+    m_fingerprint = new QLineEdit(m_client->savedFingerprint());
+    m_fingerprint->setPlaceholderText("256-char hex fingerprint");
+    m_fingerprint->setEchoMode(QLineEdit::Password);
+    m_fingerprint->setFont(QFont("Consolas", 9));
+    m_copyFpBtn = new QPushButton("Show");
+    m_copyFpBtn->setCheckable(true);
+    fpBar->addWidget(new QLabel("Fingerprint:"));
+    fpBar->addWidget(m_fingerprint, 1);
+    fpBar->addWidget(m_copyFpBtn);
+    l->addLayout(fpBar);
+
     auto *loginBar = new QHBoxLayout;
-    m_loginUser = new QLineEdit;  m_loginUser->setPlaceholderText("Admin username");
-    m_loginPass = new QLineEdit;  m_loginPass->setPlaceholderText("Password");
+    m_loginPass = new QLineEdit;
+    m_loginPass->setPlaceholderText("Password (optional, set during setup)");
     m_loginPass->setEchoMode(QLineEdit::Password);
+    m_setupBtn  = new QPushButton("First-time setup");
+    m_setupBtn->setStyleSheet("background:#5a3a0a;color:white;padding:6px 12px");
     m_loginBtn  = new QPushButton("Log in");
     m_loginBtn->setStyleSheet("background:#2e7d32;color:white;padding:6px 14px");
     m_logoutBtn = new QPushButton("Log out");
-    loginBar->addWidget(new QLabel("Login →"));
-    loginBar->addWidget(m_loginUser, 1);
+    loginBar->addWidget(new QLabel("Password:"));
     loginBar->addWidget(m_loginPass, 1);
+    loginBar->addWidget(m_setupBtn);
     loginBar->addWidget(m_loginBtn);
     loginBar->addWidget(m_logoutBtn);
     l->addLayout(loginBar);
@@ -80,14 +109,42 @@ SettingsTab::SettingsTab(AdminClient *client, QWidget *parent)
     connect(m_saveBtn, &QPushButton::clicked, this, &SettingsTab::onSave);
     connect(m_testRelayBtn, &QPushButton::clicked, this, &SettingsTab::onTestRelay);
     connect(m_testAnthropicBtn, &QPushButton::clicked, this, &SettingsTab::onTestAnthropic);
+    connect(m_copyFpBtn, &QPushButton::toggled, [this](bool show) {
+        m_fingerprint->setEchoMode(show ? QLineEdit::Normal : QLineEdit::Password);
+        m_copyFpBtn->setText(show ? "Hide" : "Show");
+    });
+    connect(m_setupBtn, &QPushButton::clicked, [this]() {
+        if (QMessageBox::warning(this, "First-time setup",
+            "First-time setup mints a fingerprint that CANNOT be recovered. "
+            "Only run this on a relay that has never been configured.\n\n"
+            "Proceed?",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        m_setupBtn->setEnabled(false);
+        m_status->setText("Requesting fingerprint mint…");
+        m_client->adminFirstTimeSetup(
+            [this](const QString &fp, const QString &err) {
+                m_setupBtn->setEnabled(true);
+                if (!fp.isEmpty()) {
+                    m_fingerprint->setText(fp);
+                    m_copyFpBtn->setChecked(true);
+                    QApplication::clipboard()->setText(fp);
+                    m_status->setText(
+                        "Fingerprint minted and copied to clipboard. "
+                        "Save it now — it cannot be recovered.");
+                } else {
+                    m_status->setText("Setup failed: " + err);
+                }
+            });
+    });
     connect(m_loginBtn,  &QPushButton::clicked, [this]() {
         m_status->setText("Logging in…");
         m_loginBtn->setEnabled(false);
-        m_client->adminLogin(m_loginUser->text().trimmed(), m_loginPass->text(),
+        m_client->adminLogin(m_fingerprint->text().trimmed(), m_loginPass->text(),
             [this](bool ok, const QString &err) {
                 m_loginBtn->setEnabled(true);
                 if (ok) {
-                    m_status->setText("Logged in. Session captured.");
+                    m_status->setText("Logged in. Session + CSRF captured.");
                     m_sessionCookie->setText(m_client->adminSessionCookie());
                     m_loginPass->clear();
                 } else {

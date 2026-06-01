@@ -3,6 +3,7 @@
 #include <QtNetwork/QNetworkCookie>
 #include <QtNetwork/QNetworkProxy>
 #include <QUrlQuery>
+#include <QSysInfo>
 
 AdminClient::AdminClient(QObject *parent) : QObject(parent) {
     QSettings s("SHROUD", "admin");
@@ -10,6 +11,7 @@ AdminClient::AdminClient(QObject *parent) : QObject(parent) {
     m_anthropicKey   = s.value("anthropic_key", "").toString();
     m_sessionCookie  = s.value("admin_session", "").toString();
     m_socksProxy     = s.value("socks_proxy", "").toString();
+    m_csrfToken      = s.value("csrf_token", "").toString();
     applyProxy();
 
 #ifdef SHROUD_ADMIN_HAS_WS
@@ -49,32 +51,59 @@ void AdminClient::applyProxy() {
 #endif
 }
 
-void AdminClient::adminLogin(const QString &username, const QString &password,
+void AdminClient::adminLogin(const QString &fingerprintId, const QString &password,
                              std::function<void(bool, const QString &)> cb) {
     QJsonObject body;
-    body["username"] = username;
-    body["password"] = password;
-    QNetworkRequest req = buildReq(m_relayUrl + "/api/v1/admin/login", "application/json");
+    body["fingerprint_id"] = fingerprintId;
+    body["password"]       = password;
+    body["hwid"]           = QString::fromUtf8(QSysInfo::machineUniqueId().toBase64());
+    QNetworkRequest req = buildReq(
+        m_relayUrl + "/api/v1/admin/fingerprint-login", "application/json");
     QNetworkReply *r = m_nam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    QObject::connect(r, &QNetworkReply::finished, [this, r, cb]() {
+    QObject::connect(r, &QNetworkReply::finished, [this, r, fingerprintId, cb]() {
         if (r->error() != QNetworkReply::NoError) {
             QString detail = QString::fromUtf8(r->readAll());
             r->deleteLater();
             cb(false, detail.isEmpty() ? r->errorString() : detail);
             return;
         }
-        // Capture the session cookie set by the server
+        // Server sets BOTH shroud_sid (httpOnly session) AND shroud_csrf
+        // (JS-readable CSRF token). We must capture both — every write
+        // endpoint requires X-CSRF-Token to match the cookie value.
         auto cookies = qvariant_cast<QList<QNetworkCookie>>(
             r->header(QNetworkRequest::SetCookieHeader));
         for (const auto &c : cookies) {
-            if (c.name() == "shroud_admin") {
+            if (c.name() == "shroud_sid") {
                 setAdminSessionCookie(QString::fromUtf8(c.value()));
-                break;
+            } else if (c.name() == "shroud_csrf") {
+                setCsrfToken(QString::fromUtf8(c.value()));
             }
         }
+        setSavedFingerprint(fingerprintId);
         r->deleteLater();
         connectAdminWs();
         cb(true, "");
+    });
+}
+
+void AdminClient::adminFirstTimeSetup(
+        std::function<void(const QString &fp, const QString &err)> cb) {
+    QNetworkRequest req = buildReq(
+        m_relayUrl + "/api/v1/admin/setup", "application/json");
+    QNetworkReply *r = m_nam.post(req, "{}");
+    QObject::connect(r, &QNetworkReply::finished, [this, r, cb]() {
+        QString detail = QString::fromUtf8(r->readAll());
+        int http = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        r->deleteLater();
+        if (http == 200) {
+            // Body shape: { ok, fingerprint_id, note }
+            QJsonDocument d = QJsonDocument::fromJson(detail.toUtf8());
+            QString fp = d.object().value("fingerprint_id").toString();
+            setSavedFingerprint(fp);
+            cb(fp, "");
+        } else {
+            cb("", detail.isEmpty() ? QString("HTTP %1").arg(http) : detail);
+        }
     });
 }
 
@@ -82,9 +111,23 @@ void AdminClient::adminLogout(std::function<void(bool)> cb) {
     postJson("/api/v1/admin/logout", QJsonObject(),
              [this, cb](const QJsonDocument &, const QString &err) {
         setAdminSessionCookie("");
+        setCsrfToken("");
         disconnectAdminWs();
         cb(err.isEmpty());
     });
+}
+
+void AdminClient::setCsrfToken(const QString &t) {
+    m_csrfToken = t;
+    QSettings("SHROUD", "admin").setValue("csrf_token", t);
+}
+
+QString AdminClient::savedFingerprint() const {
+    return QSettings("SHROUD", "admin").value("admin_fingerprint", "").toString();
+}
+
+void AdminClient::setSavedFingerprint(const QString &fp) {
+    QSettings("SHROUD", "admin").setValue("admin_fingerprint", fp);
 }
 
 void AdminClient::setRelayUrl(const QString &url) {
@@ -108,8 +151,15 @@ QNetworkRequest AdminClient::buildReq(const QString &fullUrl, const QString &con
         req.setHeader(QNetworkRequest::ContentTypeHeader, contentType);
     }
     if (!m_sessionCookie.isEmpty()) {
-        req.setRawHeader("Cookie", QString("shroud_admin=%1").arg(m_sessionCookie).toUtf8());
-        req.setRawHeader("X-CSRF-Token", m_sessionCookie.toUtf8());
+        // Two cookies, both required: shroud_sid is the httpOnly session
+        // anchor, shroud_csrf is the double-submit token the server
+        // matches against the X-CSRF-Token header on every write.
+        QString cookieHdr = QString("shroud_sid=%1").arg(m_sessionCookie);
+        if (!m_csrfToken.isEmpty()) {
+            cookieHdr += QString("; shroud_csrf=%1").arg(m_csrfToken);
+            req.setRawHeader("X-CSRF-Token", m_csrfToken.toUtf8());
+        }
+        req.setRawHeader("Cookie", cookieHdr.toUtf8());
     }
     // Accept self-signed relay certs.
     QSslConfiguration cfg = QSslConfiguration::defaultConfiguration();
@@ -169,7 +219,7 @@ void AdminClient::connectAdminWs() {
     ws += "/ws/admin";
     QNetworkRequest req((QUrl(ws)));
     if (!m_sessionCookie.isEmpty()) {
-        req.setRawHeader("Cookie", QString("shroud_admin=%1").arg(m_sessionCookie).toUtf8());
+        req.setRawHeader("Cookie", QString("shroud_sid=%1").arg(m_sessionCookie).toUtf8());
     }
     QSslConfiguration cfg = QSslConfiguration::defaultConfiguration();
     cfg.setPeerVerifyMode(QSslSocket::VerifyNone);

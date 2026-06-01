@@ -38,13 +38,32 @@ public:
     void   setSocksProxy(const QString &hostPort);
     QString socksProxy() const { return m_socksProxy; }
 
-    // Live admin login. Posts username + password to the appropriate
-    // endpoint, stashes the returned session cookie, and reconnects the
-    // /ws/admin WebSocket so live events start flowing. callback gets
-    // (true, "") on success or (false, error_message).
-    void adminLogin(const QString &username, const QString &password,
+    // Admin auth. The relay's admin auth model is a 256-char hex
+    // fingerprint (minted at first-time setup) plus an optional
+    // password. POSTs to /api/v1/admin/fingerprint-login, captures
+    // the shroud_sid + shroud_csrf cookies. Callback fires with
+    // (true,"") on success or (false, error).
+    void adminLogin(const QString &fingerprintId, const QString &password,
                     std::function<void(bool, const QString &)> cb);
+
+    // First-time setup. Only succeeds when the admin table is empty.
+    // Server mints a fresh fingerprint and returns it; callback fires
+    // with (fingerprint_hex, error).
+    void adminFirstTimeSetup(
+        std::function<void(const QString &fp, const QString &err)> cb);
+
     void adminLogout(std::function<void(bool)> cb);
+
+    // Convenience — current X-CSRF-Token value, derived from the
+    // shroud_csrf cookie captured at login. POST/DELETE callers add
+    // this as a header.
+    QString csrfToken() const { return m_csrfToken; }
+    void    setCsrfToken(const QString &t);
+
+    // Persistent fingerprint storage so the operator doesn't have to
+    // paste the 256-char hex every launch.
+    QString savedFingerprint() const;
+    void    setSavedFingerprint(const QString &fp);
 
     // GET wrappers. Callback receives (parsed json, error string).
     void getJson(const QString &path,
@@ -80,6 +99,7 @@ private:
     QString m_sessionCookie;
     QString m_anthropicKey;
     QString m_socksProxy;
+    QString m_csrfToken;
 #ifdef SHROUD_ADMIN_HAS_WS
     QWebSocket m_ws;
 #endif

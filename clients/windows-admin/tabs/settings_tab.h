@@ -19,9 +19,10 @@ private:
     QLineEdit *m_relayUrl, *m_sessionCookie, *m_anthropicKey;
     QLineEdit *m_socksProxy;
     QLineEdit *m_diagKeyfile, *m_manifestKeyfile;
-    QLineEdit *m_loginUser, *m_loginPass;
-    QLabel *m_status;
+    QLineEdit   *m_fingerprint;
+    QLineEdit   *m_loginPass;
+    QLabel      *m_status;
     QPushButton *m_saveBtn, *m_testRelayBtn, *m_testAnthropicBtn;
-    QPushButton *m_loginBtn, *m_logoutBtn;
+    QPushButton *m_setupBtn, *m_loginBtn, *m_logoutBtn, *m_copyFpBtn;
 };
 #endif
