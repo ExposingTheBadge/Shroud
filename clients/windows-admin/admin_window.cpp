@@ -57,6 +57,13 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
     connect(m_client, &AdminClient::wsDisconnected, this, &AdminWindow::onWsDisconnected);
     connect(m_settings, &SettingsTab::relayUrlChanged, this, &AdminWindow::onRelayUrlChanged);
 
+    // When the operator picks "Ban user" from the Users tab context menu,
+    // jump to the Bans tab with the username pre-filled.
+    connect(m_users, &UsersTab::banUserRequested, this, [this](const QString &u) {
+        m_bans->prefillUsername(u);
+        m_tabs->setCurrentWidget(m_bans);
+    });
+
     // Auto-connect WS if we already have a session cookie.
     if (!m_client->adminSessionCookie().isEmpty()) {
         m_client->connectAdminWs();

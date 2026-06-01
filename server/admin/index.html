@@ -41,6 +41,7 @@
   <div class="tab" data-tab="audit"    onclick="goTab('audit')">Audit <span class="badge" id="auditBadge">—</span></div>
   <div class="tab" data-tab="activity" onclick="goTab('activity')">Activity</div>
   <div class="tab" data-tab="federation" onclick="goTab('federation')">Federation <span class="badge" id="fedBadge">—</span></div>
+  <div class="tab" data-tab="bans"       onclick="goTab('bans')">Bans <span class="badge" id="banCountPill">—</span></div>
 </div>
 
 <!-- ─── Overview ──────────────────────────────────────────────────── -->
@@ -342,6 +343,36 @@
       <div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;margin-bottom:4px">Anon pending</div><div id="fedAnonPending" style="font-size:22px;color:var(--text);font-weight:700">—</div><div style="color:var(--dim);font-size:10px">undelivered sealed messages</div></div>
       <div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;margin-bottom:4px">Diag pending</div><div id="fedDiagPending" style="font-size:22px;color:var(--text);font-weight:700">—</div><div style="color:var(--dim);font-size:10px">anonymous error reports awaiting drain</div></div>
     </div>
+  </div>
+</div>
+
+<!-- ─── Bans ──────────────────────────────────────────────────────── -->
+<div class="section" data-section="bans">
+  <div class="panel">
+    <div class="panel-hdr">Add ban
+      <div style="font-size:11px;color:var(--dim);font-weight:normal">Banning a username cascades to every linked HWID. Reason is shown to the user on next login attempt.</div>
+    </div>
+    <div style="padding:10px 14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <select id="banKindInput" style="padding:6px">
+        <option value="username">username</option>
+        <option value="hwid">hwid</option>
+        <option value="ip">ip</option>
+      </select>
+      <input id="banValueInput"  placeholder="username | hwid hex | IP"   style="flex:1;min-width:180px;padding:6px">
+      <input id="banReasonInput" placeholder="Reason shown to banned user (optional)" style="flex:2;min-width:240px;padding:6px">
+      <button onclick="addBanCustom()" style="background:#b00020;color:white">Add</button>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-hdr">Active bans <span class="pill" id="banCountPill2">—</span>
+      <div class="actions"><button onclick="loadBans()">Refresh</button></div>
+    </div>
+    <div class="body"><table>
+      <thead><tr>
+        <th>id</th><th>kind</th><th>value</th><th>reason</th><th>by</th><th>at</th><th>origin / actions</th>
+      </tr></thead>
+      <tbody id="banTable"></tbody>
+    </table></div>
   </div>
 </div>
 

@@ -217,6 +217,179 @@ function fetchTab(name) {
     case 'audit':    return fetchAudit();
     case 'activity': return fetchActivity();
     case 'federation': return loadFederation();
+    case 'bans':       return loadBans();
+  }
+}
+
+/* ─── Bans ────────────────────────────────────────────────────────── */
+async function banUserPrompt(username) {
+  const reason = window.prompt(
+    `Ban "${username}" (cascades to every linked hardware ID)?\n\n` +
+    `Optional reason — shown to the banned user on next login attempt. Leave empty for generic 'Account banned'.`,
+    ''
+  );
+  if (reason === null) return;  // cancelled
+  try {
+    const r = await fetch('/api/v1/admin/bans', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': getCookie('shroud_csrf') || ''
+      },
+      body: JSON.stringify({ kind: 'username', value: username, reason })
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      alert(`Ban failed: ${r.status} ${t}`);
+      return;
+    }
+    const d = await r.json();
+    const n = (d.hwids_banned || []).length;
+    toast(`Banned ${username} + ${n} hardware ID${n === 1 ? '' : 's'}`);
+    if (state.tab === 'bans') loadBans();
+  } catch (e) {
+    alert('Ban request failed: ' + e);
+  }
+}
+
+function userContextMenu(ev, username, userId) {
+  ev.preventDefault();
+  const existing = document.getElementById('userCtxMenu');
+  if (existing) existing.remove();
+  const m = document.createElement('div');
+  m.id = 'userCtxMenu';
+  m.style.cssText = 'position:fixed;z-index:9999;background:#1a1a1a;border:1px solid #444;' +
+    'padding:4px 0;min-width:200px;box-shadow:0 6px 18px rgba(0,0,0,.5)';
+  m.style.left = ev.clientX + 'px';
+  m.style.top  = ev.clientY + 'px';
+  const item = (label, fn, danger) => {
+    const i = document.createElement('div');
+    i.textContent = label;
+    i.style.cssText = 'padding:8px 14px;cursor:pointer;font-size:12px;' +
+      (danger ? 'color:#ff7f7f' : 'color:#e0e0e0');
+    i.onmouseover = () => { i.style.background = '#2a2a2a'; };
+    i.onmouseout  = () => { i.style.background = 'transparent'; };
+    i.onclick = () => { m.remove(); fn(); };
+    m.appendChild(i);
+  };
+  item('Open user',          () => openUser(userId));
+  item('Ban (cascades HWIDs)', () => banUserPrompt(username), true);
+  item('Delete user',        () => delUser(userId, username, 0), true);
+  document.body.appendChild(m);
+  const dismiss = () => { m.remove(); document.removeEventListener('click', dismiss); };
+  setTimeout(() => document.addEventListener('click', dismiss), 0);
+}
+
+async function loadBans() {
+  try {
+    const r = await fetch('/api/v1/admin/bans', { credentials: 'include' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    renderBans(d);
+  } catch (e) {
+    const t = document.getElementById('banTable');
+    if (t) t.innerHTML = `<tr><td colspan="7" class="empty">load failed: ${esc(String(e))}</td></tr>`;
+  }
+}
+
+function renderBans(d) {
+  const arr = d.bans || [];
+  const tbl = document.getElementById('banTable');
+  if (!tbl) return;
+  const pill = document.getElementById('banCountPill');
+  if (pill) pill.textContent = arr.length;
+  tbl.innerHTML = arr.map(b =>
+    '<tr>' +
+    '<td>' + b.id + '</td>' +
+    '<td>' + esc(b.kind) + '</td>' +
+    '<td>' + esc(b.value) + '</td>' +
+    '<td>' + esc(b.reason || '') + '</td>' +
+    '<td>' + esc(b.banned_by || '') + '</td>' +
+    '<td>' + esc(b.banned_at || '') + '</td>' +
+    '<td>' + esc(b.origin_user || '') + ' ' +
+      '<button class="tinybtn" onclick="liftBan(' + b.id + ')">Lift</button>' +
+      (b.origin_user ?
+        ' <button class="tinybtn" onclick="liftUserCascade(\'' + esc(b.origin_user) +
+          '\')">Lift cascade</button>' : '') +
+    '</td>' +
+    '</tr>'
+  ).join('') || '<tr><td colspan="7" class="empty">no bans</td></tr>';
+}
+
+async function liftBan(id) {
+  if (!confirm('Lift this single ban row?')) return;
+  try {
+    const r = await fetch('/api/v1/admin/bans/' + id, {
+      method: 'DELETE', credentials: 'include',
+      headers: { 'X-CSRF-Token': getCookie('shroud_csrf') || '' }
+    });
+    if (r.ok) { toast('Ban lifted'); loadBans(); }
+    else      { alert('Lift failed: ' + r.status); }
+  } catch (e) { alert('Lift failed: ' + e); }
+}
+
+async function liftUserCascade(username) {
+  if (!confirm(`Remove EVERY ban row tied to user '${username}' (including all HWIDs)?`)) return;
+  try {
+    const r = await fetch('/api/v1/admin/bans/lift-user', {
+      method: 'POST', credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': getCookie('shroud_csrf') || ''
+      },
+      body: JSON.stringify({ username })
+    });
+    if (r.ok) {
+      const d = await r.json();
+      toast(`Cascade lifted: ${d.deleted} row(s)`);
+      loadBans();
+    } else {
+      alert('Lift failed: ' + r.status);
+    }
+  } catch (e) { alert('Lift failed: ' + e); }
+}
+
+async function addBanCustom() {
+  const kind  = document.getElementById('banKindInput').value;
+  const value = document.getElementById('banValueInput').value.trim();
+  const reason = document.getElementById('banReasonInput').value.trim();
+  if (!value) { alert('Value required'); return; }
+  try {
+    const r = await fetch('/api/v1/admin/bans', {
+      method: 'POST', credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': getCookie('shroud_csrf') || ''
+      },
+      body: JSON.stringify({ kind, value, reason })
+    });
+    if (r.ok) {
+      document.getElementById('banValueInput').value  = '';
+      document.getElementById('banReasonInput').value = '';
+      toast('Ban added');
+      loadBans();
+    } else {
+      alert('Add failed: ' + r.status);
+    }
+  } catch (e) { alert('Add failed: ' + e); }
+}
+
+function getCookie(name) {
+  return document.cookie.split(';').map(s => s.trim())
+    .filter(s => s.startsWith(name + '='))
+    .map(s => s.substring(name.length + 1))[0] || '';
+}
+
+function toast(msg) {
+  // Minimal toast — if the page has a #toast element use that, else alert.
+  const t = document.getElementById('toast');
+  if (t) {
+    t.textContent = msg;
+    t.style.display = 'block';
+    setTimeout(() => { t.style.display = 'none'; }, 2500);
+  } else {
+    console.log('[toast]', msg);
   }
 }
 
@@ -416,13 +589,19 @@ function renderUsers(d) {
   const users = d.users || [];
   $('userCountPill').textContent = users.length;
   $('userTable').innerHTML = users.map(u =>
-    '<tr class="clickable" onclick="openUser(\'' + esc(u.user_id) + '\')">' +
+    '<tr class="clickable" oncontextmenu="userContextMenu(event,\'' +
+        esc(u.username) + '\',\'' + esc(u.user_id) + '\');return false"' +
+    ' onclick="openUser(\'' + esc(u.user_id) + '\')">' +
     '<td>' + esc(u.username) + '</td>' +
     '<td>' + esc(u.user_id.substring(0, 16)) + '</td>' +
     '<td>' + u.devices + '</td>' +
     '<td>' + esc(u.created) + '</td>' +
-    '<td><button class="tinybtn" onclick="event.stopPropagation();delUser(\'' +
-    esc(u.user_id) + '\',\'' + esc(u.username) + '\',' + u.devices + ')">X</button></td>' +
+    '<td>' +
+      '<button class="tinybtn" onclick="event.stopPropagation();banUserPrompt(\'' +
+          esc(u.username) + '\')">Ban</button> ' +
+      '<button class="tinybtn" onclick="event.stopPropagation();delUser(\'' +
+          esc(u.user_id) + '\',\'' + esc(u.username) + '\',' + u.devices + ')">X</button>' +
+    '</td>' +
     '</tr>'
   ).join('') || '<tr><td colspan="5" class="empty">no users</td></tr>';
 

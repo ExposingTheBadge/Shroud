@@ -7,6 +7,8 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QMessageBox>
+#include <QMenu>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QHeaderView>
@@ -39,6 +41,46 @@ UsersTab::UsersTab(AdminClient *client, QWidget *parent)
     connect(m_refreshBtn, &QPushButton::clicked, this, &UsersTab::refresh);
     connect(m_banBtn,     &QPushButton::clicked, this, &UsersTab::onBanSelected);
     connect(m_deleteBtn,  &QPushButton::clicked, this, &UsersTab::onDeleteSelected);
+    // Right-click context menu on a user row — quickest path to a ban.
+    m_table->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_table, &QTableWidget::customContextMenuRequested,
+            [this](const QPoint &pos) {
+        auto *item = m_table->itemAt(pos);
+        if (!item) return;
+        QString username = m_table->item(item->row(), 0)->text();
+        QMenu menu(this);
+        auto *banAct    = menu.addAction("Ban user (cascades HWIDs)…");
+        auto *deleteAct = menu.addAction("Delete user…");
+        auto *chosen    = menu.exec(m_table->viewport()->mapToGlobal(pos));
+        if (chosen == banAct) {
+            bool ok = false;
+            QString reason = QInputDialog::getText(
+                this, "Ban " + username,
+                "Reason (optional) — shown to the user on their next login attempt:",
+                QLineEdit::Normal, "", &ok);
+            if (!ok) return;
+            QJsonObject body;
+            body["kind"]   = "username";
+            body["value"]  = username;
+            body["reason"] = reason;
+            m_client->postJson("/api/v1/admin/bans", body,
+                [this, username](const QJsonDocument &d, const QString &err) {
+                    if (!err.isEmpty()) {
+                        QMessageBox::warning(this, "Ban failed", err);
+                        return;
+                    }
+                    int n = d.object().value("hwids_banned").toArray().size();
+                    QMessageBox::information(this, "Banned",
+                        QString("Banned %1 + %2 hardware ID(s).").arg(username).arg(n));
+                });
+            emit banUserRequested(username);  // also surface to BansTab
+        } else if (chosen == deleteAct) {
+            // Defer to existing button logic
+            m_table->selectRow(item->row());
+            onDeleteSelected();
+        }
+    });
+
     connect(m_search, &QLineEdit::textChanged, [this](const QString &s) {
         for (int r = 0; r < m_table->rowCount(); ++r) {
             bool hit = s.isEmpty();

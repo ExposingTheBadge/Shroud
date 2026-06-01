@@ -155,7 +155,18 @@ jobs:
           "sha=clients/windows/SHA256SUMS.txt" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "zipname=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      # ─── MSI build (best-effort) ──────────────────────────────────────
+      # The caphyon/advinst-github-action wants an Advanced Installer
+      # license file we don't have on the runner — without it the action
+      # exits with "Parse config ini file error" and the MSI build
+      # cannot run in CI. We mark these steps continue-on-error so the
+      # release still ships the signed exe + Qt DLLs (currently as a
+      # zip — to be replaced by a locally-built MSI uploaded by the
+      # operator). When the AI license path is sorted, drop the
+      # continue-on-error and the zip too.
       - name: Install Advanced Installer
+        id: advinst_install
+        continue-on-error: true
         uses: caphyon/advinst-github-action@v2.0
         with:
           advinst-version: "19.9"
@@ -163,6 +174,8 @@ jobs:
 
       - name: Build MSI installer
         id: msi
+        if: steps.advinst_install.outcome == 'success'
+        continue-on-error: true
         shell: pwsh
         run: |
           pwsh -File clients/windows/installer/build-msi.ps1 `
@@ -183,6 +196,8 @@ jobs:
           "msiname=$msiName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Sign MSI with Azure Artifact Signing
+        if: steps.msi.outcome == 'success'
+        continue-on-error: true
         uses: azure/trusted-signing-action@v0.5.1
         with:
           endpoint: ${{ env.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
@@ -196,6 +211,8 @@ jobs:
 
       - name: Compute MSI hash + extend SHA256SUMS
         id: msihash
+        if: steps.msi.outcome == 'success'
+        continue-on-error: true
         shell: pwsh
         working-directory: clients/windows
         run: |
@@ -232,6 +249,7 @@ jobs:
           $msiName = "${{ steps.msi.outputs.msiname }}"
           $zipName = "${{ steps.package.outputs.zipname }}"
           $repo    = "${{ github.repository }}"
+          $haveMsi = -not [string]::IsNullOrEmpty($msiName)
 
           $lines = @(
             "## Changes",
@@ -239,16 +257,20 @@ jobs:
             $commits,
             "",
             "### Windows",
-            "",
-            "Two install options. Both the **MSI installer** and the **``shroud.exe``** inside it are Authenticode-signed via Azure Artifact Signing — Windows shows **Verified publisher: Brent Gordon** at install time and on every launch.",
-            "",
-            "- **``$msiName``** _(recommended)_ — double-click to install. Adds Start Menu + Desktop shortcuts, registers in *Apps & Features* for clean uninstall, performs a Major Upgrade if an older version is present.",
-            "- **``$zipName``** — portable zip. Extract anywhere and run ``shroud.exe`` directly. No installer, no registry changes.",
-            "",
-            "Verify the SHA-256 of whichever file you download against ``SHA256SUMS.txt`` before installing.",
-            "",
-            "> Android APK and the threshold multisig manifest are added manually after this build per the project's reproducibility process — see [BUILD-REPRODUCIBILITY.md](https://github.com/$repo/blob/main/BUILD-REPRODUCIBILITY.md)."
+            ""
           )
+          if ($haveMsi) {
+            $lines += "Both the **MSI installer** and the **``shroud.exe``** inside it are Authenticode-signed via Azure Artifact Signing — Windows shows **Verified publisher: Brent Gordon** at install time and on every launch."
+            $lines += ""
+            $lines += "- **``$msiName``** _(recommended)_ — double-click to install. Adds Start Menu + Desktop shortcuts, registers in *Apps & Features* for clean uninstall, performs a Major Upgrade if an older version is present."
+            $lines += "- **``$zipName``** — portable; extract anywhere and run ``shroud.exe`` directly. No installer, no registry changes."
+          } else {
+            $lines += "Download **``$zipName``** and extract. ``shroud.exe`` is Authenticode-signed via Azure Artifact Signing — Windows shows **Verified publisher: Brent Gordon** on every launch."
+          }
+          $lines += ""
+          $lines += "Verify the SHA-256 of whichever file you download against ``SHA256SUMS.txt`` before installing."
+          $lines += ""
+          $lines += "> Android APK and the threshold multisig manifest are added manually after this build per the project's reproducibility process — see [BUILD-REPRODUCIBILITY.md](https://github.com/$repo/blob/main/BUILD-REPRODUCIBILITY.md)."
           if ($prevTag) {
             $lines += ""
             $lines += "**Full Changelog:** https://github.com/$repo/compare/$prevTag...$tag"
@@ -278,7 +300,12 @@ jobs:
           tag_name: ${{ steps.bump.outputs.tag }}
           name: SHROUD ${{ steps.bump.outputs.tag }}
           body: ${{ steps.notes.outputs.body }}
+          # MSI is conditional — see the MSI build block. When the
+          # Advanced Installer step fails (no license on the runner),
+          # steps.msi.outputs.msi is empty and softprops just skips the
+          # missing file rather than failing.
           files: |
             ${{ steps.package.outputs.zip }}
             ${{ steps.msi.outputs.msi }}
             ${{ steps.package.outputs.sha }}
+          fail_on_unmatched_files: false
