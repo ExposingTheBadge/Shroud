@@ -240,7 +240,8 @@ HttpResponse* network_get(const char *path) {
     if (!hConnect) return NULL;
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", urlComp.lpszUrlPath,
-        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
     allow_self_signed(hRequest);
 
@@ -290,7 +291,8 @@ HttpResponse* network_upload_file(const char *path, const BYTE *data, DWORD data
     if (!hConnect) return NULL;
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", urlComp.lpszUrlPath,
-        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
     allow_self_signed(hRequest);
 
@@ -348,7 +350,8 @@ HttpResponse* network_download_file(const char *path, const char *device_id,
     if (!hConnect) return NULL;
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", urlComp.lpszUrlPath,
-        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
     allow_self_signed(hRequest);
 
