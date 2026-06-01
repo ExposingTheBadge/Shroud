@@ -10,6 +10,7 @@
 #include <QJsonDocument>
 #include <QShortcut>
 #include <QKeySequence>
+#include <QScrollBar>
 
 static QString escapeHtml(const QString &s) {
     QString out;

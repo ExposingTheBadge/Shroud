@@ -9,12 +9,15 @@
 #include <QUrl>
 #include <QtNetwork/QNetworkAccessManager>
 #include <QtNetwork/QNetworkReply>
-#include <QtWebSockets/QWebSocket>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QSettings>
 #include <functional>
+
+#ifdef SHROUD_ADMIN_HAS_WS
+#include <QtWebSockets/QWebSocket>
+#endif
 
 class AdminClient : public QObject {
     Q_OBJECT
@@ -77,7 +80,9 @@ private:
     QString m_sessionCookie;
     QString m_anthropicKey;
     QString m_socksProxy;
+#ifdef SHROUD_ADMIN_HAS_WS
     QWebSocket m_ws;
+#endif
     bool m_acceptSelfSigned = true;
 
     QNetworkRequest buildReq(const QString &fullUrl, const QString &contentType = "");

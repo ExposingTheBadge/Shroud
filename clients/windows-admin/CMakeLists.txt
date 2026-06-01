@@ -13,7 +13,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Network WebSockets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Network)
+find_package(Qt6 COMPONENTS WebSockets QUIET)
+if(Qt6WebSockets_FOUND)
+    add_compile_definitions(SHROUD_ADMIN_HAS_WS=1)
+endif()
 
 set(ADMIN_SOURCES
     main.cpp
@@ -76,9 +80,12 @@ target_include_directories(shroud-admin PRIVATE
 )
 
 target_link_libraries(shroud-admin PRIVATE
-    Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Network Qt6::WebSockets
+    Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Network
     crypt32
 )
+if(Qt6WebSockets_FOUND)
+    target_link_libraries(shroud-admin PRIVATE Qt6::WebSockets)
+endif()
 
 target_compile_definitions(shroud-admin PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN

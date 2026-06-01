@@ -12,6 +12,7 @@ AdminClient::AdminClient(QObject *parent) : QObject(parent) {
     m_socksProxy     = s.value("socks_proxy", "").toString();
     applyProxy();
 
+#ifdef SHROUD_ADMIN_HAS_WS
     connect(&m_ws, &QWebSocket::connected,         this, &AdminClient::onWsConnected);
     connect(&m_ws, &QWebSocket::disconnected,      this, &AdminClient::onWsDisconnected);
     connect(&m_ws, &QWebSocket::textMessageReceived, this, &AdminClient::onWsTextMessage);
@@ -19,6 +20,7 @@ AdminClient::AdminClient(QObject *parent) : QObject(parent) {
             this, [this](const QList<QSslError> &) {
                 if (m_acceptSelfSigned) m_ws.ignoreSslErrors();
             });
+#endif
 }
 
 void AdminClient::setSocksProxy(const QString &hostPort) {
@@ -42,7 +44,9 @@ void AdminClient::applyProxy() {
         }
     }
     m_nam.setProxy(proxy);
+#ifdef SHROUD_ADMIN_HAS_WS
     m_ws.setProxy(proxy);
+#endif
 }
 
 void AdminClient::adminLogin(const QString &username, const QString &password,
@@ -157,6 +161,7 @@ void AdminClient::deleteRequest(const QString &path,
 }
 
 void AdminClient::connectAdminWs() {
+#ifdef SHROUD_ADMIN_HAS_WS
     if (m_ws.state() == QAbstractSocket::ConnectedState) return;
     QString ws = m_relayUrl;
     if (ws.startsWith("https://")) ws.replace(0, 8, "wss://");
@@ -170,10 +175,13 @@ void AdminClient::connectAdminWs() {
     cfg.setPeerVerifyMode(QSslSocket::VerifyNone);
     m_ws.setSslConfiguration(cfg);
     m_ws.open(req);
+#endif
 }
 
 void AdminClient::disconnectAdminWs() {
+#ifdef SHROUD_ADMIN_HAS_WS
     m_ws.close();
+#endif
 }
 
 void AdminClient::onWsConnected()    { emit wsConnected(); }
