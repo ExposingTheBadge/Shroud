@@ -1019,6 +1019,21 @@ private:
         m_statusBar->setStyleSheet("color: #cc8800; font-size: 11px; font-weight: bold;");
         cl->addWidget(m_statusBar);
 
+        /* Always-visible relay endpoint — so the operator (or user
+         * reporting a bug) can tell at a glance which relay this
+         * client is talking to. SERVER_HOST/PORT/USE_TLS are baked at
+         * build time today; the manifest pin work is the path to
+         * making this user-switchable later. */
+        QString relayDisplay = QString("relay: %1://%2:%3")
+            .arg(SERVER_USE_TLS ? "https" : "http")
+            .arg(QString::fromWCharArray(SERVER_HOST))
+            .arg(SERVER_PORT);
+        QLabel *m_relayLbl = new QLabel(relayDisplay);
+        m_relayLbl->setStyleSheet("color: #888; font-size: 10px; font-family: Consolas, monospace;");
+        m_relayLbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        m_relayLbl->setToolTip("Set at build time. Future versions will switch via the operator manifest pin.");
+        cl->addWidget(m_relayLbl);
+
         /* Chat log — QTextBrowser so we can click inline images. */
         m_chatLog = new QTextBrowser;
         m_chatLog->setReadOnly(true);
