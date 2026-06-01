@@ -1,0 +1,4 @@
+out/
+*.msi
+*.msi.sha256
+cache/

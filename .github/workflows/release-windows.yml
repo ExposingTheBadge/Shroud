@@ -128,12 +128,62 @@ jobs:
           $zipName = "SHROUD-v$ver-win64.zip"
           Compress-Archive -Path "dist/*" -DestinationPath $zipName -Force
 
-          $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $zipName" | Set-Content "SHA256SUMS.txt" -NoNewline
+          $zipHash = (Get-FileHash $zipName -Algorithm SHA256).Hash.ToLower()
+          "$zipHash  $zipName" | Set-Content "SHA256SUMS.txt" -NoNewline
 
           "zip=clients/windows/$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "sha=clients/windows/SHA256SUMS.txt" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "zipname=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Install Advanced Installer
+        uses: caphyon/advinst-github-action@v2.0
+        with:
+          advinst-version: "19.9"
+          advinst-enable-automation: "true"
+
+      - name: Build MSI installer
+        id: msi
+        shell: pwsh
+        run: |
+          pwsh -File clients/windows/installer/build-msi.ps1 `
+            -DistDir clients/windows/dist `
+            -OutDir clients/windows/installer/out `
+            -Version "${{ steps.bump.outputs.version }}"
+
+          $ver = "${{ steps.bump.outputs.version }}"
+          $msiName = "SHROUD-v$ver-win64.msi"
+          $msiPath = Get-ChildItem -Path clients/windows/installer/out -Recurse -Filter $msiName | Select-Object -First 1
+          if (-not $msiPath) { throw "MSI not produced" }
+
+          # Stage MSI next to the zip so Azure signing folder filter picks it up
+          $stagedMsi = Join-Path "clients/windows/dist" $msiName
+          Copy-Item $msiPath.FullName $stagedMsi -Force
+
+          "msi=clients/windows/dist/$msiName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "msiname=$msiName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Sign MSI with Azure Artifact Signing
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          endpoint: ${{ env.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ env.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_ARTIFACT_SIGNING_CERT_PROFILE }}
+          files-folder: clients/windows/dist
+          files-folder-filter: msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Compute MSI hash + extend SHA256SUMS
+        id: msihash
+        shell: pwsh
+        working-directory: clients/windows
+        run: |
+          $msiName = "${{ steps.msi.outputs.msiname }}"
+          $msiPath = Join-Path "dist" $msiName
+          $msiHash = (Get-FileHash $msiPath -Algorithm SHA256).Hash.ToLower()
+          Add-Content -Path "SHA256SUMS.txt" -Value "`n$msiHash  $msiName" -NoNewline
+          "msihash=$msiHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Build release notes
         id: notes
@@ -156,9 +206,13 @@ jobs:
           $commits
 
           ### Windows
-          Download ``${{ steps.package.outputs.zipname }}`` below and extract. ``shroud.exe`` is Authenticode-signed; Windows shows **Verified publisher: Brent Gordon**.
 
-          Verify the zip hash against ``SHA256SUMS.txt`` before extracting.
+          Two install options — both Authenticode-signed; Windows shows **Verified publisher: Brent Gordon**:
+
+          - **``${{ steps.msi.outputs.msiname }}``** — recommended. Double-click to install (Start Menu + Desktop shortcuts, proper uninstall via *Apps & Features*).
+          - **``${{ steps.package.outputs.zipname }}``** — portable zip. Extract and run ``shroud.exe`` directly.
+
+          Verify the hash of whichever file you download against ``SHA256SUMS.txt`` before installing.
 
           > Android APK and the threshold multisig manifest are added manually after this build per the project's reproducibility process — see [BUILD-REPRODUCIBILITY.md](https://github.com/${{ github.repository }}/blob/main/BUILD-REPRODUCIBILITY.md).
 
@@ -192,4 +246,5 @@ jobs:
           body: ${{ steps.notes.outputs.body }}
           files: |
             ${{ steps.package.outputs.zip }}
+            ${{ steps.msi.outputs.msi }}
             ${{ steps.package.outputs.sha }}

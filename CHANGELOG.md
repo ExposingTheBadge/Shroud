@@ -1,5 +1,17 @@
 # SHROUD Changelog
 
+## Unreleased
+
+- **Windows MSI installer.** Releases now ship `SHROUD-v<ver>-win64.msi`
+  alongside the existing zip. Built with Advanced Installer 19.x; signed
+  with the same Azure Artifact Signing cert as `shroud.exe`. Installs to
+  `Program Files\SHROUD\`, registers in *Apps & Features*, supports
+  Major Upgrade. CI integration in
+  [`.github/workflows/release-windows.yml`](.github/workflows/release-windows.yml);
+  build script + docs at
+  [`clients/windows/installer/`](clients/windows/installer/) and
+  [`docs/windows-installer.md`](docs/windows-installer.md).
+
 ## v2.5.x — Anonymous routing protocol + 8 platform clients
 
 The shape of the project changed substantially. Headline additions:

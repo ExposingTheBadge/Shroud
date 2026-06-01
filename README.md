@@ -276,7 +276,7 @@ Every message uses a one-shot key derived from a chain (the Double Ratchet). If 
 
 Every release ships with:
 
-1. **Authenticode signature** on `shroud.exe` from Microsoft Azure Artifact Signing (publisher: Brent Gordon). Verified by Windows on every launch.
+1. **Authenticode signature** on both the Windows installer (`SHROUD-v<ver>-win64.msi`) and the portable EXE inside the zip — Microsoft Azure Artifact Signing, publisher: Brent Gordon. Verified by Windows on every launch and at install time. See [`docs/windows-installer.md`](docs/windows-installer.md).
 2. **SHA-256 checksums** of every distribution artifact in `SHA256SUMS.txt`.
 3. **Hybrid identity signature** (`sign_manifest.py`) — single key, proves "this came from the SHROUD identity".
 4. **Threshold multi-signature** (`multisig.py`) — M-of-N independent signers attest the manifest. Compromise of fewer than M signing keys cannot forge a release. Full protocol in [`docs/multisig-releases.md`](docs/multisig-releases.md).
