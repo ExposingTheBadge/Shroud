@@ -420,16 +420,23 @@ async def lifespan(ap):
     sweep_task = asyncio.create_task(_expiry_sweeper())
     stats_task = asyncio.create_task(_stats_flusher())
     fed_task = None
+    fed_sync_task = None
     if os.environ.get("SHROUD_FEDERATION", "0") == "1":
         # Late import so we don't pay for httpx unless federation is on.
         fed_task = asyncio.create_task(_federation_loop())
         print("[SHROUD] Federation gossip loop started")
+        # Initial state-event sync — fire and forget. Runs once shortly
+        # after boot and again every hour to backfill anything we
+        # missed while down.
+        fed_sync_task = asyncio.create_task(_federation_state_sync_loop())
     try:
         yield
     finally:
         tasks = [sweep_task, stats_task]
         if fed_task is not None:
             tasks.append(fed_task)
+        if fed_sync_task is not None:
+            tasks.append(fed_sync_task)
         for t in tasks:
             t.cancel()
             try: await t
@@ -1725,6 +1732,13 @@ async def encrypted_auth_v2(request: Request):
         db.execute("INSERT INTO users (id, username, password_hash, password_salt) VALUES (?,?,?,?)",
                    (user_id, username, key.hex(), salt))
         db.commit()
+        _federation_outbox_state_event("user.created", {
+            "user_id":           user_id,
+            "username":          username,
+            "password_hash":     key.hex(),
+            "password_salt_hex": salt.hex(),
+            "created_at":        str(datetime.utcnow()),
+        })
     else:
         user = db.execute("SELECT id, password_hash, password_salt FROM users WHERE username=?",
                           (username,)).fetchone()
@@ -1942,6 +1956,11 @@ async def change_password(req: ChangePasswordRequest):
         (new_key.hex(), new_salt, user[0])
     )
     db.commit()
+    _federation_outbox_state_event("password.changed", {
+        "user_id":           user[0],
+        "password_hash":     new_key.hex(),
+        "password_salt_hex": new_salt.hex(),
+    })
     return {"changed": True, "username": req.username}
 
 # ── Encrypted Auth (no plaintext passwords ever) ────────────────────
@@ -1983,6 +2002,14 @@ def _reuse_or_create_device(user_id: str, existing_did: str, device_name: str,
         (new_id, user_id, device_name, platform, pub_key_bytes, "")
     )
     db.commit()
+    _federation_outbox_state_event("device.added", {
+        "device_id":      new_id,
+        "user_id":        user_id,
+        "device_name":    device_name,
+        "platform":       platform,
+        "public_key_hex": pub_key_bytes.hex(),
+        "hwid":           "",
+    })
     return new_id
 
 
@@ -2027,6 +2054,13 @@ async def encrypted_auth(request: Request):
         db.execute("INSERT INTO users (id, username, password_hash, password_salt) VALUES (?,?,?,?)",
                    (user_id, username, key.hex(), salt))
         db.commit()
+        _federation_outbox_state_event("user.created", {
+            "user_id":           user_id,
+            "username":          username,
+            "password_hash":     key.hex(),
+            "password_salt_hex": salt.hex(),
+            "created_at":        str(datetime.utcnow()),
+        })
     else:
         user = db.execute("SELECT id, password_hash, password_salt FROM users WHERE username=?",
                           (username,)).fetchone()
@@ -2082,6 +2116,13 @@ async def register_user(req: RegisterUserRequest):
         (user_id, norm, key.hex(), salt)
     )
     db.commit()
+    _federation_outbox_state_event("user.created", {
+        "user_id":           user_id,
+        "username":          norm,
+        "password_hash":     key.hex(),
+        "password_salt_hex": salt.hex(),
+        "created_at":        str(datetime.utcnow()),
+    })
     return {"user_id": user_id, "username": norm, "registered": True}
 
 # ── Device Registration ──────────────────────────────────────────────
@@ -2161,6 +2202,14 @@ async def register_device(req: RegisterDeviceRequest):
             "INSERT INTO devices (id, user_id, device_name, platform, public_key, hwid) VALUES (?, ?, ?, ?, ?, ?)",
             (device_id, user[0], req.device_name, req.platform, pub_key_bytes, req.hwid)
         )
+        _federation_outbox_state_event("device.added", {
+            "device_id":      device_id,
+            "user_id":        user[0],
+            "device_name":    req.device_name,
+            "platform":       req.platform,
+            "public_key_hex": pub_key_bytes.hex(),
+            "hwid":           req.hwid or "",
+        })
     db.commit()
     print(f"[DEVICE REG] SUCCESS: {req.username} device={device_id} platform={req.platform}")
 
@@ -2618,6 +2667,23 @@ def _ensure_federation_schema() -> None:
             first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_fed_seen_first ON federation_seen_ids(first_seen);
+        -- v2.6.x: state-event mirroring. Every relay-affecting write
+        -- (user registered, device added, ban added/lifted, setting
+        -- changed) is recorded as a state event and gossipped to every
+        -- peer. Peers dedup by event_id, apply locally, and re-broadcast
+        -- (transitive flood). After enough propagation time, every
+        -- relay's DB has the same logical state — any one going down
+        -- doesn't lose data. Initial sync on relay-start pulls the full
+        -- history from a peer.
+        CREATE TABLE IF NOT EXISTS federation_state_events (
+            event_id    TEXT PRIMARY KEY,
+            origin_ts   INTEGER NOT NULL,
+            kind        TEXT NOT NULL,
+            payload     TEXT NOT NULL,
+            received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_fse_kind ON federation_state_events(kind);
+        CREATE INDEX IF NOT EXISTS idx_fse_ts   ON federation_state_events(origin_ts);
         """
     )
     db.commit()
@@ -2660,6 +2726,137 @@ def _federation_outbox_broadcast(msg_id: str, routing_tag: bytes,
             })
 
 
+# ── State-event mirroring ────────────────────────────────────────────
+#
+# Anon messages gossip via _federation_outbox_broadcast/delete above.
+# State events use the same outbox + loop but a different path
+# (/api/v1/federation/state-event) so we can have orthogonal retry
+# semantics later. Each event has a deterministic event_id, so the
+# transitive flood deduplicates correctly even if every peer
+# re-broadcasts the same event to every other peer.
+
+def _state_event_id(kind: str, payload: dict, ts: int) -> str:
+    """Deterministic ID so the same event from any path dedups correctly.
+    SHA-256 over a canonical JSON serialization."""
+    body = json.dumps({"k": kind, "ts": ts, "p": payload},
+                      sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(body).hexdigest()
+
+
+def _seen_state_event(event_id: str) -> bool:
+    row = db.execute(
+        "SELECT 1 FROM federation_state_events WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _record_state_event(event_id: str, kind: str, payload: dict, ts: int) -> None:
+    db.execute(
+        "INSERT OR IGNORE INTO federation_state_events "
+        "(event_id, origin_ts, kind, payload) VALUES (?,?,?,?)",
+        (event_id, ts, kind, json.dumps(payload, sort_keys=True, separators=(",", ":"))),
+    )
+    db.commit()
+
+
+def _apply_state_event(kind: str, payload: dict) -> None:
+    """Apply a state event to this relay's local DB. Idempotent — the
+    INSERT OR IGNORE on event_id at the broadcast layer means we
+    apply each event at most once per relay. Within apply, every
+    write uses ON CONFLICT semantics so a replay is harmless."""
+    try:
+        if kind == "user.created":
+            db.execute(
+                "INSERT OR IGNORE INTO users "
+                "(id, username, password_hash, password_salt, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (payload["user_id"], payload["username"],
+                 payload["password_hash"], bytes.fromhex(payload["password_salt_hex"]),
+                 payload.get("created_at") or str(datetime.utcnow())),
+            )
+        elif kind == "device.added":
+            db.execute(
+                "INSERT OR IGNORE INTO devices "
+                "(id, user_id, device_name, platform, public_key, hwid) "
+                "VALUES (?,?,?,?,?,?)",
+                (payload["device_id"], payload["user_id"],
+                 payload.get("device_name", ""), payload.get("platform", ""),
+                 bytes.fromhex(payload["public_key_hex"]),
+                 payload.get("hwid", "")),
+            )
+        elif kind == "device.removed":
+            db.execute("DELETE FROM devices WHERE id = ?", (payload["device_id"],))
+        elif kind == "password.changed":
+            db.execute(
+                "UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?",
+                (payload["password_hash"], bytes.fromhex(payload["password_salt_hex"]),
+                 payload["user_id"]),
+            )
+        elif kind == "ban.added":
+            db.execute(
+                "INSERT OR IGNORE INTO bans "
+                "(kind, value, reason, banned_by, origin_user) VALUES (?,?,?,?,?)",
+                (payload["kind"], payload["value"], payload.get("reason", ""),
+                 payload.get("banned_by", ""), payload.get("origin_user", "")),
+            )
+        elif kind == "ban.removed":
+            db.execute(
+                "DELETE FROM bans WHERE kind = ? AND value = ?",
+                (payload["kind"], payload["value"]),
+            )
+        elif kind == "setting.changed":
+            db.execute(
+                "INSERT INTO server_settings (key, value, updated_at) "
+                "VALUES (?,?,datetime('now')) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')",
+                (payload["key"], payload["value"]),
+            )
+        else:
+            print(f"[FED] unknown state-event kind: {kind}")
+            return
+        db.commit()
+    except Exception as e:
+        print(f"[FED] apply {kind} failed: {e}")
+
+
+def _federation_outbox_state_event(kind: str, payload: dict,
+                                   event_id: str | None = None,
+                                   ts: int | None = None) -> None:
+    """Record + broadcast a state event. Safe to call even when
+    federation is disabled — the local row is still written so a
+    later operator who enables federation has the full history to
+    replay from.
+
+    For locally-originated events, callers pass kind+payload only;
+    we synthesize event_id and ts. For peer-relayed events, callers
+    pass the existing event_id+ts unchanged so transitive flood
+    dedups correctly."""
+    if ts is None:
+        ts = int(time.time())
+    if event_id is None:
+        event_id = _state_event_id(kind, payload, ts)
+    if _seen_state_event(event_id):
+        return
+    _record_state_event(event_id, kind, payload, ts)
+    if not FEDERATION_ENABLED:
+        return
+    peers = _federation_active_peers()
+    with FEDERATION_OUTBOX_LOCK:
+        for p in peers:
+            FEDERATION_OUTBOX.append({
+                "kind": "state-event",
+                "peer": p["endpoint"],
+                "body": {
+                    "type":      "shroud.fed.state-event",
+                    "event_id":  event_id,
+                    "ts":        ts,
+                    "event_kind": kind,
+                    "payload":   payload,
+                },
+            })
+
+
 def _federation_outbox_delete(msg_id: str) -> None:
     if not FEDERATION_ENABLED:
         return
@@ -2676,6 +2873,56 @@ def _federation_outbox_delete(msg_id: str) -> None:
                     "message_id": msg_id,
                 },
             })
+
+
+async def _federation_state_sync_loop() -> None:
+    """Pull state events from every peer at startup + every hour. Asks
+    each peer for events newer than the latest origin_ts we already
+    have, applies anything we don't already have on file, re-broadcasts
+    so OTHER peers eventually converge.
+
+    This is the recovery mechanism if a relay is offline during gossip:
+    when it comes back, it catches up on everything it missed."""
+    import httpx
+    # Give the gossip loop a moment to set up.
+    await asyncio.sleep(5)
+    while True:
+        try:
+            peers = _federation_active_peers()
+            # Anchor on the latest event we already have.
+            row = db.execute(
+                "SELECT COALESCE(MAX(origin_ts), 0) FROM federation_state_events"
+            ).fetchone()
+            since_ts = int(row[0]) if row and row[0] is not None else 0
+            applied_total = 0
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                for p in peers:
+                    try:
+                        r = await client.get(
+                            p["endpoint"].rstrip("/")
+                            + f"/api/v1/federation/state-events/since?since_ts={since_ts}&limit=2000"
+                        )
+                        if r.status_code != 200:
+                            continue
+                        body = r.json()
+                        for ev in body.get("events", []):
+                            if _seen_state_event(ev["event_id"]):
+                                continue
+                            _apply_state_event(ev["event_kind"], ev["payload"])
+                            _federation_outbox_state_event(
+                                ev["event_kind"], ev["payload"],
+                                event_id=ev["event_id"], ts=ev["ts"],
+                            )
+                            applied_total += 1
+                    except Exception:
+                        continue
+            if applied_total:
+                print(f"[SHROUD] Federation state-sync: applied {applied_total} new event(s)")
+        except Exception as e:
+            print(f"[SHROUD] Federation state-sync error: {e}")
+        # Re-sync every hour. Gossip handles the live path; this is the
+        # safety net for events that landed while we were offline.
+        await asyncio.sleep(3600)
 
 
 async def _federation_loop() -> None:
@@ -2695,11 +2942,12 @@ async def _federation_loop() -> None:
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
             for item in batch:
                 try:
-                    path = (
-                        "/api/v1/federation/broadcast"
-                        if item["kind"] == "broadcast"
-                        else "/api/v1/federation/delete"
-                    )
+                    if item["kind"] == "broadcast":
+                        path = "/api/v1/federation/broadcast"
+                    elif item["kind"] == "state-event":
+                        path = "/api/v1/federation/state-event"
+                    else:
+                        path = "/api/v1/federation/delete"
                     await client.post(item["peer"].rstrip("/") + path, json=item["body"])
                 except Exception:
                     # Re-queue once, then drop on second failure.
@@ -2822,6 +3070,58 @@ async def federation_delete(req: FedDeleteIn):
     db.execute("DELETE FROM anon_messages WHERE id = ?", (req.message_id,))
     db.commit()
     return {"deleted": True}
+
+
+class FedStateEventIn(BaseModel):
+    type:       str
+    event_id:   str
+    ts:         int
+    event_kind: str
+    payload:    dict
+
+
+@app.post("/api/v1/federation/state-event")
+async def federation_state_event(req: FedStateEventIn):
+    """Receive a state-event from a peer (user.created, ban.added,
+    setting.changed, etc.). Dedup by event_id, apply locally, then
+    re-broadcast to OUR peers so the event floods across the whole
+    federation regardless of which relay originated it."""
+    if req.type != "shroud.fed.state-event":
+        raise HTTPException(400, "wrong message type")
+    if _seen_state_event(req.event_id):
+        return {"accepted": False, "reason": "duplicate"}
+    _apply_state_event(req.event_kind, req.payload)
+    # _federation_outbox_state_event records the event row AND queues
+    # the re-broadcast. We pass the original event_id+ts so the flood
+    # converges everywhere on the same canonical row.
+    _federation_outbox_state_event(req.event_kind, req.payload,
+                                   event_id=req.event_id, ts=req.ts)
+    return {"accepted": True}
+
+
+@app.get("/api/v1/federation/state-events/since")
+async def federation_state_events_since(since_ts: int = 0, limit: int = 1000):
+    """Bulk-export endpoint — a peer joining (or recovering from
+    extended downtime) GETs this to replay everything it missed.
+    Returns up to `limit` events ordered by origin_ts. The receiver
+    feeds each entry into POST /federation/state-event."""
+    rows = db.execute(
+        "SELECT event_id, origin_ts, kind, payload FROM federation_state_events "
+        "WHERE origin_ts > ? ORDER BY origin_ts ASC LIMIT ?",
+        (since_ts, max(1, min(limit, 5000))),
+    ).fetchall()
+    return {
+        "count": len(rows),
+        "events": [
+            {
+                "event_id":   r[0],
+                "ts":         r[1],
+                "event_kind": r[2],
+                "payload":    json.loads(r[3]),
+            }
+            for r in rows
+        ],
+    }
 
 
 # ── Anonymous diagnostics reporting ──────────────────────────────────
@@ -3561,6 +3861,15 @@ def setting_set(key: str, value: str):
         (key, value)
     )
     db.commit()
+    # Per-user transient counters (e.g. srp_fail:<uid>) shouldn't bloat
+    # the federation outbox or leak per-account metadata across relays.
+    # Only gossip the operator-set toggles.
+    _GOSSIP_SETTINGS = (
+        "registration_enabled", "maintenance_mode", "onion_only",
+    )
+    if key in _GOSSIP_SETTINGS:
+        _federation_outbox_state_event("setting.changed",
+                                       {"key": key, "value": value})
 
 def audit_admin(actor: str, action: str, target: str = "", detail: str = ""):
     actor_t  = actor[:64]
@@ -3916,12 +4225,20 @@ def _ban_username_and_hardware(username: str, reason: str, banned_by: str) -> di
         "VALUES (?,?,?,?,?)",
         ("username", norm, reason, banned_by, norm),
     )
+    _federation_outbox_state_event("ban.added", {
+        "kind": "username", "value": norm, "reason": reason,
+        "banned_by": banned_by, "origin_user": norm,
+    })
     for h in affected_hwids:
         db.execute(
             "INSERT OR IGNORE INTO bans (kind, value, reason, banned_by, origin_user) "
             "VALUES (?,?,?,?,?)",
             ("hwid", h, reason, banned_by, norm),
         )
+        _federation_outbox_state_event("ban.added", {
+            "kind": "hwid", "value": h, "reason": reason,
+            "banned_by": banned_by, "origin_user": norm,
+        })
     db.commit()
     return {
         "username": norm,
@@ -3978,6 +4295,10 @@ async def admin_bans_add(request: Request, session=Depends(require_admin)):
             (kind, value, reason, banned_by),
         )
         db.commit()
+        _federation_outbox_state_event("ban.added", {
+            "kind": kind, "value": value, "reason": reason,
+            "banned_by": banned_by, "origin_user": "",
+        })
         audit_log(banned_by, "BAN_ADD", f"{kind}={value[:32]} reason={reason[:80]}")
         return {"ok": True, "kind": kind, "value": value}
     else:
@@ -3992,6 +4313,9 @@ async def admin_bans_remove(ban_id: int, session=Depends(require_admin)):
         raise HTTPException(404, "ban not found")
     db.execute("DELETE FROM bans WHERE id=?", (ban_id,))
     db.commit()
+    _federation_outbox_state_event("ban.removed", {
+        "kind": row[0], "value": row[1],
+    })
     banned_by = session.get("admin_id", "") if isinstance(session, dict) else str(session)
     audit_log(banned_by, "BAN_REMOVE", f"{row[0]}={row[1][:32]}")
     return {"ok": True, "id": ban_id}
@@ -4006,11 +4330,20 @@ async def admin_bans_lift_user(request: Request, session=Depends(require_admin))
     username = norm_user(body.get("username", ""))
     if not username:
         raise HTTPException(400, "username is required")
+    # Capture the affected rows BEFORE deleting so we can gossip each one
+    # to peers; otherwise peers would only lift their own copy that
+    # happens to share kind+value, missing the origin_user index.
+    rows = db.execute(
+        "SELECT kind, value FROM bans WHERE origin_user=? OR (kind='username' AND value=?)",
+        (username, username),
+    ).fetchall()
     deleted = db.execute(
         "DELETE FROM bans WHERE origin_user=? OR (kind='username' AND value=?)",
         (username, username),
     ).rowcount
     db.commit()
+    for kind, value in rows:
+        _federation_outbox_state_event("ban.removed", {"kind": kind, "value": value})
     banned_by = session.get("admin_id", "") if isinstance(session, dict) else str(session)
     audit_log(banned_by, "BAN_LIFT_USER", f"username={username} rows={deleted}")
     return {"ok": True, "deleted": deleted, "username": username}
