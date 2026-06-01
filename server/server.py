@@ -3830,6 +3830,35 @@ app.add_middleware(TelemetryMiddleware)
 
 # Onion-only mode — when enabled, refuse any request whose Host header is
 # not a .onion address. Admin paths are exempt so the operator can recover.
+#
+# Endpoints exempted from onion_only:
+#   /admin/*           — admin UI (operator recovery)
+#   /api/v1/admin/*    — admin REST
+#   /health            — load-balancer / monitoring probe
+#   /api/v1/relay-stats        — federation-visible operational telemetry.
+#                                Peers MUST be able to poll each other for
+#                                health regardless of which transport
+#                                exposes them; this is what makes the
+#                                /api/v1/admin/federation dashboard show
+#                                anything for cross-region peers when one
+#                                relay is onion-only and the other isn't.
+#   /api/v1/federation/*       — peer-to-peer gossip + state-event sync.
+#                                Same reason as relay-stats.
+#   /api/v1/error-codes        — public error-code catalog so clients can
+#                                always render an error code even if their
+#                                preferred transport is clearnet.
+#   /api/v1/operator-manifest  — signed manifest must reachable for
+#                                bootstrap; the signature is what clients
+#                                trust, not the transport.
+#   /api/v1/version            — update-check pings.
+_ONION_BYPASS_EXACT = (
+    "/health", "/api/v1/relay-stats", "/api/v1/error-codes",
+    "/api/v1/operator-manifest", "/api/v1/version",
+)
+_ONION_BYPASS_PREFIX = (
+    "/admin", "/api/v1/admin", "/api/v1/federation",
+)
+
 class OnionOnlyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         try:
@@ -3838,7 +3867,11 @@ class OnionOnlyMiddleware(BaseHTTPMiddleware):
             enabled = False
         if enabled:
             path = request.url.path
-            if not (path.startswith("/admin") or path.startswith("/api/v1/admin") or path == "/health"):
+            allowed = (
+                path in _ONION_BYPASS_EXACT
+                or any(path.startswith(p) for p in _ONION_BYPASS_PREFIX)
+            )
+            if not allowed:
                 host = request.headers.get("host", "").lower().split(":")[0]
                 if not host.endswith(".onion"):
                     return JSONResponse({"detail": "Server is in onion-only mode"}, status_code=403)
