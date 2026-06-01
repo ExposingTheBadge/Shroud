@@ -640,6 +640,29 @@ private:
     attachPasswordReveal(pass);
     cl->addWidget(pass);
 
+    /* Caps Lock warning chip — appears below the password field whenever
+     * VK_CAPITAL is on and the password field has focus. Saves a lot of
+     * "decryption failed" support tickets. */
+    auto *capsWarn = new QLabel("⚠ Caps Lock is ON");
+    capsWarn->setAlignment(Qt::AlignCenter);
+    capsWarn->setStyleSheet(
+        "QLabel { color: #ffb74d; background: #2a1f0d; border: 1px solid #5a3a0a;"
+        " border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: 600; }"
+    );
+    capsWarn->hide();
+    cl->addWidget(capsWarn);
+
+    // Poll caps-lock state on a short cadence so toggling it outside the
+    // field reflects within a few hundred ms. Keep it cheap — Win32
+    // GetKeyState is a no-op syscall.
+    auto *capsTimer = new QTimer(pass);
+    capsTimer->setInterval(200);
+    QObject::connect(capsTimer, &QTimer::timeout, [pass, capsWarn]() {
+        bool on = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+        capsWarn->setVisible(on && pass->hasFocus());
+    });
+    capsTimer->start();
+
     /* Register-only field */
     auto *dname = new QLineEdit; dname->setPlaceholderText("Device Name"); dname->setText("Windows-PC");
     cl->addWidget(dname);

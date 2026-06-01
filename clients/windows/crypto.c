@@ -234,9 +234,19 @@ BOOL crypto_auth_derive_key(NCRYPT_KEY_HANDLE my_priv, const BYTE *peer_blob, DW
     pk.len = blob_len;
     BYTE shared[AES_KEY_LEN];
     if (!crypto_derive_shared_secret(my_priv, &pk, shared)) return FALSE;
-    BYTE buf[AES_KEY_LEN + 17];
+    /* Server hashes shared || "SHROUD-AUTH-v1" (46 bytes — no null).
+     * Previous version sized buf at AES_KEY_LEN + 17 and memcpy'd 17
+     * bytes from a 14-byte string literal, hashing 3 bytes of memory
+     * past the null. That produced a different key every login attempt
+     * (UB but stable on a given build) and broke auth as soon as the
+     * server stopped including the null + padding in its derivation.
+     * Wire-format value here MUST be exactly the same bytes the server
+     * uses — server.py line ~879: hashlib.sha256(hashed + b"SHROUD-AUTH-v1"). */
+    static const char LABEL[] = "SHROUD-AUTH-v1";
+    DWORD label_len = (DWORD)(sizeof(LABEL) - 1);  /* 14, drop trailing NUL */
+    BYTE buf[AES_KEY_LEN + 14];
     memcpy(buf, shared, AES_KEY_LEN);
-    memcpy(buf + AES_KEY_LEN, "SHROUD-AUTH-v1", 17);
+    memcpy(buf + AES_KEY_LEN, LABEL, label_len);
     return crypto_sha256(buf, sizeof(buf), key_out);
 }
 
