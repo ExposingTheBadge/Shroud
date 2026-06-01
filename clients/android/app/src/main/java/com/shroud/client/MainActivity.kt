@@ -187,6 +187,11 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
      *  because `prefs` is declared further down the class body. */
     var disappearEnabled by mutableStateOf(false)
     var disappearSeconds by mutableStateOf(60)
+    /** Use Rule 1+2 compliant /messages/send-anon + /messages/fetch-anon
+     *  endpoints. Default ON for new installs; existing users can flip
+     *  off via Settings if they hit a regression. Loaded from prefs in
+     *  the init block below. */
+    var useAnonRouting by mutableStateOf(true)
     /** Theme persisted in prefs. Names match the Windows presets. */
     var themeName by mutableStateOf("Nord")
 
@@ -307,6 +312,7 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
         // these lines — see below).
         disappearEnabled = prefs.getBoolean("disappear_enabled", false)
         disappearSeconds = prefs.getInt("disappear_secs", 60)
+        useAnonRouting   = prefs.getBoolean("anon_routing", true)
         themeName = prefs.getString("theme_name", "Nord") ?: "Nord"
         pinHash = prefs.getString("pin_hash", null)
         pinFailCount = prefs.getInt("pin_fail", 0)
@@ -321,6 +327,27 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
         if (sid.isNotEmpty() && su.isNotEmpty() && sp.isNotEmpty() && identityKey != null) {
             deviceID = sid; username = su; savedPassword = sp; isRegistered = true
             startHeartbeat()
+        }
+    }
+
+    /** Load my X25519 identity (priv, pub) from disk. Returns null if
+     *  not yet generated. */
+    private fun loadMyX25519Identity(): Pair<ByteArray, ByteArray>? {
+        val idFile = java.io.File(java.io.File(getApplication<Application>().filesDir, "ratchet"), "identity.x25519")
+        if (!idFile.exists() || idFile.length() < 64) return null
+        val bytes = idFile.readBytes()
+        return Pair(bytes.copyOfRange(0, 32), bytes.copyOfRange(32, 64))
+    }
+
+    /** Fetch the peer's X25519 identity pubkey from /ratchet/bundle.
+     *  Returns null if the peer hasn't published a bundle yet. */
+    private suspend fun fetchPeerX25519(deviceId: String): ByteArray? {
+        return try {
+            val bundle = NetworkClient.get("/api/v1/ratchet/bundle/$deviceId")
+            val hex = bundle.optString("x25519_pub", "")
+            if (hex.isBlank()) null else hex.hexToBytes()
+        } catch (_: Throwable) {
+            null
         }
     }
 
@@ -425,6 +452,37 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
     private suspend fun fetchAndDecrypt() {
         if (deviceID.isBlank()) return
         val ctx = getApplication<Application>()
+
+        // ── Rule 1+2 compliant anon-routing fetch (scoped to the
+        //    currently-selected recipient for v1; multi-contact cache
+        //    will land alongside the local contact list). ──
+        if (useAnonRouting && selectedRecipient.isNotBlank()) {
+            try {
+                val myId = loadMyX25519Identity()
+                val peerPubX = fetchPeerX25519(selectedRecipient)
+                if (myId != null && peerPubX != null) {
+                    val (myPriv, myPub) = myId
+                    val sharedRoot = Ratchet.x25519Dh(myPriv, peerPubX)
+                    val anonResults = NetworkClient.fetchAnonForContacts(
+                        myIdPriv = myPriv,
+                        myIdPub  = myPub,
+                        contacts = listOf(Triple(peerPubX, sharedRoot, selectedRecipient)),
+                    )
+                    for ((_, plaintextBytes) in anonResults) {
+                        val plainJson = try {
+                            JSONObject(String(plaintextBytes, Charsets.UTF_8))
+                        } catch (_: Throwable) { continue }
+                        // Dispatch through the same handler legacy uses.
+                        val senderId = plainJson.optString("sender", selectedRecipient)
+                        val body = plainJson.optString("body", "")
+                        if (body.isNotEmpty()) {
+                            messages = messages + Msg(senderId, body)
+                        }
+                    }
+                }
+            } catch (_: Throwable) { /* fall through to legacy fetch */ }
+        }
+
         val r = withContext(Dispatchers.IO) {
             NetworkClient.post("/api/v1/messages/fetch",
                 JSONObject().apply { put("device_id", deviceID) })
@@ -685,13 +743,41 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
                     val sg = CryptoProvider.hmacSign(sk, ct)
                     JSONObject().apply { put("sender",deviceID); put("ts",System.currentTimeMillis()/1000); put("nonce",iv.toHex()); put("ciphertext",ct.toHex()); put("tag",tg.toHex()); put("sig",sg.toHex()) }
                 }
-                val headers = if (disappearEnabled && disappearSeconds > 0)
-                    mapOf("X-Expires-In" to disappearSeconds.toString()) else emptyMap()
-                val resp = NetworkClient.post(
-                    "/api/v1/messages/send",
-                    JSONObject().apply { put("sender_device_id",deviceID); put("recipient_device_id",recip); put("envelope",env.toString()) },
-                    headers,
-                )
+                val expiresIn = if (disappearEnabled && disappearSeconds > 0) disappearSeconds else null
+                val resp: JSONObject = if (useAnonRouting) {
+                    // Rule 1+2 compliant path: sealed envelope addressed
+                    // to a per-pair routing tag. Server never sees
+                    // sender_device_id or recipient_device_id.
+                    val myId = loadMyX25519Identity()
+                    val peerPubX = fetchPeerX25519(recip)
+                    if (myId == null || peerPubX == null) {
+                        // Can't go anon yet (no ratchet bundle on either
+                        // side). Fall through to legacy.
+                        val headers = if (expiresIn != null) mapOf("X-Expires-In" to expiresIn.toString()) else emptyMap()
+                        NetworkClient.post(
+                            "/api/v1/messages/send",
+                            JSONObject().apply { put("sender_device_id",deviceID); put("recipient_device_id",recip); put("envelope",env.toString()) },
+                            headers,
+                        )
+                    } else {
+                        val (myPriv, myPub) = myId
+                        val sharedRoot = Ratchet.x25519Dh(myPriv, peerPubX)
+                        NetworkClient.sendAnon(
+                            recipientPubkey = peerPubX,
+                            myIdPubkey      = myPub,
+                            sharedRoot      = sharedRoot,
+                            innerEnvelope   = env.toString().toByteArray(Charsets.UTF_8),
+                            expiresInSeconds= expiresIn,
+                        )
+                    }
+                } else {
+                    val headers = if (expiresIn != null) mapOf("X-Expires-In" to expiresIn.toString()) else emptyMap()
+                    NetworkClient.post(
+                        "/api/v1/messages/send",
+                        JSONObject().apply { put("sender_device_id",deviceID); put("recipient_device_id",recip); put("envelope",env.toString()) },
+                        headers,
+                    )
+                }
                 // Server v2.4.1+ returns 503 + {"detail":"maintenance"} when locked.
                 if (resp.optInt("_status") == 503 && resp.optString("detail") == "maintenance") {
                     maintenanceMode = true
