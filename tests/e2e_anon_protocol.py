@@ -211,6 +211,76 @@ def test_federation_rejects_unknown_pubkey() -> None:
         assert e.code == 403, f"got {e.code}"
 
 
+def test_diagnostics_round_trip() -> None:
+    """Submit a sealed diagnostic report and decrypt it via the inbox flow."""
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    from crypto.error_reporting import DiagnosticReport, seal_report, fetch_window_tags_for_operator
+    from crypto.anon_routing import unseal
+
+    op_priv = X25519PrivateKey.generate()
+    op_pub = op_priv.public_key().public_bytes_raw()
+    op_sk = op_priv.private_bytes_raw()
+
+    rep = DiagnosticReport(
+        app="shroud-e2etest",
+        app_version="2.5.0",
+        os="ci-runner",
+        kind="log",
+        message="e2e: hello with UUID 12345678-1234-1234-1234-123456789012",
+        stack="",
+    )
+    tag, sealed = seal_report(rep, op_pub)
+    padded = sealed + b"\x00" * (4096 - len(sealed))
+
+    # Submit
+    req = urllib.request.Request(
+        f"{RELAY_URL}/api/v1/diagnostics/report",
+        data=padded, method="POST",
+        headers={"X-Routing-Tag": tag.hex(), "Content-Type": "application/octet-stream"},
+    )
+    with urllib.request.urlopen(req, context=SSL_CTX, timeout=10) as resp:
+        body = json.loads(resp.read())
+    assert body.get("received") is True, body
+
+    # Fetch
+    tags = fetch_window_tags_for_operator(op_pub, window=2)
+    req = urllib.request.Request(
+        f"{RELAY_URL}/api/v1/diagnostics/fetch",
+        data=json.dumps({"tags": [t.hex() for t in tags]}).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, context=SSL_CTX, timeout=10) as resp:
+        result = json.loads(resp.read())
+    assert result.get("count", 0) >= 1, "expected at least 1 report"
+
+    # Decrypt + verify scrubbing
+    found_e2e = False
+    for r in result["reports"]:
+        sealed_bytes = bytes.fromhex(r["sealed"])
+        # Trim trailing zeros + try unseal across a tail window.
+        j = len(sealed_bytes)
+        while j > 0 and sealed_bytes[j - 1] == 0:
+            j -= 1
+        for tail in range(j, min(j + 32, len(sealed_bytes)) + 1):
+            try:
+                plain = unseal(sealed_bytes[:tail], op_sk)
+                doc = json.loads(plain)
+                if doc.get("app") == "shroud-e2etest":
+                    # PII scrubbed
+                    assert "12345678-1234-1234-1234-123456789012" not in doc.get("message", ""), (
+                        "scrubber failed to redact UUID"
+                    )
+                    assert "<UUID>" in doc.get("message", ""), "expected UUID placeholder"
+                    found_e2e = True
+                break
+            except Exception:
+                continue
+        if found_e2e:
+            break
+    assert found_e2e, "did not find our submitted report after fetch"
+
+
 def test_federation_broadcast_dedup() -> None:
     """A second gossip broadcast for the same message_id is rejected
     with accepted=false reason=duplicate."""
@@ -247,6 +317,7 @@ TESTS = [
     test_tag_rotation_across_epochs,
     test_federation_rejects_unknown_pubkey,
     test_federation_broadcast_dedup,
+    test_diagnostics_round_trip,
 ]
 
 
