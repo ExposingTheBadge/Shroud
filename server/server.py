@@ -4939,6 +4939,36 @@ async def admin_device_page(device_id: str, session=Depends(require_admin)):
     return _serve_admin_html("device.html")
 
 
+@app.get("/api/v1/admin/devices")
+async def admin_devices_list(session=Depends(require_admin)):
+    """List every device row. The admin dashboards (web + shroud-admin
+    Devices tab) call this to render the device table with per-row
+    actions. Kept slim — full per-device detail is at /admin/devices/
+    {id}/details."""
+    rows = db.execute(
+        "SELECT d.id, d.user_id, u.username, d.platform, d.device_name, "
+        "d.hwid, d.last_seen, d.registered_at "
+        "FROM devices d LEFT JOIN users u ON u.id = d.user_id "
+        "ORDER BY d.last_seen DESC LIMIT 5000"
+    ).fetchall()
+    return {
+        "count": len(rows),
+        "devices": [
+            {
+                "id":          r[0],
+                "user_id":     r[1],
+                "username":    r[2] or "",
+                "platform":    r[3] or "",
+                "device_name": r[4] or "",
+                "hwid":        r[5] or "",
+                "last_seen":   str(r[6]) if r[6] else "",
+                "created":     str(r[7]) if r[7] else "",
+            }
+            for r in rows
+        ],
+    }
+
+
 @app.get("/api/v1/admin/devices/{device_id}/details")
 async def admin_device_details(device_id: str, session=Depends(require_admin)):
     row = db.execute(

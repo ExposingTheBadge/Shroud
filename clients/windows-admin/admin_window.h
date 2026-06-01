@@ -22,6 +22,8 @@ class RelaySshTab;
 class ClaudeChatTab;
 class SettingsTab;
 class ErrorsTab;
+class DevicesTab;
+class AuditTab;
 
 class AdminWindow : public QMainWindow {
     Q_OBJECT
@@ -51,6 +53,10 @@ private:
     ClaudeChatTab   *m_claude;
     SettingsTab     *m_settings;
     ErrorsTab       *m_errors;
+    DevicesTab      *m_devices;
+    AuditTab        *m_audit;
+
+    QLabel *m_userBadge, *m_deviceBadge, *m_errorBadge;
 };
 
 #endif

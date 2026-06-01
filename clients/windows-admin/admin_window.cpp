@@ -11,6 +11,8 @@
 #include "tabs/claude_chat_tab.h"
 #include "tabs/settings_tab.h"
 #include "tabs/errors_tab.h"
+#include "tabs/devices_tab.h"
+#include "tabs/audit_tab.h"
 #include <QVBoxLayout>
 #include <QApplication>
 #include <QIcon>
@@ -35,13 +37,17 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
     m_claude     = new ClaudeChatTab(m_client);
     m_settings   = new SettingsTab(m_client);
     m_errors     = new ErrorsTab(m_client);
+    m_devices    = new DevicesTab(m_client);
+    m_audit      = new AuditTab(m_client);
 
     m_tabs->addTab(m_federation, "Federation");
     m_tabs->addTab(m_stats,      "Stats");
     m_tabs->addTab(m_controls,   "Controls");
     m_tabs->addTab(m_logs,       "Logs");
     m_tabs->addTab(m_users,      "Users");
+    m_tabs->addTab(m_devices,    "Devices");
     m_tabs->addTab(m_bans,       "Bans");
+    m_tabs->addTab(m_audit,      "Audit");
     m_tabs->addTab(m_diag,       "Diagnostics");
     m_tabs->addTab(m_manifest,   "Manifest");
     m_tabs->addTab(m_ssh,        "Relays (SSH)");
@@ -51,10 +57,32 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
 
     setCentralWidget(m_tabs);
 
-    m_relayLbl = new QLabel("relay: " + m_client->relayUrl(), this);
-    m_wsLbl    = new QLabel("WS: disconnected", this);
+    m_relayLbl    = new QLabel("relay: " + m_client->relayUrl(), this);
+    m_wsLbl       = new QLabel("WS: disconnected", this);
+    m_userBadge   = new QLabel("users —", this);
+    m_deviceBadge = new QLabel("devices —", this);
+    m_errorBadge  = new QLabel("errs —", this);
+    m_userBadge->setStyleSheet("color:#7fbfff;padding:0 6px");
+    m_deviceBadge->setStyleSheet("color:#7fff7f;padding:0 6px");
+    m_errorBadge->setStyleSheet("color:#ff8a8a;padding:0 6px");
     statusBar()->addWidget(m_relayLbl, 1);
+    statusBar()->addPermanentWidget(m_userBadge);
+    statusBar()->addPermanentWidget(m_deviceBadge);
+    statusBar()->addPermanentWidget(m_errorBadge);
     statusBar()->addPermanentWidget(m_wsLbl);
+
+    connect(m_stats, &StatsTab::countsUpdated, this,
+            [this](int users, int devices, int, int errors) {
+                m_userBadge->setText(QString("users %1").arg(users));
+                m_deviceBadge->setText(QString("devices %1").arg(devices));
+                m_errorBadge->setText(QString("errs %1").arg(errors));
+            });
+
+    // Devices → ban context menu → BansTab
+    connect(m_devices, &DevicesTab::banHwidRequested, this, [this](const QString &hwid) {
+        m_bans->prefillUsername(hwid);
+        m_tabs->setCurrentWidget(m_bans);
+    });
 
     connect(m_client, &AdminClient::wsConnected,    this, &AdminWindow::onWsConnected);
     connect(m_client, &AdminClient::wsDisconnected, this, &AdminWindow::onWsDisconnected);
