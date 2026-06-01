@@ -31,8 +31,8 @@ UsersTab::UsersTab(AdminClient *client, QWidget *parent)
     l->addLayout(bar);
 
     m_table = new QTableWidget;
-    m_table->setColumnCount(6);
-    m_table->setHorizontalHeaderLabels({"Username", "Tier", "Devices", "Created", "Last seen", "ID"});
+    m_table->setColumnCount(4);
+    m_table->setHorizontalHeaderLabels({"Username", "Devices", "Created", "ID"});
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -46,7 +46,7 @@ UsersTab::UsersTab(AdminClient *client, QWidget *parent)
             [this](int row, int) {
         if (row < 0) return;
         QString uname = m_table->item(row, 0)->text();
-        QString uid   = m_table->item(row, 5)->text();
+        QString uid   = m_table->item(row, 3)->text();
         emit openUserRequested(uid, uname);
     });
 
@@ -64,7 +64,7 @@ UsersTab::UsersTab(AdminClient *client, QWidget *parent)
         auto *deleteAct = menu.addAction("Delete user…");
         auto *chosen    = menu.exec(m_table->viewport()->mapToGlobal(pos));
         if (chosen == openAct) {
-            QString uid = m_table->item(item->row(), 5)->text();
+            QString uid = m_table->item(item->row(), 3)->text();
             emit openUserRequested(uid, username);
             return;
         }
@@ -112,7 +112,11 @@ UsersTab::UsersTab(AdminClient *client, QWidget *parent)
 }
 
 void UsersTab::refresh() {
-    m_client->getJson("/api/v1/admin/users",
+    // Server returns shape: { users: [{username, user_id, created, devices}, …] }
+    // via /admin/stats/users. There's no /admin/users GET — that path
+    // 404s. /admin/users/{id}/details exists for the per-row drill-down
+    // but isn't a listing.
+    m_client->getJson("/api/v1/admin/stats/users",
         [this](const QJsonDocument &d, const QString &err) {
             m_table->setRowCount(0);
             if (!err.isEmpty()) return;
@@ -122,11 +126,9 @@ void UsersTab::refresh() {
             for (const auto &uv : users) {
                 auto u = uv.toObject();
                 m_table->setItem(r, 0, new QTableWidgetItem(u.value("username").toString()));
-                m_table->setItem(r, 1, new QTableWidgetItem(u.value("tier").toString()));
-                m_table->setItem(r, 2, new QTableWidgetItem(QString::number(u.value("device_count").toInt())));
-                m_table->setItem(r, 3, new QTableWidgetItem(u.value("created_at").toString()));
-                m_table->setItem(r, 4, new QTableWidgetItem(u.value("last_seen").toString()));
-                m_table->setItem(r, 5, new QTableWidgetItem(u.value("id").toString()));
+                m_table->setItem(r, 1, new QTableWidgetItem(QString::number(u.value("devices").toInt())));
+                m_table->setItem(r, 2, new QTableWidgetItem(u.value("created").toString()));
+                m_table->setItem(r, 3, new QTableWidgetItem(u.value("user_id").toString()));
                 r++;
             }
         });
@@ -150,7 +152,7 @@ void UsersTab::onDeleteSelected() {
         QString("Delete %1 user(s) and all their data? This cannot be undone.").arg(rows.size()),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
     for (const auto &idx : rows) {
-        auto id = m_table->item(idx.row(), 5)->text();
+        auto id = m_table->item(idx.row(), 3)->text();
         m_client->deleteRequest(QString("/api/v1/admin/users/%1").arg(id),
             [this](const QJsonDocument &, const QString &) { refresh(); });
     }

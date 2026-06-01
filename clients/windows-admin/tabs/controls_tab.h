@@ -10,10 +10,15 @@ public:
     explicit ControlsTab(AdminClient *client, QWidget *parent = nullptr);
 private slots:
     void runAction(const QString &slug, const QString &confirmMsg);
+    void runToggle(const QString &slug, const QString &flagKey, const QString &confirmMsg);
     void refreshFlags();
 private:
     AdminClient *m_client;
     QLabel *m_status;
     QPushButton *m_regBtn, *m_mntBtn, *m_onionBtn;
+    bool m_registrationEnabled = true;
+    bool m_maintenanceMode     = false;
+    bool m_onionOnly           = false;
+    void applyToggleLabel(QPushButton *btn, const QString &label, bool on);
 };
 #endif
