@@ -144,6 +144,14 @@ class MainActivity : ComponentActivity() {
     private val SHROUD_MANIFEST_PIN =
         "2fb11de360a0cf6baa35d6785c3945658ae6d64823041729798a2b689ce00ca0"
 
+    /** Default-on Tor preference. The operator manifest (v2+) also
+     *  publishes prefer_tor_by_default = true. Clients honor it unless
+     *  the user explicitly disables Tor in Settings. The client needs a
+     *  reachable SOCKS5 proxy (Orbot or equivalent on Android) to ride
+     *  the .onion endpoints; if the proxy isn't reachable the client
+     *  falls back to the clearnet endpoint. */
+    private val PREFER_TOR_DEFAULT = true
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Install the anonymous error reporter ONCE per process so any

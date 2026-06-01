@@ -96,7 +96,13 @@ def cmd_keygen(args) -> int:
     return 0
 
 
-def _fetch_federation_peers(home_relay: str) -> list[FederationPeerInfo]:
+def _fetch_federation_peers(home_relay: str,
+                            onion_map: dict[str, str] | None = None
+                            ) -> list[FederationPeerInfo]:
+    """Pull the federation roster from the home relay. If onion_map is
+    provided (clearnet endpoint → .onion URL), attach the Tor v3 onion
+    endpoint to each peer that has a mapping."""
+    onion_map = onion_map or {}
     url = f"{home_relay.rstrip('/')}/api/v1/federation/peers"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, context=_ctx(), timeout=15) as resp:
@@ -110,7 +116,9 @@ def _fetch_federation_peers(home_relay: str) -> list[FederationPeerInfo]:
             continue
         if not p.get("active", True):
             continue
-        out.append(FederationPeerInfo(pubkey_hex=pub, endpoint=endpoint))
+        onion = onion_map.get(endpoint)
+        out.append(FederationPeerInfo(pubkey_hex=pub, endpoint=endpoint,
+                                       onion_endpoint=onion))
     return out
 
 
@@ -132,7 +140,17 @@ def cmd_build(args) -> int:
         print("--diag-pubkey is not valid hex")
         return 1
 
-    peers = _fetch_federation_peers(args.home_relay)
+    # Parse onion mapping if provided. Format:
+    #   --onion clearnet1=onion1 --onion clearnet2=onion2 ...
+    onion_map: dict[str, str] = {}
+    for pair in (args.onion or []):
+        if "=" not in pair:
+            print(f"--onion expects clearnet=onion form: {pair!r}")
+            return 1
+        k, v = pair.split("=", 1)
+        onion_map[k.strip()] = v.strip()
+
+    peers = _fetch_federation_peers(args.home_relay, onion_map)
     print(f"Fetched {len(peers)} federation peer(s) from {args.home_relay}")
 
     now = int(time.time())
@@ -143,6 +161,9 @@ def cmd_build(args) -> int:
         issued_at=now,
         expires_at=now + (args.ttl_days * 86400),
         federation_peers=peers,
+        relay_onion_endpoint=onion_map.get(args.home_relay),
+        tor_socks_proxy=args.tor_socks_proxy,
+        prefer_tor_by_default=args.prefer_tor,
     )
     sign_manifest(m, priv)
     assert verify_manifest(m, pub), "self-verify failed immediately after signing"
@@ -191,6 +212,15 @@ def main() -> int:
     bd.add_argument("--stickers-cdn", default="https://stickers.shroud.example/")
     bd.add_argument("--ttl-days", type=int, default=30)
     bd.add_argument("--out", default="operator_manifest.signed.json")
+    bd.add_argument("--onion", action="append", default=[],
+                    help=("clearnet=onion mapping, may be repeated. "
+                          "Use the same clearnet URL form as the relay "
+                          "endpoints (e.g. https://1.2.3.4:58443=http://abc...onion:58443)."))
+    bd.add_argument("--tor-socks-proxy", default="127.0.0.1:9050",
+                    help="SOCKS5 proxy clients should use to reach .onion URLs")
+    bd.add_argument("--prefer-tor", action="store_true", default=True,
+                    help="Tell clients to prefer .onion endpoints by default (v2 manifest)")
+    bd.add_argument("--no-prefer-tor", dest="prefer_tor", action="store_false")
 
     pn = sub.add_parser("pin", help="Print the SHA-256 pin for a manifest keyfile")
     pn.add_argument("--keyfile", required=True)

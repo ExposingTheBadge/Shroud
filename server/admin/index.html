@@ -40,6 +40,7 @@
   <div class="tab" data-tab="files"    onclick="goTab('files')">Files <span class="badge" id="fileBadge">—</span></div>
   <div class="tab" data-tab="audit"    onclick="goTab('audit')">Audit <span class="badge" id="auditBadge">—</span></div>
   <div class="tab" data-tab="activity" onclick="goTab('activity')">Activity</div>
+  <div class="tab" data-tab="federation" onclick="goTab('federation')">Federation <span class="badge" id="fedBadge">—</span></div>
 </div>
 
 <!-- ─── Overview ──────────────────────────────────────────────────── -->
@@ -313,6 +314,33 @@
           <div class="item"><span class="track"><span class="fill" id="onionRatioBar" style="width:0%"></span></span></div>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Federation ────────────────────────────────────────────────── -->
+<div class="section" data-section="federation">
+  <div class="panel">
+    <div class="panel-hdr">Live federation health
+      <span class="pill" id="fedSummary">—</span>
+      <div class="actions">
+        <button onclick="loadFederation()">Refresh</button>
+      </div>
+    </div>
+    <div style="padding:8px 14px;color:var(--dim);font-size:11px">
+      Each relay's <code>/api/v1/relay-stats</code> is polled in parallel — a peer that 503s or times out shows up as unreachable rather than blanking the panel. No PII is fetched; counters only.
+    </div>
+    <div class="grid" id="fedGrid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;padding:10px 14px"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hdr">Aggregate traffic across the federation</div>
+    <div style="padding:14px;display:flex;gap:24px;flex-wrap:wrap;font-family:Consolas,monospace;font-size:12px;color:var(--text)">
+      <div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;margin-bottom:4px">Reachable</div><div id="fedReachable" style="font-size:22px;color:var(--accent);font-weight:700">—</div><div id="fedTotal" style="color:var(--dim);font-size:10px">—</div></div>
+      <div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;margin-bottom:4px">Tor-enabled</div><div id="fedTor" style="font-size:22px;color:var(--accent);font-weight:700">—</div><div style="color:var(--dim);font-size:10px">relays serving .onion</div></div>
+      <div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;margin-bottom:4px">Total requests</div><div id="fedReqTotal" style="font-size:22px;color:var(--text);font-weight:700">—</div><div style="color:var(--dim);font-size:10px">sum across all reachable relays</div></div>
+      <div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;margin-bottom:4px">Anon pending</div><div id="fedAnonPending" style="font-size:22px;color:var(--text);font-weight:700">—</div><div style="color:var(--dim);font-size:10px">undelivered sealed messages</div></div>
+      <div><div style="color:var(--dim);font-size:10px;text-transform:uppercase;margin-bottom:4px">Diag pending</div><div id="fedDiagPending" style="font-size:22px;color:var(--text);font-weight:700">—</div><div style="color:var(--dim);font-size:10px">anonymous error reports awaiting drain</div></div>
     </div>
   </div>
 </div>

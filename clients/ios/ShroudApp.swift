@@ -26,6 +26,13 @@ struct ShroudApp: App {
     private let SHROUD_MANIFEST_PIN =
         "2fb11de360a0cf6baa35d6785c3945658ae6d64823041729798a2b689ce00ca0"
 
+    // Default-on Tor preference. The operator manifest (v2+) also
+    // publishes prefer_tor_by_default = true. Clients honor it unless
+    // the user explicitly disables Tor in Settings. iOS uses
+    // OnionBrowser / TorURLSession; if Tor isn't reachable the client
+    // falls back to the clearnet endpoint.
+    private let PREFER_TOR_DEFAULT = true
+
     init() {
         // Install the anonymous crash + signal reporter once per app
         // launch. The pubkey is checked for non-zero inside install();

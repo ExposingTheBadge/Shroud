@@ -904,6 +904,132 @@ class AuthRequest(BaseModel):
 async def health():
     return {"status": "ok", "fips": "140-2 validated", "version": "2.1.0"}
 
+
+# ── Public relay stats (federation health dashboard) ─────────────────
+#
+# Each relay exposes this endpoint without auth so peer relays and
+# operator dashboards can poll it without credentials. The payload
+# carries ONLY operational telemetry: counters, version, uptime,
+# capacity. No user data, no message contents, no per-user counts.
+# Rule 3 still applies — nothing here identifies any user.
+
+_RELAY_START_TS = int(time.time())
+
+
+_SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT  = os.path.abspath(os.path.join(_SERVER_DIR, ".."))
+
+
+def _read_git_sha() -> str:
+    """Best-effort SHA of the running checkout. Empty string if unknown."""
+    try:
+        path = os.path.join(_REPO_ROOT, ".git", "HEAD")
+        if not os.path.exists(path):
+            return ""
+        with open(path) as f:
+            head = f.read().strip()
+        if head.startswith("ref:"):
+            ref = head.split(":", 1)[1].strip()
+            ref_path = os.path.join(_REPO_ROOT, ".git", ref)
+            if os.path.exists(ref_path):
+                with open(ref_path) as f:
+                    return f.read().strip()[:12]
+        else:
+            return head[:12]
+    except Exception:
+        pass
+    return ""
+
+
+def _read_onion_address() -> str:
+    """Pull the local relay's Tor v3 .onion address if tor_setup.sh
+    has been run. Empty string when Tor isn't deployed."""
+    paths = [
+        "/var/lib/tor/shroud_hidden_service/hostname",
+        "/var/lib/tor/hidden_service/hostname",
+    ]
+    for p in paths:
+        try:
+            if os.path.exists(p):
+                with open(p) as f:
+                    return f.read().strip()
+        except Exception:
+            continue
+    return ""
+
+
+def _disk_usage_pct(path: str = "/") -> float:
+    try:
+        st = os.statvfs(path)
+        free = st.f_bavail * st.f_frsize
+        total = st.f_blocks * st.f_frsize
+        if total <= 0:
+            return -1.0
+        return 100.0 * (1.0 - (free / total))
+    except Exception:
+        return -1.0
+
+
+def _load_avg() -> list[float]:
+    try:
+        return list(os.getloadavg())
+    except (AttributeError, OSError):
+        return []
+
+
+@app.get("/api/v1/relay-stats")
+async def get_relay_stats():
+    """Operational health + traffic counters for this relay. Safe to
+    expose publicly — contains no PII, no plaintext, no per-user data."""
+    fed_peers: list[dict] = []
+    if FEDERATION_ENABLED:
+        try:
+            fed_peers = _federation_active_peers()
+        except Exception:
+            fed_peers = []
+
+    try:
+        anon_msgs_pending = db.execute(
+            "SELECT COUNT(*) FROM anon_messages"
+        ).fetchone()[0]
+    except Exception:
+        anon_msgs_pending = -1
+    try:
+        diag_pending = db.execute(
+            "SELECT COUNT(*) FROM diagnostic_reports"
+        ).fetchone()[0]
+    except Exception:
+        diag_pending = -1
+
+    onion = _read_onion_address()
+    return {
+        "schema":         "shroud.relay-stats.v1",
+        "ts":             int(time.time()),
+        "version":        SERVER_VERSION,
+        "git_sha":        _read_git_sha(),
+        "uptime_seconds": int(time.time()) - _RELAY_START_TS,
+        "federation": {
+            "enabled":       FEDERATION_ENABLED,
+            "active_peers":  len(fed_peers),
+            "peer_endpoints": [p.get("endpoint", "") for p in fed_peers],
+        },
+        "tor": {
+            "onion_address": onion,
+            "enabled":       bool(onion),
+        },
+        "traffic": {
+            "requests_total":       sum(REQ_COUNTS.values()),
+            "errors_total":         sum(ERR_COUNTS.values()),
+            "cover_messages":       COVER_COUNT,
+            "anon_messages_pending": anon_msgs_pending,
+            "diag_reports_pending":  diag_pending,
+        },
+        "capacity": {
+            "disk_used_pct": round(_disk_usage_pct(), 1),
+            "load_avg":      [round(x, 2) for x in _load_avg()],
+        },
+    }
+
 import threading
 ecdh_cache = {}
 ecdh_lock = threading.Lock()
@@ -3599,6 +3725,75 @@ def _meta_block() -> dict:
         "registration_enabled": setting_get("registration_enabled", "1") == "1",
         "maintenance_mode":     setting_get("maintenance_mode",     "0") == "1",
         "onion_only":           setting_get("onion_only",           "0") == "1",
+    }
+
+
+@app.get("/api/v1/admin/federation")
+async def admin_federation_health(session=Depends(require_admin)):
+    """Aggregated federation health — polls every active peer's
+    public /api/v1/relay-stats endpoint and merges with this relay's
+    own stats. Returns a flat list the dashboard can render as a
+    health grid (one card per relay).
+
+    Tolerates per-peer failures: an unreachable peer shows up as a row
+    with `reachable=false` rather than blowing up the whole response.
+    """
+    import urllib.request, ssl, socket
+    # Local relay first
+    out = []
+    try:
+        local = await get_relay_stats()
+        out.append({
+            "endpoint": "self",
+            "operator": "this relay",
+            "reachable": True,
+            "stats": local,
+        })
+    except Exception as e:
+        out.append({"endpoint": "self", "reachable": False, "error": str(e)})
+
+    peers: list[dict] = []
+    if FEDERATION_ENABLED:
+        try:
+            peers = _federation_active_peers()
+        except Exception:
+            peers = []
+
+    # Permissive TLS — peer relays use self-signed certs by design.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    for peer in peers:
+        endpoint = peer.get("endpoint", "")
+        if not endpoint:
+            continue
+        entry = {
+            "endpoint": endpoint,
+            "operator": peer.get("operator", ""),
+            "pubkey_hex": peer.get("pubkey_hex", ""),
+            "reachable": False,
+        }
+        try:
+            req = urllib.request.Request(
+                f"{endpoint.rstrip('/')}/api/v1/relay-stats",
+                method="GET",
+            )
+            with urllib.request.urlopen(req, context=ctx, timeout=6) as resp:
+                entry["reachable"] = (resp.status == 200)
+                entry["stats"] = json.loads(resp.read())
+        except (urllib.error.URLError, socket.timeout, json.JSONDecodeError) as e:
+            entry["error"] = str(e)[:200]
+        out.append(entry)
+
+    return {
+        "schema": "shroud.federation-health.v1",
+        "ts": int(time.time()),
+        "relays": out,
+        "summary": {
+            "total":     len(out),
+            "reachable": sum(1 for r in out if r.get("reachable")),
+        },
     }
 
 

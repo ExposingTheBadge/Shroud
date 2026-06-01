@@ -3168,6 +3168,13 @@ static const BYTE g_operator_diag_pubkey[32] = {
 static const char g_manifest_pin[] =
     "2fb11de360a0cf6baa35d6785c3945658ae6d64823041729798a2b689ce00ca0";
 
+/* Default-on Tor preference. The operator manifest (v2+) also
+ * publishes prefer_tor_by_default = true. Clients honor it unless
+ * the user explicitly disables Tor in Settings. Windows pipes traffic
+ * through a local SOCKS5 proxy (127.0.0.1:9050) when reachable; if Tor
+ * isn't running the client falls back to the clearnet endpoint. */
+static const bool g_prefer_tor_default = true;
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName("SHROUD");

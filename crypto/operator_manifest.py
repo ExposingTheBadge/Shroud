@@ -57,13 +57,15 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
 
-SCHEMA = "shroud.operator.v1"
+SCHEMA = "shroud.operator.v2"
+LEGACY_SCHEMA_V1 = "shroud.operator.v1"
 
 
 @dataclass
 class FederationPeerInfo:
     pubkey_hex: str
     endpoint: str
+    onion_endpoint: Optional[str] = None  # v2: per-peer Tor v3 hidden service
 
 
 @dataclass
@@ -76,6 +78,11 @@ class OperatorManifest:
     federation_peers: List[FederationPeerInfo] = field(default_factory=list)
     sig_hex: str = ""
     schema: str = SCHEMA
+    # v2 additions — optional so the signed body stays compatible with v1
+    # parsers that ignore unknown fields. The signature still binds them.
+    relay_onion_endpoint: Optional[str] = None
+    tor_socks_proxy: str = "127.0.0.1:9050"  # default for local Tor / Tor Browser
+    prefer_tor_by_default: bool = True       # clients should ride .onion when reachable
 
     def canonical_body(self) -> bytes:
         """Bytes the operator signs. sig_hex is excluded from
@@ -88,10 +95,20 @@ class OperatorManifest:
             "issued_at": self.issued_at,
             "expires_at": self.expires_at,
             "federation_peers": [
-                {"pubkey_hex": p.pubkey_hex, "endpoint": p.endpoint}
+                {
+                    "pubkey_hex": p.pubkey_hex,
+                    "endpoint": p.endpoint,
+                    **({"onion_endpoint": p.onion_endpoint} if p.onion_endpoint else {}),
+                }
                 for p in self.federation_peers
             ],
         }
+        # v2 fields only appear in body if set / non-default
+        if self.relay_onion_endpoint:
+            body["relay_onion_endpoint"] = self.relay_onion_endpoint
+        if self.schema == SCHEMA:
+            body["tor_socks_proxy"] = self.tor_socks_proxy
+            body["prefer_tor_by_default"] = self.prefer_tor_by_default
         return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
 
     def to_dict(self) -> dict:

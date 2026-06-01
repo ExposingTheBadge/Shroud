@@ -216,7 +216,88 @@ function fetchTab(name) {
     case 'files':    return fetchFiles();
     case 'audit':    return fetchAudit();
     case 'activity': return fetchActivity();
+    case 'federation': return loadFederation();
   }
+}
+
+/* ─── Federation ──────────────────────────────────────────────────── */
+async function loadFederation() {
+  try {
+    const r = await fetch('/api/v1/admin/federation', { credentials: 'include' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    renderFederation(d);
+  } catch (e) {
+    const grid = document.getElementById('fedGrid');
+    if (grid) grid.innerHTML = `<div style="padding:10px;color:#ff8a8a">Federation poll failed: ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+function renderFederation(d) {
+  const grid = document.getElementById('fedGrid');
+  if (!grid) return;
+  const relays = d.relays || [];
+  document.getElementById('fedBadge').textContent = `${d.summary.reachable}/${d.summary.total}`;
+  document.getElementById('fedSummary').textContent = `${d.summary.reachable} / ${d.summary.total} reachable`;
+
+  let reqTotal = 0, anonPending = 0, diagPending = 0, torCount = 0;
+  grid.innerHTML = '';
+  for (const r of relays) {
+    const s = r.stats || {};
+    if (r.reachable) {
+      reqTotal     += (s.traffic && s.traffic.requests_total) || 0;
+      anonPending  += (s.traffic && s.traffic.anon_messages_pending) || 0;
+      diagPending  += (s.traffic && s.traffic.diag_reports_pending)  || 0;
+      if (s.tor && s.tor.enabled) torCount++;
+    }
+    const card = document.createElement('div');
+    card.className = 'panel';
+    card.style.margin = '0';
+    const ok = r.reachable;
+    const onionAddr = (s.tor && s.tor.onion_address) ? s.tor.onion_address : '';
+    const fedPeers = (s.federation && s.federation.active_peers) || 0;
+    card.innerHTML = `
+      <div class="panel-hdr" style="padding:8px 10px;border-bottom:1px solid var(--bd)">
+        <span style="font-size:11px">${escapeHtml(r.endpoint)}</span>
+        <span class="pill" style="background:${ok ? 'var(--ok-bg)' : '#3a1010'};color:${ok ? 'var(--ok)' : '#ff8a8a'}">${ok ? 'OK' : 'DOWN'}</span>
+      </div>
+      <div style="padding:8px 10px;font-family:Consolas,monospace;font-size:11px;line-height:1.55">
+        <div style="color:var(--dim)">${escapeHtml(r.operator || '—')}</div>
+        ${ok ? `
+        <div>v${escapeHtml(s.version || '?')}  <span style="color:var(--dim)">${escapeHtml(s.git_sha || '')}</span></div>
+        <div>uptime: ${fmtUptime(s.uptime_seconds || 0)}</div>
+        <div>federation peers: ${fedPeers}</div>
+        <div>reqs: ${(s.traffic && s.traffic.requests_total || 0).toLocaleString()}  errs: ${(s.traffic && s.traffic.errors_total || 0).toLocaleString()}</div>
+        <div>anon pending: ${(s.traffic && s.traffic.anon_messages_pending) ?? '—'}  diag: ${(s.traffic && s.traffic.diag_reports_pending) ?? '—'}</div>
+        <div>disk: ${(s.capacity && s.capacity.disk_used_pct >= 0) ? s.capacity.disk_used_pct + '%' : '—'}  load: ${(s.capacity && s.capacity.load_avg || []).join(' ') || '—'}</div>
+        <div style="color:${onionAddr ? 'var(--accent)' : 'var(--dim)'};word-break:break-all">tor: ${onionAddr ? escapeHtml(onionAddr) : 'disabled'}</div>
+        ` : `<div style="color:#ff8a8a">${escapeHtml(r.error || 'unreachable')}</div>`}
+      </div>
+    `;
+    grid.appendChild(card);
+  }
+  document.getElementById('fedReachable').textContent = d.summary.reachable;
+  document.getElementById('fedTotal').textContent = `of ${d.summary.total} relays`;
+  document.getElementById('fedTor').textContent = torCount;
+  document.getElementById('fedReqTotal').textContent = reqTotal.toLocaleString();
+  document.getElementById('fedAnonPending').textContent = anonPending.toLocaleString();
+  document.getElementById('fedDiagPending').textContent = diagPending.toLocaleString();
+}
+
+function fmtUptime(secs) {
+  if (!secs || secs < 0) return '—';
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
 }
 
 async function refresh() {
