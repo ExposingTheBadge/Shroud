@@ -875,6 +875,21 @@ private:
             free(nonceHex); free(ctHex); free(tagHex);
             resp = httpPost("/api/v1/auth", authBody);
         }
+        // v2.6.x: server errors now carry a stable error_code (catalog at
+        // /api/v1/error-codes, source crypto/errors.py). When present we
+        // surface "[EA002] Auth payload decryption failed" instead of a
+        // bare "Decryption failed" so a user filing a support ticket can
+        // quote the code and the operator can look up the exact failure
+        // mode. jsonStr nested under "detail" handles FastAPI's wrap.
+        auto errCode = [&]() -> QString {
+            QString c = jsonStr(resp, "error_code");
+            if (!c.isEmpty()) return c;
+            // FastAPI nests our raise_http() body under "detail"
+            QJsonObject root = QJsonDocument::fromJson(resp).object();
+            QJsonValue det = root.value("detail");
+            if (det.isObject()) return det.toObject().value("error_code").toString();
+            return QString();
+        }();
         QString did = jsonStr(resp, "device_id");
         if (!did.isEmpty()) {
             m_deviceId = did; m_username = u; m_deviceName = d; m_platform = "windows"; m_password = p;
@@ -901,8 +916,28 @@ private:
             m_stack->removeWidget(old);
             old->deleteLater();
         } else {
-            QString err = jsonStr(resp, "detail");
-            status->setText(err.isEmpty() ? "Server rejected" : "Error: " + err);
+            QString detailTxt = jsonStr(resp, "detail");
+            QString title;
+            {
+                QJsonObject root = QJsonDocument::fromJson(resp).object();
+                QJsonValue det = root.value("detail");
+                if (det.isObject()) {
+                    title    = det.toObject().value("title").toString();
+                    if (detailTxt == "[object Object]" || detailTxt.startsWith("{")) {
+                        detailTxt = det.toObject().value("detail").toString();
+                    }
+                }
+            }
+            QString shown;
+            if (!errCode.isEmpty()) {
+                shown = "[" + errCode + "] " + (title.isEmpty() ? detailTxt : title);
+                if (!detailTxt.isEmpty() && !title.isEmpty()) shown += " — " + detailTxt;
+            } else if (!detailTxt.isEmpty()) {
+                shown = "Error: " + detailTxt;
+            } else {
+                shown = "Server rejected (no detail)";
+            }
+            status->setText(shown);
         }
     };
 

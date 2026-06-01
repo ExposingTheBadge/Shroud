@@ -868,20 +868,30 @@ db = _PerThreadConn(DB_PATH)
 # ── Models ───────────────────────────────────────────────────────────
 def decrypt_auth_payload(session_id: str, client_pub_hex: str, nonce_hex: str, ct_hex: str, tag_hex: str) -> dict:
     """Decrypt client auth payload using ECDH + AES-256-GCM."""
+    from crypto.errors import errors, raise_http
     with ecdh_lock:
         server_priv = ecdh_cache.pop(session_id, None)
     if not server_priv:
-        raise HTTPException(401, "Invalid or expired session")
+        raise_http(errors.A001_BAD_SESSION)
     try:
         client_pub = deserialize_public_key(bytes.fromhex(client_pub_hex))
+    except Exception:
+        raise_http(errors.C001_BAD_PUBKEY)
+    try:
         raw = server_priv.exchange(ec.ECDH(), client_pub)
         hashed = hashlib.sha256(raw).digest()
         key = hashlib.sha256(hashed + b"SHROUD-AUTH-v1").digest()[:32]
         nonce = bytes.fromhex(nonce_hex); ct = bytes.fromhex(ct_hex); tag = bytes.fromhex(tag_hex)
         plain = decrypt_aes_gcm(key, nonce, ct + tag)
         return json.loads(plain.decode('utf-8'))
+    except HTTPException:
+        raise
     except Exception:
-        raise HTTPException(400, "Decryption failed")
+        # Catalogued: EA002. Includes the hint that says "re-key-exchange",
+        # which the client UI uses to auto-retry the handshake once before
+        # giving up.
+        raise_http(errors.A002_DECRYPT_FAILED,
+                   extra={"session_id": session_id[:8] + "..."})
 
 class EncryptedAuthRequest(BaseModel):
     session_id: str
@@ -921,6 +931,29 @@ class AuthRequest(BaseModel):
 @app.get("/health")
 async def health():
     return {"status": "ok", "fips": "140-2 validated", "version": "2.1.0"}
+
+
+@app.get("/api/v1/error-codes")
+async def get_error_codes():
+    """Public catalog of every error code SHROUD components emit. Clients
+    and bug-report tooling fetch this once at boot and use it to look up
+    the title + detail for any error_code they encounter — keeps end-user
+    error messages consistent across versions and lets the operator
+    update copy server-side without re-shipping clients."""
+    from crypto.errors import errors as _e
+    return {
+        "version": 1,
+        "count":   len(_e.all()),
+        "errors":  [
+            {
+                "code":   x.code,
+                "http":   x.http,
+                "title":  x.title,
+                "detail": x.detail,
+            }
+            for x in _e.all()
+        ],
+    }
 
 
 # ── Public relay stats (federation health dashboard) ─────────────────
@@ -1950,13 +1983,16 @@ async def encrypted_auth(request: Request):
 
     # v2.6.0: ban enforcement first, before any password / lookup work.
     # The ban's `reason` field is surfaced to the user when the admin
-    # sets one; without a reason the response is a generic "Account banned".
+    # sets one; without a reason the response carries the catalogued title.
+    from crypto.errors import errors, raise_http
     ban = _ban_lookup(username=username, hwid=hwid_in)
     if ban:
         audit_log(username, "BAN_BLOCK_AUTH",
                   f"kind={ban['kind']} value={ban['value'][:16]} reason={ban.get('reason','')[:80]}")
-        msg = ban.get("reason") or "Account banned"
-        raise HTTPException(403, msg)
+        err = (errors.B002_BANNED_HWID if ban["kind"] == "hwid"
+               else errors.B003_BANNED_IP if ban["kind"] == "ip"
+               else errors.B001_BANNED_USERNAME)
+        raise_http(err, extra={"reason": ban.get("reason") or ""})
 
     # Register user if new account
     if is_register:
@@ -2037,13 +2073,16 @@ async def register_device(req: RegisterDeviceRequest):
     # v2.6.0: ban enforcement BEFORE password check so a banned user can't
     # even probe whether their old password is still valid. The ban's
     # `reason` field is surfaced to the user when the admin sets one;
-    # without a reason the response is a generic "Account banned".
+    # without a reason the response carries the generic catalogued title.
+    from crypto.errors import errors, raise_http
     ban = _ban_lookup(username=norm, hwid=req.hwid or "")
     if ban:
         audit_log(req.username, "BAN_BLOCK_REGISTER",
                   f"kind={ban['kind']} value={ban['value'][:16]} reason={ban.get('reason','')[:80]}")
-        msg = ban.get("reason") or "Account banned"
-        raise HTTPException(403, msg)
+        err = (errors.B002_BANNED_HWID if ban["kind"] == "hwid"
+               else errors.B003_BANNED_IP if ban["kind"] == "ip"
+               else errors.B001_BANNED_USERNAME)
+        raise_http(err, extra={"reason": ban.get("reason") or ""})
     user = db.execute(
         "SELECT id, password_hash, password_salt FROM users WHERE username = ?",
         (norm,)
