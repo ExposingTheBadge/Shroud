@@ -15,56 +15,69 @@
 #include <QFileInfo>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QSplitter>
 #include <QJsonDocument>
 #include <QJsonObject>
 
 DiagnosticsTab::DiagnosticsTab(AdminClient *client, QWidget *parent)
     : QWidget(parent), m_client(client) {
     auto *l = new QVBoxLayout(this);
-
-    auto *info = new QLabel(
-        "Drains the anonymous-diagnostics inbox on the currently-configured "
-        "relay. The operator's X25519 private key NEVER leaves your machine "
-        "— this tab spawns <code>python -m tools.diagnostics_inbox poll --json</code> "
-        "with your local keyfile, parses the decoded payload, and renders one "
-        "row per report. Reports are Rule-3 scrubbed before sealing, so "
-        "messages and stack traces contain placeholders like &lt;UUID&gt;, "
-        "&lt;EMAIL&gt;, &lt;IPV4&gt; instead of raw PII.");
-    info->setWordWrap(true);
-    info->setTextFormat(Qt::RichText);
-    info->setStyleSheet("padding:6px;color:#bbb;background:#222;border-left:3px solid #ffb74d");
-    l->addWidget(info);
+    l->setContentsMargins(8, 6, 8, 6);
+    l->setSpacing(6);
 
     auto *bar = new QHBoxLayout;
+    bar->setSpacing(6);
     m_keyfile = new QLineEdit;
     m_keyfile->setText(QDir::home().filePath(".config/shroud/diag.keypair.json"));
+    m_keyfile->setMinimumWidth(280);
     m_browseBtn = new QPushButton("…");
-    m_pollBtn = new QPushButton("Poll inbox");
-    m_pollBtn->setStyleSheet("background:#2e7d32;color:white;padding:6px 14px");
+    m_browseBtn->setMaximumWidth(28);
+    m_pollBtn = new QPushButton("Poll");
+    m_pollBtn->setStyleSheet("background:#2e7d32;color:white;padding:2px 14px");
     bar->addWidget(new QLabel("Keyfile:"));
     bar->addWidget(m_keyfile, 1);
     bar->addWidget(m_browseBtn);
     bar->addWidget(m_pollBtn);
     l->addLayout(bar);
 
-    m_status = new QLabel("Idle. Click 'Poll inbox' to fetch any pending reports.");
-    m_status->setStyleSheet("color:#888;padding:4px");
+    m_status = new QLabel("Anonymous error reports auto-decrypted with your "
+                          "local diag keypair · Rule-3 scrubbed (&lt;UUID&gt; "
+                          "&lt;EMAIL&gt; &lt;IPV4&gt;) before sealing.");
+    m_status->setTextFormat(Qt::RichText);
+    m_status->setStyleSheet("color:#888;font-size:11px;padding:2px 4px");
     l->addWidget(m_status);
+
+    auto *split = new QSplitter(Qt::Vertical);
+    split->setChildrenCollapsible(false);
+    split->setHandleWidth(4);
 
     m_table = new QTableWidget;
     m_table->setColumnCount(5);
     m_table->setHorizontalHeaderLabels({"Time", "App", "Version", "Kind", "Message"});
     m_table->horizontalHeader()->setStretchLastSection(true);
+    m_table->horizontalHeader()->setDefaultSectionSize(110);
+    m_table->verticalHeader()->setDefaultSectionSize(20);
+    m_table->verticalHeader()->setVisible(false);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_table->setMaximumHeight(240);
-    l->addWidget(m_table);
+    m_table->setAlternatingRowColors(true);
+    m_table->setStyleSheet(
+        "QTableWidget { background:#141414; alternate-background-color:#181818; }"
+        "QHeaderView::section { background:#222; padding:3px 6px; border:0; }"
+    );
+    split->addWidget(m_table);
 
     m_detail = new QTextBrowser;
-    m_detail->setStyleSheet("font-family:Consolas,monospace;font-size:11px;background:#0a0a0a;color:#cfcfcf");
-    m_detail->setPlaceholderText("Select a row to see the full decoded report (stack + context).");
-    l->addWidget(m_detail, 1);
+    m_detail->setStyleSheet("font-family:Consolas,monospace;font-size:11px;background:#0a0a0a;color:#cfcfcf;padding:6px");
+    m_detail->setPlaceholderText("Select a row above to see the full decoded report (stack + context).");
+    split->addWidget(m_detail);
+
+    // Table compact by default (~7 rows), detail pane gets the rest.
+    split->setStretchFactor(0, 0);
+    split->setStretchFactor(1, 1);
+    split->setSizes({180, 600});
+    l->addWidget(split, 1);
 
     connect(m_browseBtn, &QPushButton::clicked, [this]() {
         auto p = QFileDialog::getOpenFileName(this, "diag keypair", m_keyfile->text());
