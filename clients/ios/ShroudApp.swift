@@ -17,6 +17,15 @@ struct ShroudApp: App {
     private let OPERATOR_DIAG_PUBKEY_HEX =
         "7191a786437e38ebe616b9508b3110afb1a635e08ac034a330093acca708fd54"
 
+    // SHA-256 pin of the operator's manifest-signing Ed25519 pubkey.
+    // Clients fetch the signed manifest on first launch, verify its
+    // signature with the published pubkey, and require
+    // SHA-256(pubkey) == this pin before accepting any field
+    // (relay URL, diag pubkey, federation roster, sticker CDN).
+    // Rotation requires shipping a release with a new pin.
+    private let SHROUD_MANIFEST_PIN =
+        "2fb11de360a0cf6baa35d6785c3945658ae6d64823041729798a2b689ce00ca0"
+
     init() {
         // Install the anonymous crash + signal reporter once per app
         // launch. The pubkey is checked for non-zero inside install();

@@ -3159,6 +3159,15 @@ static const BYTE g_operator_diag_pubkey[32] = {
     0x30, 0x09, 0x3a, 0xcc, 0xa7, 0x08, 0xfd, 0x54
 };
 
+/* SHA-256 pin of the operator's manifest-signing Ed25519 pubkey.
+ * Clients fetch the signed manifest on first launch, verify its
+ * Ed25519 signature with the published pubkey, and require
+ * SHA-256(pubkey) == this pin before accepting any field
+ * (relay URL, diag pubkey, federation roster, sticker CDN).
+ * Rotation requires shipping a release with a new pin. */
+static const char g_manifest_pin[] =
+    "2fb11de360a0cf6baa35d6785c3945658ae6d64823041729798a2b689ce00ca0";
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName("SHROUD");

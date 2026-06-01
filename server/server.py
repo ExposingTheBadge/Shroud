@@ -1552,6 +1552,59 @@ async def encrypted_auth_v2(request: Request):
     device_id = _reuse_or_create_device(user[0], existing_did, device_name, platform, pub_key_bytes)
     return {"device_id": device_id, "user_id": user[0], "registered": True, "suite": "PQ-HYBRID-v1"}
 
+# ── Operator manifest ────────────────────────────────────────────────
+#
+# Clients fetch the signed operator manifest on first launch and on a
+# refresh cadence to learn: the canonical relay URL, the diagnostics
+# pubkey, the sticker CDN, and the federation peer roster. Each
+# manifest is Ed25519-signed by the operator's manifest-signing key;
+# clients pin SHA-256(pubkey) at install time and reject any manifest
+# whose pubkey doesn't match the pin.
+#
+# The manifest file is generated offline (see
+# tools/build_operator_manifest.py) and dropped at
+# SHROUD_MANIFEST_PATH (default /opt/shroud/data/operator_manifest.signed.json).
+# This endpoint just serves the static bytes — the signature is what
+# clients trust, not the relay's HTTPS cert.
+
+OPERATOR_MANIFEST_PATH = os.environ.get(
+    "SHROUD_MANIFEST_PATH",
+    "/opt/shroud/data/operator_manifest.signed.json",
+)
+
+
+@app.get("/api/v1/operator-manifest")
+async def get_operator_manifest():
+    """Return the signed operator manifest, or 404 if not provisioned.
+
+    Manifest body is opaque to the server beyond JSON parsing — the
+    Ed25519 signature inside is what clients verify against their pinned
+    manifest-signing key. Cache-Control is short because the operator
+    may rotate the roster (new federation peer added) and clients
+    benefit from picking it up reasonably quickly.
+    """
+    if not os.path.exists(OPERATOR_MANIFEST_PATH):
+        raise HTTPException(404, "operator manifest not provisioned on this relay")
+    try:
+        with open(OPERATOR_MANIFEST_PATH, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        raise HTTPException(500, f"manifest read failed: {e}")
+
+    # Sanity-check parse, but DO NOT alter the bytes — clients verify the
+    # signature over the file's canonical body.
+    try:
+        json.loads(data)
+    except json.JSONDecodeError:
+        raise HTTPException(500, "manifest on disk is not valid JSON")
+
+    return Response(
+        content=data,
+        media_type="application/json",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @app.get("/api/v1/version")
 async def get_version():
     """Client update check endpoint. Clients fetch this and compare to their

@@ -12,6 +12,11 @@ on:
           - major
           - minor
           - patch
+      confirm_major:
+        description: "Type CONFIRM-MAJOR-BUMP if (and only if) bump=major"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -33,6 +38,21 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Gate major bumps behind explicit confirmation
+        shell: pwsh
+        run: |
+          $bump    = "${{ github.event.inputs.bump }}"
+          $confirm = "${{ github.event.inputs.confirm_major }}"
+          if ($bump -eq "major" -and $confirm -ne "CONFIRM-MAJOR-BUMP") {
+            Write-Error "Major version bump requires confirm_major=CONFIRM-MAJOR-BUMP. Re-run with the confirmation typed exactly."
+            exit 1
+          }
+          if ($bump -ne "major" -and $confirm -eq "CONFIRM-MAJOR-BUMP") {
+            Write-Error "confirm_major is set but bump=$bump, not major. Clear confirm_major or change bump to major."
+            exit 1
+          }
+          Write-Host "Gate passed: bump=$bump"
 
       - name: Bump version
         id: bump
@@ -193,39 +213,53 @@ jobs:
           $prevTag = git describe --tags --abbrev=0 "$tag^" 2>$null
           if (-not $prevTag) { $prevTag = "" }
 
+          # CRITICAL: `git log` returns an array of strings in PowerShell.
+          # String-interpolating an array uses $OFS (default: single space),
+          # which collapses every commit onto one line. -join "`n" forces
+          # real newlines so the Markdown bullet list actually renders.
           if ($prevTag) {
-            $commits = git log "$prevTag..HEAD" --pretty=format:"- %s" --no-merges
+            $commitLines = git log "$prevTag..HEAD" --pretty=format:"- %s" --no-merges
           } else {
-            $commits = git log HEAD --pretty=format:"- %s" --no-merges
+            $commitLines = git log HEAD --pretty=format:"- %s" --no-merges
           }
-          if (-not $commits) { $commits = "- Internal updates and improvements" }
+          if (-not $commitLines) { $commitLines = @("- Internal updates and improvements") }
+          $commits = ($commitLines -join "`n")
 
-          $body = @"
-          ## Changes
+          # Build the body line-by-line. NO PowerShell here-string — the
+          # YAML run block's baseline indent gets preserved differently
+          # by `pwsh` vs `powershell.exe`, and a 4-space indent kills
+          # Markdown rendering by tripping the indented-code-block rule.
+          $msiName = "${{ steps.msi.outputs.msiname }}"
+          $zipName = "${{ steps.package.outputs.zipname }}"
+          $repo    = "${{ github.repository }}"
 
-          $commits
-
-          ### Windows
-
-          Two install options — both Authenticode-signed; Windows shows **Verified publisher: Brent Gordon**:
-
-          - **``${{ steps.msi.outputs.msiname }}``** — recommended. Double-click to install (Start Menu + Desktop shortcuts, proper uninstall via *Apps & Features*).
-          - **``${{ steps.package.outputs.zipname }}``** — portable zip. Extract and run ``shroud.exe`` directly.
-
-          Verify the hash of whichever file you download against ``SHA256SUMS.txt`` before installing.
-
-          > Android APK and the threshold multisig manifest are added manually after this build per the project's reproducibility process — see [BUILD-REPRODUCIBILITY.md](https://github.com/${{ github.repository }}/blob/main/BUILD-REPRODUCIBILITY.md).
-
-          "@
-
+          $lines = @(
+            "## Changes",
+            "",
+            $commits,
+            "",
+            "### Windows",
+            "",
+            "Two install options. Both the **MSI installer** and the **``shroud.exe``** inside it are Authenticode-signed via Azure Artifact Signing — Windows shows **Verified publisher: Brent Gordon** at install time and on every launch.",
+            "",
+            "- **``$msiName``** _(recommended)_ — double-click to install. Adds Start Menu + Desktop shortcuts, registers in *Apps & Features* for clean uninstall, performs a Major Upgrade if an older version is present.",
+            "- **``$zipName``** — portable zip. Extract anywhere and run ``shroud.exe`` directly. No installer, no registry changes.",
+            "",
+            "Verify the SHA-256 of whichever file you download against ``SHA256SUMS.txt`` before installing.",
+            "",
+            "> Android APK and the threshold multisig manifest are added manually after this build per the project's reproducibility process — see [BUILD-REPRODUCIBILITY.md](https://github.com/$repo/blob/main/BUILD-REPRODUCIBILITY.md)."
+          )
           if ($prevTag) {
-            $body += "`n**Full Changelog:** https://github.com/${{ github.repository }}/compare/$prevTag...$tag"
+            $lines += ""
+            $lines += "**Full Changelog:** https://github.com/$repo/compare/$prevTag...$tag"
           }
+          $body = ($lines -join "`n")
 
           $delim = "EOF_NOTES_$([guid]::NewGuid().ToString('N'))"
-          "body<<$delim" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          $body | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          $delim | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          # ASCII (no BOM) — required by the GITHUB_OUTPUT parser.
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "body<<$delim" -Encoding ascii
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $body          -Encoding ascii
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $delim         -Encoding ascii
 
       - name: Commit version bump
         shell: pwsh

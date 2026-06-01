@@ -24,6 +24,7 @@ set(WIN_MODULES
 
 add_executable(shroud
     main.cpp
+    anon_client.cpp
     shroud.qrc
     shroud.rc
     ${WIN_MODULES}

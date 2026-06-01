@@ -1,23 +1,51 @@
 # Windows client: wireup to anonymous routing endpoints
 
-Adapter patch turning the Windows Qt6 client's legacy `/messages/send` +
-`/messages/fetch` path into a Rule-1 + Rule-2 compliant one using
-`/messages/send-anon` + `/messages/fetch-anon`, backed by the C
-library at [`clients/windows/anon_routing.c`](anon_routing.c).
+## ✅ Use `anon_client.{h,cpp}` going forward
 
-## ⚠ Required helpers not yet in main.cpp
+The clean approach is now the `shroud::AnonClient` C++ class in
+[`anon_client.h`](anon_client.h) / [`anon_client.cpp`](anon_client.cpp).
+It mirrors the iOS `NetworkClientAnon` and Android
+`sendAnonForContacts` APIs:
 
-Before applying this patch, three helpers it references must exist in
-the surrounding `ShroudWindow` class. They do **not** currently exist
-and must be added first:
+```cpp
+#include "anon_client.h"
 
-| Reference | What it does | Adapter strategy |
-|---|---|---|
-| `activeContactDeviceIds()` | Returns a `QStringList` of every contact's device_id | Walk `m_contactList`'s items, pulling `data(Qt::UserRole)` |
-| `handleIncoming(sender, env)` | Dispatch a decoded envelope through the existing display pipeline | Refactor the body of `fetchMessages()`'s `for (const QJsonValue &mv : msgs)` loop into a named method, then call it from both legacy and anon paths |
-| `setting_set(key, value)` | Persist a key/value setting across launches | Either add via `QSettings` or extend the existing `storage_save_blob` API; check the patterns already used for theme/anon flags |
+shroud::AnonClient client(L"44.202.225.57", 58443, /*tolerate_self_signed=*/true);
 
-Without these three adapters, the patch will not compile.
+shroud::RoutingContext ctx;
+memcpy(ctx.my_priv,    /* my X25519 priv */, 32);
+memcpy(ctx.my_pub,     /* my X25519 pub  */, 32);
+memcpy(ctx.peer_pub,   /* peer's pub     */, 32);
+memcpy(ctx.shared_root,/* X3DH root      */, 32);
+
+std::vector<BYTE> inner = /* serialize legacy envelope JSON */;
+bool ok = client.sendSealed(ctx, inner.data(), inner.size(), /*ttl_sec=*/3600);
+
+// Receive:
+std::vector<shroud::IncomingAnon> in;
+std::vector<std::pair<std::vector<BYTE>, std::vector<BYTE>>> contacts;
+// fill contacts with {peer_pub, shared_root} pairs for every known peer
+client.fetchMessages(my_priv, my_pub, contacts, in);
+```
+
+The class uses WinHTTP directly (no Qt dependency), tolerates the
+production relays' self-signed certs by default, and handles padding
+buckets + epoch windowing internally — same semantics as iOS / Android.
+
+Already wired into the build: `anon_client.cpp` is added to the
+`add_executable(shroud ...)` source list in
+[`CMakeLists.txt`](CMakeLists.txt). No extra link libs needed (winhttp
+was already in the link line).
+
+## Legacy in-place branching patch (deprecated)
+
+The earlier approach described below tried to branch the existing
+`sendMessage()` / `fetchMessages()` paths in `main.cpp` directly. It
+turned out to reference three helpers that do not exist in the current
+codebase (`activeContactDeviceIds()`, `handleIncoming()`,
+`setting_set()`). Rather than add those + carry the branch risk, we
+shipped the additive `shroud::AnonClient` wrapper. The notes below are
+preserved for reference only.
 
 This is **a reviewed-before-apply patch**, not a committed code change.
 The Windows client compiles in CI today; applying the patch without
