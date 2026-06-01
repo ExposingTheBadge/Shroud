@@ -13,6 +13,7 @@ extern "C" {
 extern "C" {
 #include "ratchet.h"
 }
+#include "error_reporter.h"
 }
 
 /* ===================================================================
