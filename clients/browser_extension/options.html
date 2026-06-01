@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SHROUD Share — Options</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 560px; padding: 20px; }
+    h1 { font-size: 18px; margin: 0 0 12px 0; }
+    h2 { font-size: 14px; margin: 18px 0 6px 0; }
+    label { display: block; font-size: 12px; margin-top: 8px; color: #444; }
+    input, textarea, button, select { box-sizing: border-box; width: 100%; }
+    textarea { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; min-height: 110px; }
+    button { margin-top: 12px; padding: 8px 12px; cursor: pointer; }
+    button.danger { background: #b00020; color: white; border: 0; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row > * { flex: 1; }
+    .status { margin-top: 10px; font-size: 12px; min-height: 18px; }
+    .ok { color: green; }
+    .err { color: #b00020; }
+    .pubkey { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; padding: 6px; background: #f0f0f0; border-radius: 4px; }
+    .help { font-size: 11px; color: #555; line-height: 1.4; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h1>SHROUD Share — Options</h1>
+
+  <h2>Relay</h2>
+  <label for="relay">Relay URL</label>
+  <input id="relay" placeholder="https://relay.example:58443">
+  <p class="help">The SHROUD relay your sealed messages get posted to. Defaults to the public one for the project.</p>
+
+  <h2>Your identity</h2>
+  <p class="help">An X25519 keypair this browser uses to seal messages. Generate one or paste an existing one. The private key never leaves this browser.</p>
+  <label>Public key (hex)</label>
+  <div class="pubkey" id="pubkey">(none)</div>
+  <div class="row">
+    <button id="gen">Generate new identity</button>
+    <button id="clear" class="danger">Erase identity</button>
+  </div>
+
+  <h2>Contacts</h2>
+  <p class="help">One per line, JSON-encoded: <code>{"name":"alice","identity_pubkey_hex":"...","shared_root_hex":"..."}</code></p>
+  <textarea id="contacts" placeholder='{"name":"alice","identity_pubkey_hex":"...","shared_root_hex":"..."}'></textarea>
+  <button id="save">Save</button>
+  <div class="status" id="status"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>
