@@ -188,16 +188,39 @@ static void replyToCb(QNetworkReply *reply,
     QObject::connect(reply, &QNetworkReply::finished, [reply, cb]() {
         QString err;
         QJsonDocument doc;
-        if (reply->error() != QNetworkReply::NoError) {
-            err = reply->errorString();
-        }
+        int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const auto body = reply->readAll();
+        // Always try to parse the body — Anthropic returns useful
+        // error JSON (type, message) even on 400/401/403.
         if (!body.isEmpty()) {
             QJsonParseError pe;
             doc = QJsonDocument::fromJson(body, &pe);
-            if (pe.error != QJsonParseError::NoError && err.isEmpty()) {
-                err = QString("parse error: %1").arg(pe.errorString());
+            if (pe.error != QJsonParseError::NoError) {
+                doc = QJsonDocument();
             }
+        }
+        if (reply->error() != QNetworkReply::NoError) {
+            // Prefer the parsed-JSON 'message' or 'error.message'
+            // surface; fall back to Qt's errorString. Always prefix
+            // with the HTTP code so we can tell auth (401) apart from
+            // bad request (400), rate-limit (429), etc.
+            QString jsonMsg;
+            if (doc.isObject()) {
+                auto o = doc.object();
+                if (o.contains("error") && o.value("error").isObject()) {
+                    jsonMsg = o.value("error").toObject().value("message").toString();
+                }
+                if (jsonMsg.isEmpty()) jsonMsg = o.value("message").toString();
+                if (jsonMsg.isEmpty()) {
+                    // Whole body as fallback
+                    jsonMsg = QString::fromUtf8(body.left(300));
+                }
+            } else if (!body.isEmpty()) {
+                jsonMsg = QString::fromUtf8(body.left(300));
+            }
+            if (jsonMsg.isEmpty()) jsonMsg = reply->errorString();
+            err = (http > 0 ? QString("HTTP %1: ").arg(http) : QString())
+                + jsonMsg;
         }
         reply->deleteLater();
         cb(doc, err);

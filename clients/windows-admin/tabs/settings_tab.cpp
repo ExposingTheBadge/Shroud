@@ -250,12 +250,19 @@ void SettingsTab::onTestAnthropic() {
     msgs.append(m);
     m_client->anthropicMessage(msgs, "", 16,
         [this](const QJsonDocument &d, const QString &err) {
-            if (!err.isEmpty()) { m_status->setText("Anthropic FAILED: " + err); return; }
+            if (!err.isEmpty()) {
+                m_status->setText("Anthropic FAILED: " + err);
+                m_status->setStyleSheet("color:#ff8a8a;padding:6px");
+                return;
+            }
             auto o = d.object();
             if (o.contains("error")) {
-                m_status->setText("Anthropic FAILED: " + QString::fromUtf8(d.toJson(QJsonDocument::Compact)));
+                m_status->setText("Anthropic FAILED: "
+                    + QString::fromUtf8(d.toJson(QJsonDocument::Compact)));
+                m_status->setStyleSheet("color:#ff8a8a;padding:6px");
             } else {
-                m_status->setText("Anthropic OK.");
+                m_status->setText("Anthropic OK — key works.");
+                m_status->setStyleSheet("color:#7fff7f;padding:6px");
             }
         });
 }
