@@ -26,6 +26,17 @@ jdk/
 *.log
 *.tmp
 
+# Private keypair files — diagnostics, operator, signing. NEVER COMMIT.
+*.keypair.json
+*.privkey
+*operator_ed25519.json
+*operator_priv*
+diag.keypair*
+*.pem
+*.p12
+*.pfx
+!*.pubkey
+
 # Training
 tokenized_dataset/
 model-output/

@@ -3142,11 +3142,22 @@ private:
 
 #include "main.moc"
 
-/* Operator diagnostics X25519 pubkey (32 bytes). Replace with the
- * real operator pubkey before shipping a release that should forward
- * anonymous error reports. Placeholder all-zeros means
- * error_reporter_install() is wired but submission is a no-op. */
-static const BYTE g_operator_diag_pubkey[32] = {0};
+/* Operator diagnostics X25519 pubkey (32 bytes).
+ * Live operator key. Anonymous error reports sealed with this pubkey
+ * land in the operator's diagnostics inbox; only the operator's
+ * private key (held offline, never on a relay) can decrypt them.
+ * To rotate: regenerate via `python -m tools.diagnostics_inbox keygen`,
+ * replace the bytes here AND in MainActivity.kt + ShroudApp.swift,
+ * ship a new release, retire the old key file.
+ *
+ * Pubkey hex:
+ *   7191a786437e38ebe616b9508b3110afb1a635e08ac034a330093acca708fd54 */
+static const BYTE g_operator_diag_pubkey[32] = {
+    0x71, 0x91, 0xa7, 0x86, 0x43, 0x7e, 0x38, 0xeb,
+    0xe6, 0x16, 0xb9, 0x50, 0x8b, 0x31, 0x10, 0xaf,
+    0xb1, 0xa6, 0x35, 0xe0, 0x8a, 0xc0, 0x34, 0xa3,
+    0x30, 0x09, 0x3a, 0xcc, 0xa7, 0x08, 0xfd, 0x54
+};
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);

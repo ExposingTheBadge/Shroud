@@ -6,12 +6,16 @@ import CryptoKit
 struct ShroudApp: App {
     @StateObject private var client = ShroudClient()
 
-    // Operator diagnostics X25519 pubkey (32 bytes hex). Bake the real
-    // operator pubkey in here before shipping a release that should
-    // forward anonymous error reports. Placeholder all-zeros means
-    // ErrorReporter skips submission — installed but inert.
+    // Operator diagnostics X25519 pubkey (32 bytes hex).
+    // Live operator key. Anonymous error reports sealed with this pubkey
+    // land in the operator's diagnostics inbox; only the operator's
+    // private key (held offline, never on a relay) can decrypt them.
+    // To rotate: regenerate via `python -m tools.diagnostics_inbox keygen`,
+    // replace the hex here AND in MainActivity.kt + main.cpp, ship a
+    // release, retire the old key file. Future versions will fetch this
+    // from a signed operator manifest instead of hardcoding it.
     private let OPERATOR_DIAG_PUBKEY_HEX =
-        "0000000000000000000000000000000000000000000000000000000000000000"
+        "7191a786437e38ebe616b9508b3110afb1a635e08ac034a330093acca708fd54"
 
     init() {
         // Install the anonymous crash + signal reporter once per app
