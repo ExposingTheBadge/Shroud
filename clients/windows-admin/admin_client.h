@@ -30,6 +30,19 @@ public:
     void   setAnthropicKey(const QString &k);
     QString anthropicKey() const { return m_anthropicKey; }
 
+    // Route via a SOCKS5 proxy (e.g. "127.0.0.1:9050" for local Tor).
+    // Empty string disables proxying.
+    void   setSocksProxy(const QString &hostPort);
+    QString socksProxy() const { return m_socksProxy; }
+
+    // Live admin login. Posts username + password to the appropriate
+    // endpoint, stashes the returned session cookie, and reconnects the
+    // /ws/admin WebSocket so live events start flowing. callback gets
+    // (true, "") on success or (false, error_message).
+    void adminLogin(const QString &username, const QString &password,
+                    std::function<void(bool, const QString &)> cb);
+    void adminLogout(std::function<void(bool)> cb);
+
     // GET wrappers. Callback receives (parsed json, error string).
     void getJson(const QString &path,
                  std::function<void(const QJsonDocument &, const QString &)> cb);
@@ -63,10 +76,12 @@ private:
     QString m_relayUrl;
     QString m_sessionCookie;
     QString m_anthropicKey;
+    QString m_socksProxy;
     QWebSocket m_ws;
     bool m_acceptSelfSigned = true;
 
     QNetworkRequest buildReq(const QString &fullUrl, const QString &contentType = "");
+    void applyProxy();
 };
 
 #endif

@@ -30,17 +30,35 @@ SettingsTab::SettingsTab(AdminClient *client, QWidget *parent)
     m_sessionCookie->setEchoMode(QLineEdit::Password);
     m_anthropicKey  = new QLineEdit(m_client->anthropicKey());
     m_anthropicKey->setEchoMode(QLineEdit::Password);
+    m_socksProxy    = new QLineEdit(m_client->socksProxy());
+    m_socksProxy->setPlaceholderText("127.0.0.1:9050 (Tor) — leave empty for direct");
     m_diagKeyfile     = new QLineEdit(s.value("diag_keyfile",
         QDir::home().filePath(".config/shroud/diag.keypair.json")).toString());
     m_manifestKeyfile = new QLineEdit(s.value("manifest_keyfile",
         QDir::home().filePath(".config/shroud/manifest.ed25519.json")).toString());
 
     fl->addRow("Relay URL",              m_relayUrl);
+    fl->addRow("SOCKS5 proxy (Tor)",     m_socksProxy);
     fl->addRow("Admin session cookie",   m_sessionCookie);
     fl->addRow("Anthropic API key",      m_anthropicKey);
     fl->addRow("Diagnostics keyfile",    m_diagKeyfile);
     fl->addRow("Manifest signing keyfile", m_manifestKeyfile);
     l->addLayout(fl);
+
+    // Login group — alternative to pasting a cookie
+    auto *loginBar = new QHBoxLayout;
+    m_loginUser = new QLineEdit;  m_loginUser->setPlaceholderText("Admin username");
+    m_loginPass = new QLineEdit;  m_loginPass->setPlaceholderText("Password");
+    m_loginPass->setEchoMode(QLineEdit::Password);
+    m_loginBtn  = new QPushButton("Log in");
+    m_loginBtn->setStyleSheet("background:#2e7d32;color:white;padding:6px 14px");
+    m_logoutBtn = new QPushButton("Log out");
+    loginBar->addWidget(new QLabel("Login →"));
+    loginBar->addWidget(m_loginUser, 1);
+    loginBar->addWidget(m_loginPass, 1);
+    loginBar->addWidget(m_loginBtn);
+    loginBar->addWidget(m_logoutBtn);
+    l->addLayout(loginBar);
 
     auto *bar = new QHBoxLayout;
     m_saveBtn = new QPushButton("Save");
@@ -62,12 +80,34 @@ SettingsTab::SettingsTab(AdminClient *client, QWidget *parent)
     connect(m_saveBtn, &QPushButton::clicked, this, &SettingsTab::onSave);
     connect(m_testRelayBtn, &QPushButton::clicked, this, &SettingsTab::onTestRelay);
     connect(m_testAnthropicBtn, &QPushButton::clicked, this, &SettingsTab::onTestAnthropic);
+    connect(m_loginBtn,  &QPushButton::clicked, [this]() {
+        m_status->setText("Logging in…");
+        m_loginBtn->setEnabled(false);
+        m_client->adminLogin(m_loginUser->text().trimmed(), m_loginPass->text(),
+            [this](bool ok, const QString &err) {
+                m_loginBtn->setEnabled(true);
+                if (ok) {
+                    m_status->setText("Logged in. Session captured.");
+                    m_sessionCookie->setText(m_client->adminSessionCookie());
+                    m_loginPass->clear();
+                } else {
+                    m_status->setText("Login failed: " + err);
+                }
+            });
+    });
+    connect(m_logoutBtn, &QPushButton::clicked, [this]() {
+        m_client->adminLogout([this](bool ok) {
+            m_status->setText(ok ? "Logged out." : "Logout request failed (cookie cleared locally).");
+            m_sessionCookie->clear();
+        });
+    });
 }
 
 void SettingsTab::onSave() {
     m_client->setRelayUrl(m_relayUrl->text().trimmed());
     m_client->setAdminSessionCookie(m_sessionCookie->text().trimmed());
     m_client->setAnthropicKey(m_anthropicKey->text().trimmed());
+    m_client->setSocksProxy(m_socksProxy->text().trimmed());
     QSettings s("SHROUD", "admin");
     s.setValue("diag_keyfile",     m_diagKeyfile->text());
     s.setValue("manifest_keyfile", m_manifestKeyfile->text());

@@ -1,6 +1,7 @@
 #include "admin_client.h"
 #include <QSslConfiguration>
 #include <QtNetwork/QNetworkCookie>
+#include <QtNetwork/QNetworkProxy>
 #include <QUrlQuery>
 
 AdminClient::AdminClient(QObject *parent) : QObject(parent) {
@@ -8,6 +9,8 @@ AdminClient::AdminClient(QObject *parent) : QObject(parent) {
     m_relayUrl       = s.value("relay_url", "https://44.202.225.57:58443").toString();
     m_anthropicKey   = s.value("anthropic_key", "").toString();
     m_sessionCookie  = s.value("admin_session", "").toString();
+    m_socksProxy     = s.value("socks_proxy", "").toString();
+    applyProxy();
 
     connect(&m_ws, &QWebSocket::connected,         this, &AdminClient::onWsConnected);
     connect(&m_ws, &QWebSocket::disconnected,      this, &AdminClient::onWsDisconnected);
@@ -16,6 +19,68 @@ AdminClient::AdminClient(QObject *parent) : QObject(parent) {
             this, [this](const QList<QSslError> &) {
                 if (m_acceptSelfSigned) m_ws.ignoreSslErrors();
             });
+}
+
+void AdminClient::setSocksProxy(const QString &hostPort) {
+    m_socksProxy = hostPort.trimmed();
+    QSettings("SHROUD", "admin").setValue("socks_proxy", m_socksProxy);
+    applyProxy();
+}
+
+void AdminClient::applyProxy() {
+    QNetworkProxy proxy;
+    if (m_socksProxy.isEmpty()) {
+        proxy.setType(QNetworkProxy::NoProxy);
+    } else {
+        QStringList parts = m_socksProxy.split(':');
+        if (parts.size() != 2) {
+            proxy.setType(QNetworkProxy::NoProxy);
+        } else {
+            proxy.setType(QNetworkProxy::Socks5Proxy);
+            proxy.setHostName(parts[0]);
+            proxy.setPort(parts[1].toUShort());
+        }
+    }
+    m_nam.setProxy(proxy);
+    m_ws.setProxy(proxy);
+}
+
+void AdminClient::adminLogin(const QString &username, const QString &password,
+                             std::function<void(bool, const QString &)> cb) {
+    QJsonObject body;
+    body["username"] = username;
+    body["password"] = password;
+    QNetworkRequest req = buildReq(m_relayUrl + "/api/v1/admin/login", "application/json");
+    QNetworkReply *r = m_nam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    QObject::connect(r, &QNetworkReply::finished, [this, r, cb]() {
+        if (r->error() != QNetworkReply::NoError) {
+            QString detail = QString::fromUtf8(r->readAll());
+            r->deleteLater();
+            cb(false, detail.isEmpty() ? r->errorString() : detail);
+            return;
+        }
+        // Capture the session cookie set by the server
+        auto cookies = qvariant_cast<QList<QNetworkCookie>>(
+            r->header(QNetworkRequest::SetCookieHeader));
+        for (const auto &c : cookies) {
+            if (c.name() == "shroud_admin") {
+                setAdminSessionCookie(QString::fromUtf8(c.value()));
+                break;
+            }
+        }
+        r->deleteLater();
+        connectAdminWs();
+        cb(true, "");
+    });
+}
+
+void AdminClient::adminLogout(std::function<void(bool)> cb) {
+    postJson("/api/v1/admin/logout", QJsonObject(),
+             [this, cb](const QJsonDocument &, const QString &err) {
+        setAdminSessionCookie("");
+        disconnectAdminWs();
+        cb(err.isEmpty());
+    });
 }
 
 void AdminClient::setRelayUrl(const QString &url) {

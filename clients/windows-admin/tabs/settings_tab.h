@@ -17,8 +17,11 @@ private slots:
 private:
     AdminClient *m_client;
     QLineEdit *m_relayUrl, *m_sessionCookie, *m_anthropicKey;
+    QLineEdit *m_socksProxy;
     QLineEdit *m_diagKeyfile, *m_manifestKeyfile;
+    QLineEdit *m_loginUser, *m_loginPass;
     QLabel *m_status;
     QPushButton *m_saveBtn, *m_testRelayBtn, *m_testAnthropicBtn;
+    QPushButton *m_loginBtn, *m_logoutBtn;
 };
 #endif

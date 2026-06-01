@@ -8,6 +8,8 @@
 #include <QFrame>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QGuiApplication>
+#include <QClipboard>
 
 static QString humanUptime(qint64 s) {
     if (s <= 0) return "—";
@@ -123,6 +125,37 @@ void FederationTab::refresh() {
                     err->setTextFormat(Qt::RichText);
                     err->setWordWrap(true);
                     cl->addWidget(err);
+                }
+                // Per-card actions — only render when the card represents
+                // a remote peer (self has no public endpoint).
+                if (ok && safeStr(r.value("endpoint")) != "self") {
+                    auto *abar = new QHBoxLayout;
+                    auto *copyBtn   = new QPushButton("Copy URL");
+                    auto *manifestBtn = new QPushButton("Fetch manifest");
+                    abar->addWidget(copyBtn);
+                    abar->addWidget(manifestBtn);
+                    abar->addStretch();
+                    cl->addLayout(abar);
+                    QString endpoint = safeStr(r.value("endpoint"));
+                    connect(copyBtn, &QPushButton::clicked, [endpoint]() {
+                        QGuiApplication::clipboard()->setText(endpoint);
+                    });
+                    connect(manifestBtn, &QPushButton::clicked, [this, endpoint]() {
+                        auto previousUrl = m_client->relayUrl();
+                        m_client->setRelayUrl(endpoint);
+                        m_client->getJson("/api/v1/operator-manifest",
+                            [this, previousUrl](const QJsonDocument &d, const QString &err) {
+                                m_client->setRelayUrl(previousUrl);
+                                if (!err.isEmpty()) {
+                                    m_summary->setText("Manifest fetch failed: " + err);
+                                    return;
+                                }
+                                m_summary->setText("Manifest OK — schema "
+                                    + d.object().value("schema").toString()
+                                    + ", peers "
+                                    + QString::number(d.object().value("federation_peers").toArray().size()));
+                            });
+                    });
                 }
                 cl->addStretch();
                 m_grid->addWidget(card, row, col);
