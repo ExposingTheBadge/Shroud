@@ -58,7 +58,7 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
     m_tabs->addTab(m_identity,   "Identity");
     m_tabs->addTab(m_backup,     "Backup");
     m_tabs->addTab(m_multisig,   "Multisig");
-    m_tabs->addTab(m_diag,       "Diagnostics");
+    m_tabs->addTab(m_diag,       "Error Reports");
     m_tabs->addTab(m_manifest,   "Manifest");
     m_tabs->addTab(m_ssh,        "Relays (SSH)");
     m_tabs->addTab(m_claude,     "Claude Chat");

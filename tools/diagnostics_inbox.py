@@ -111,6 +111,33 @@ def poll(args) -> int:
         body = json.loads(resp.read())
 
     reports = body.get("reports", [])
+
+    # JSON mode — emit a single envelope the admin client parses
+    # directly. Includes every decoded report inline.
+    if args.json:
+        out = {"tags_scanned": len(tags), "reports": []}
+        for r in reports:
+            sealed_bytes = bytes.fromhex(r["sealed"])
+            sealed_trimmed = _trim_sealed_tail(sealed_bytes)
+            decoded = None
+            last_err = None
+            for tail in range(len(sealed_trimmed),
+                              min(len(sealed_trimmed) + 33, 4097)):
+                try:
+                    plain = unseal(sealed_bytes[:tail], priv_bytes)
+                    decoded = json.loads(plain.decode("utf-8"))
+                    break
+                except Exception as e:
+                    last_err = e
+            out["reports"].append({
+                "id":      r.get("id"),
+                "ts":      r.get("ts"),
+                "decoded": decoded,
+                "error":   None if decoded else str(last_err),
+            })
+        print(json.dumps(out, indent=2, sort_keys=False))
+        return 0
+
     if not reports:
         print(f"no pending reports across {len(tags)} tag(s)")
         return 0
@@ -172,6 +199,9 @@ def main() -> int:
                     help="how many past epochs to scan (1 epoch = 1 hour)")
     pl.add_argument("--limit", type=int, default=100)
     pl.add_argument("--verify-tls", action="store_true")
+    pl.add_argument("--json", action="store_true",
+                    help="emit a single JSON document with decoded reports "
+                         "(for admin-client consumption)")
     pl.set_defaults(fn=poll)
 
     args = ap.parse_args()

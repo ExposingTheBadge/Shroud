@@ -1,7 +1,9 @@
 #ifndef SHROUD_ADMIN_DIAGNOSTICS_TAB_H
 #define SHROUD_ADMIN_DIAGNOSTICS_TAB_H
 #include <QWidget>
-class QPlainTextEdit; class QLineEdit; class QPushButton;
+#include <QJsonArray>
+class QTableWidget; QT_FORWARD_DECLARE_CLASS(QTextBrowser);
+class QLineEdit; class QPushButton; class QLabel;
 class QProcess;
 class AdminClient;
 
@@ -11,13 +13,17 @@ public:
     explicit DiagnosticsTab(AdminClient *client, QWidget *parent = nullptr);
 private slots:
     void onPoll();
-    void onProcessOutput();
+    void onSelectionChanged();
     void onProcessFinished(int code);
 private:
     AdminClient *m_client;
     QLineEdit *m_keyfile;
-    QPlainTextEdit *m_output;
-    QPushButton *m_pollBtn;
-    QProcess *m_proc;
+    QTableWidget *m_table;
+    QTextBrowser *m_detail;
+    QLabel       *m_status;
+    QPushButton  *m_pollBtn, *m_browseBtn;
+    QProcess     *m_proc;
+    QJsonArray    m_reports;
+    QString       resolvePython() const;
 };
 #endif
