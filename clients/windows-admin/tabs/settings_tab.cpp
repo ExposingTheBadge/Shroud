@@ -14,6 +14,7 @@
 #include <QClipboard>
 #include <QFont>
 #include <QDateTime>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonObject>
 
@@ -129,17 +130,39 @@ SettingsTab::SettingsTab(AdminClient *client, QWidget *parent)
     connect(m_claudeSignInBtn, &QPushButton::clicked, [this, refreshClaudeStatus]() {
         m_claudeSignInBtn->setEnabled(false);
         m_claudeStatus->setText("Opening browser…");
+        // Helper outlives the browser handoff — same instance must do
+        // the PKCE start + finishWithCode so the code_verifier is the
+        // one Anthropic expects.
         auto *oa = new OAuthHelper(this);
         oa->start([this, oa, refreshClaudeStatus](bool ok, const QString &err) {
             m_claudeSignInBtn->setEnabled(true);
-            oa->deleteLater();
             if (ok) {
                 refreshClaudeStatus();
             } else {
                 m_claudeStatus->setText("Sign-in failed: " + err);
                 m_claudeStatus->setStyleSheet("color:#ff8a8a;padding:0 6px");
             }
+            oa->deleteLater();
         });
+        // Prompt for the pasted code (Anthropic only honors the fixed
+        // console.anthropic.com/oauth/code/callback redirect — there is
+        // no localhost option, so the user copies the code off the
+        // callback page and pastes it here).
+        bool ok = false;
+        QString code = QInputDialog::getText(this,
+            "Paste the Anthropic auth code",
+            "Your browser opened the Anthropic authorize page.\n"
+            "After clicking Authorize, paste the code (or the full URL "
+            "from the callback page) here.",
+            QLineEdit::Normal, "", &ok);
+        if (!ok || code.trimmed().isEmpty()) {
+            m_claudeStatus->setText("Sign-in cancelled.");
+            m_claudeSignInBtn->setEnabled(true);
+            oa->deleteLater();
+            return;
+        }
+        m_claudeStatus->setText("Exchanging code for tokens…");
+        oa->finishWithCode(code);
     });
     connect(m_claudeSignOutBtn, &QPushButton::clicked, [refreshClaudeStatus]() {
         OAuthHelper::clear();

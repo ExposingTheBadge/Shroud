@@ -4,7 +4,6 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QUrlQuery>
-#include <QtNetwork/QTcpSocket>
 #include <QtNetwork/QNetworkReply>
 #include <QtNetwork/QNetworkRequest>
 #include <QJsonDocument>
@@ -12,19 +11,28 @@
 #include <QRandomGenerator>
 #include <QDateTime>
 
-// Anthropic OAuth endpoints. These are the same endpoints Claude Code
-// uses; the client_id is the Claude Code public OAuth app identifier.
-// This admin client is operator-only and never distributed publicly
-// (see clients/windows-admin/README.md), so we ride the same OAuth
-// surface a Pro/Max account would when signing into Claude Code.
+// Anthropic OAuth endpoints. These match what Claude Code uses; the
+// client_id is the Claude Code public OAuth app identifier. The
+// shroud-admin EXE is operator-only (clients/windows-admin/README.md
+// states it's never shipped publicly), and OAuth scopes match what a
+// Pro/Max account would grant Claude Code itself.
+//
+// Anthropic does NOT honor loopback redirect URIs for this OAuth app;
+// the only allowed redirect is console.anthropic.com/oauth/code/callback,
+// which renders the auth code in the URL fragment+query for the user
+// to copy. We follow the same pattern as Claude Code's terminal flow:
+// open the browser, then prompt the operator to paste the code back.
 static const char *AUTH_URL  = "https://claude.ai/oauth/authorize";
 static const char *TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
 static const char *CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 static const char *SCOPES    = "org:create_api_key user:profile user:inference";
 
+QString OAuthHelper::redirectUri() {
+    return "https://console.anthropic.com/oauth/code/callback";
+}
+
 QString OAuthHelper::b64url(const QByteArray &raw) {
     QString s = QString::fromLatin1(raw.toBase64(QByteArray::Base64UrlEncoding));
-    // Strip padding for OAuth PKCE canonical form
     while (s.endsWith('=')) s.chop(1);
     return s;
 }
@@ -51,7 +59,6 @@ bool OAuthHelper::hasFreshToken() {
     QString t = accessToken();
     if (t.isEmpty()) return false;
     qint64 now = QDateTime::currentSecsSinceEpoch();
-    // 30s slop so we don't race the server-side expiry check
     return expiresAt() > now + 30;
 }
 void OAuthHelper::clear() {
@@ -62,87 +69,58 @@ void OAuthHelper::clear() {
     s.remove("anthropic_account_email");
 }
 
+QString OAuthHelper::authorizeUrl() const {
+    QString challenge = b64url(QCryptographicHash::hash(
+        m_codeVerifier.toUtf8(), QCryptographicHash::Sha256));
+    QUrl u(AUTH_URL);
+    QUrlQuery q;
+    q.addQueryItem("code",                 "true");
+    q.addQueryItem("client_id",            CLIENT_ID);
+    q.addQueryItem("response_type",        "code");
+    q.addQueryItem("redirect_uri",         redirectUri());
+    q.addQueryItem("scope",                SCOPES);
+    q.addQueryItem("code_challenge",       challenge);
+    q.addQueryItem("code_challenge_method","S256");
+    q.addQueryItem("state",                m_state);
+    u.setQuery(q);
+    return u.toString();
+}
+
 void OAuthHelper::start(std::function<void(bool, const QString &)> cb) {
     m_cb = std::move(cb);
 
-    // PKCE: high-entropy verifier + S256 challenge
+    // Fresh PKCE pair + state for every attempt.
     m_codeVerifier = b64url(randomBytes(32));
-    QString challenge = b64url(QCryptographicHash::hash(
-        m_codeVerifier.toUtf8(), QCryptographicHash::Sha256));
-    m_state = b64url(randomBytes(16));
+    m_state        = b64url(randomBytes(16));
 
-    // Bring up a loopback listener on a free port
-    if (m_server) { m_server->deleteLater(); m_server = nullptr; }
-    m_server = new QTcpServer(this);
-    if (!m_server->listen(QHostAddress::LocalHost, 0)) {
-        m_cb(false, "Could not open loopback listener: " + m_server->errorString());
-        return;
+    if (!QDesktopServices::openUrl(QUrl(authorizeUrl()))) {
+        if (m_cb) m_cb(false, "Could not open the system browser.");
     }
-    m_port = m_server->serverPort();
-    connect(m_server, &QTcpServer::newConnection,
-            this, &OAuthHelper::onIncomingConnection);
-
-    // Compose authorize URL + open browser
-    QUrl u(AUTH_URL);
-    QUrlQuery q;
-    q.addQueryItem("client_id", CLIENT_ID);
-    q.addQueryItem("response_type", "code");
-    q.addQueryItem("redirect_uri", QString("http://localhost:%1/callback").arg(m_port));
-    q.addQueryItem("scope", SCOPES);
-    q.addQueryItem("code_challenge", challenge);
-    q.addQueryItem("code_challenge_method", "S256");
-    q.addQueryItem("state", m_state);
-    u.setQuery(q);
-    if (!QDesktopServices::openUrl(u)) {
-        m_cb(false, "Could not open system browser.");
-    }
+    // The UI is responsible for collecting the code from the user and
+    // calling finishWithCode().
 }
 
-void OAuthHelper::onIncomingConnection() {
-    while (auto *sock = m_server->nextPendingConnection()) {
-        connect(sock, &QTcpSocket::readyRead, this, &OAuthHelper::onCallbackRead);
-        connect(sock, &QTcpSocket::disconnected, sock, &QObject::deleteLater);
+void OAuthHelper::finishWithCode(const QString &codeBlob) {
+    // Anthropic's callback page renders the code as
+    //   <code>#<state>
+    // (or sometimes just <code>). Accept either form, and tolerate the
+    // user pasting the entire query string.
+    QString code = codeBlob.trimmed();
+
+    // Pull out any leading auth-code from a full URL the user pasted.
+    if (code.contains("?")) {
+        QUrl u(code);
+        QUrlQuery q(u);
+        QString c = q.queryItemValue("code");
+        if (!c.isEmpty()) code = c;
     }
-}
+    // Strip a trailing #state if present.
+    int hash = code.indexOf('#');
+    if (hash >= 0) code = code.left(hash);
+    code = code.trimmed();
 
-void OAuthHelper::onCallbackRead() {
-    auto *sock = qobject_cast<QTcpSocket *>(sender());
-    if (!sock) return;
-    QByteArray req = sock->readAll();
-    // Extract path from first request line — only GET /callback?... HTTP/1.1
-    int p = req.indexOf(' ');
-    int q = req.indexOf(' ', p + 1);
-    if (p < 0 || q < 0) return;
-    QString path = QString::fromUtf8(req.mid(p + 1, q - p - 1));
-    QUrl u(QString("http://localhost") + path);
-    QUrlQuery qry(u);
-    QString code  = qry.queryItemValue("code");
-    QString state = qry.queryItemValue("state");
-    QString err   = qry.queryItemValue("error");
-
-    // Send the browser a friendly page and close
-    QByteArray html =
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
-        "<html><body style='font-family:sans-serif;background:#111;color:#eee;"
-        "padding:40px;'><h2>SHROUD admin sign-in complete</h2>"
-        "<p>You can close this tab and return to <code>shroud-admin</code>.</p>"
-        "</body></html>";
-    sock->write(html);
-    sock->flush();
-    sock->disconnectFromHost();
-
-    m_server->close();
-
-    if (!err.isEmpty()) {
-        if (m_cb) m_cb(false, "OAuth error: " + err);
-        return;
-    }
-    if (state != m_state) {
-        if (m_cb) m_cb(false, "OAuth state mismatch — possible CSRF.");
-        return;
-    }
     if (code.isEmpty()) {
-        if (m_cb) m_cb(false, "OAuth callback returned no code.");
+        if (m_cb) m_cb(false, "Empty code after parse.");
         return;
     }
     exchangeCode(code);
@@ -156,7 +134,8 @@ void OAuthHelper::exchangeCode(const QString &code) {
     body["grant_type"]    = "authorization_code";
     body["client_id"]     = CLIENT_ID;
     body["code"]          = code;
-    body["redirect_uri"]  = QString("http://localhost:%1/callback").arg(m_port);
+    body["state"]         = m_state;
+    body["redirect_uri"]  = redirectUri();
     body["code_verifier"] = m_codeVerifier;
 
     auto *r = m_nam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
@@ -166,7 +145,7 @@ void OAuthHelper::exchangeCode(const QString &code) {
         r->deleteLater();
         if (http != 200) {
             if (m_cb) m_cb(false, QString("Token exchange failed (%1): %2")
-                .arg(http).arg(QString::fromUtf8(resp.left(200))));
+                .arg(http).arg(QString::fromUtf8(resp.left(300))));
             return;
         }
         persist(resp);
@@ -193,7 +172,7 @@ void OAuthHelper::refresh(std::function<void(bool, const QString &)> cb) {
         r->deleteLater();
         if (http != 200) {
             if (m_cb) m_cb(false, QString("Refresh failed (%1): %2")
-                .arg(http).arg(QString::fromUtf8(resp.left(200))));
+                .arg(http).arg(QString::fromUtf8(resp.left(300))));
             return;
         }
         persist(resp);
@@ -206,13 +185,12 @@ void OAuthHelper::persist(const QByteArray &tokenJson) {
     QString at = o.value("access_token").toString();
     QString rt = o.value("refresh_token").toString();
     qint64 lifetime = o.value("expires_in").toVariant().toLongLong();
-    if (lifetime <= 0) lifetime = 3600;  // sane default if Anthropic omits it
+    if (lifetime <= 0) lifetime = 3600;
     QSettings s("SHROUD", "admin");
     if (!at.isEmpty()) s.setValue("anthropic_access_token",  at);
     if (!rt.isEmpty()) s.setValue("anthropic_refresh_token", rt);
     s.setValue("anthropic_expires_at",
                QDateTime::currentSecsSinceEpoch() + lifetime);
-    // Capture identity if returned in the same response (optional)
     QString email = o.value("account").toObject().value("email").toString();
     if (!email.isEmpty()) s.setValue("anthropic_account_email", email);
 }

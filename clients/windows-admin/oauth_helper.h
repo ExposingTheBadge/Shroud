@@ -20,9 +20,21 @@ class OAuthHelper : public QObject {
 public:
     explicit OAuthHelper(QObject *parent = nullptr);
 
-    // Start the browser flow. Callback fires once with (true, "")
-    // on success (tokens persisted), or (false, error_msg).
+    // Start the browser flow. Anthropic's OAuth only honors a fixed
+    // redirect_uri (https://console.anthropic.com/oauth/code/callback),
+    // so the user authorizes, copies the displayed code, and pastes
+    // it back via finishWithCode(). The callback fires once both
+    // halves complete.
     void start(std::function<void(bool, const QString &)> cb);
+
+    // Called by the UI after the user pastes the code from the
+    // Anthropic callback page.
+    void finishWithCode(const QString &codeBlob);
+
+    // Just the authorize URL for the current PKCE state. Useful when
+    // the caller wants to render the URL in the UI instead of opening
+    // the browser directly.
+    QString authorizeUrl() const;
 
     // Refresh the access token using the saved refresh_token. Useful
     // when the access token is expired. Callback fires once.
@@ -35,20 +47,15 @@ public:
     static bool    hasFreshToken();
     static void    clear();
 
-private slots:
-    void onIncomingConnection();
-    void onCallbackRead();
-
 private:
     QNetworkAccessManager m_nam;
-    QTcpServer           *m_server = nullptr;
-    int                   m_port   = 0;
     QString               m_codeVerifier;
     QString               m_state;
     std::function<void(bool, const QString &)> m_cb;
 
     static QString b64url(const QByteArray &raw);
     static QByteArray randomBytes(int n);
+    static QString redirectUri();
     void exchangeCode(const QString &code);
     void persist(const QByteArray &tokenJson);
 };
