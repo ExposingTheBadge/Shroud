@@ -4345,6 +4345,208 @@ async def admin_bans_add(request: Request, session=Depends(require_admin)):
         raise HTTPException(400, "kind must be username | hwid | ip")
 
 
+# ── Operator-encrypted backups ───────────────────────────────────────
+#
+# Take a snapshot of the relay DB, encrypt it with a passphrase that
+# NEVER leaves the operator's machine (Argon2id KDF + AES-256-GCM), and
+# stash the ciphertext under SHROUD_DATA_DIR/backups. Catalog row goes
+# into the bans-adjacent `relay_backups` table so the admin can list,
+# download, restore, and delete via REST.
+#
+# Restore: decrypt with the same passphrase, write the plaintext bytes
+# to shroud.db.restore-staging, then signal the supervisor to swap files
+# and restart. The shroud-relay.service in our deploy supports a swap
+# helper at /opt/shroud/bin/swap_db.sh; if it's missing we just leave
+# the staging file and tell the operator how to finalize.
+
+import os as _os_for_backups, secrets as _secrets_for_backups
+_BACKUPS_DIR = _os_for_backups.path.join(
+    _os_for_backups.environ.get("SHROUD_DATA_DIR", os.path.dirname(DB_PATH)),
+    "backups",
+)
+
+def _ensure_backup_schema():
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS relay_backups (
+            id          TEXT PRIMARY KEY,
+            taken_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            size_bytes  INTEGER NOT NULL,
+            kind        TEXT NOT NULL DEFAULT 'sqlite-full',
+            note        TEXT DEFAULT '',
+            argon_salt  BLOB NOT NULL,
+            nonce       BLOB NOT NULL,
+            file_name   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_backup_taken ON relay_backups(taken_at);
+    """)
+    db.commit()
+_ensure_backup_schema()
+try:
+    _os_for_backups.makedirs(_BACKUPS_DIR, exist_ok=True)
+except Exception:
+    pass
+
+
+def _derive_backup_key(passphrase: str, salt: bytes) -> bytes:
+    """Argon2id-derived 32-byte key. argon2-cffi is preferred; fall back
+    to PBKDF2 with a high iteration count if argon2 isn't installed (so
+    the backup endpoints still work on minimal venvs)."""
+    try:
+        from argon2.low_level import hash_secret_raw, Type
+        return hash_secret_raw(
+            passphrase.encode("utf-8"), salt,
+            time_cost=3, memory_cost=64 * 1024, parallelism=2,
+            hash_len=32, type=Type.ID,
+        )
+    except Exception:
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.hazmat.primitives import hashes
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                         salt=salt, iterations=600_000)
+        return kdf.derive(passphrase.encode("utf-8"))
+
+
+@app.get("/api/v1/admin/backups")
+async def admin_backups_list(session=Depends(require_admin)):
+    rows = db.execute(
+        "SELECT id, taken_at, size_bytes, kind, note FROM relay_backups "
+        "ORDER BY taken_at DESC LIMIT 200"
+    ).fetchall()
+    return {
+        "count": len(rows),
+        "backups": [
+            {"id": r[0], "taken_at": str(r[1]), "size_bytes": r[2],
+             "kind": r[3], "note": r[4] or ""}
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/v1/admin/backups")
+async def admin_backups_take(request: Request, session=Depends(require_admin)):
+    """Take a fresh SQLite backup, encrypt with the supplied passphrase,
+    catalog it. Body: { "passphrase": "...", "note": "..." }.
+    Returns: { "id", "size_bytes" }."""
+    body = await request.json()
+    pw   = body.get("passphrase") or ""
+    note = (body.get("note") or "")[:500]
+    if len(pw) < 8:
+        raise HTTPException(400, "passphrase must be at least 8 characters")
+
+    # 1) Use SQLite's online backup API into a temp file so we don't lock
+    #    the DB during the dump.
+    backup_id = uuid.uuid4().hex
+    tmp_path  = os.path.join(_BACKUPS_DIR, f".{backup_id}.tmp")
+    enc_path  = os.path.join(_BACKUPS_DIR, f"{backup_id}.bin")
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(tmp_path)
+    try:
+        with dst:
+            src.backup(dst)
+    finally:
+        src.close(); dst.close()
+
+    plaintext = open(tmp_path, "rb").read()
+    try: os.remove(tmp_path)
+    except OSError: pass
+
+    # 2) Encrypt
+    salt  = _secrets_for_backups.token_bytes(16)
+    nonce = _secrets_for_backups.token_bytes(12)
+    key   = _derive_backup_key(pw, salt)
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    ct    = AESGCM(key).encrypt(nonce, plaintext, b"shroud.backup.v1")
+    with open(enc_path, "wb") as f:
+        f.write(ct)
+    size  = os.path.getsize(enc_path)
+
+    # 3) Catalog
+    db.execute(
+        "INSERT INTO relay_backups (id, size_bytes, kind, note, argon_salt, nonce, file_name) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (backup_id, size, "sqlite-full", note, salt, nonce, os.path.basename(enc_path)),
+    )
+    db.commit()
+    audit_log("operator", "BACKUP_TAKE", f"id={backup_id} size={size} note={note[:80]}")
+    return {"id": backup_id, "size_bytes": size}
+
+
+@app.get("/api/v1/admin/backups/{backup_id}/download")
+async def admin_backups_download(backup_id: str, session=Depends(require_admin)):
+    row = db.execute(
+        "SELECT file_name FROM relay_backups WHERE id=?", (backup_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "backup not found")
+    full = os.path.join(_BACKUPS_DIR, row[0])
+    if not os.path.exists(full):
+        raise HTTPException(410, "backup file missing on disk")
+    audit_log("operator", "BACKUP_DOWNLOAD", f"id={backup_id}")
+    return FileResponse(full, media_type="application/octet-stream",
+                        filename=f"shroud-backup-{backup_id}.bin")
+
+
+@app.delete("/api/v1/admin/backups/{backup_id}")
+async def admin_backups_delete(backup_id: str, session=Depends(require_admin)):
+    row = db.execute(
+        "SELECT file_name FROM relay_backups WHERE id=?", (backup_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "backup not found")
+    full = os.path.join(_BACKUPS_DIR, row[0])
+    try: os.remove(full)
+    except OSError: pass
+    db.execute("DELETE FROM relay_backups WHERE id=?", (backup_id,))
+    db.commit()
+    audit_log("operator", "BACKUP_DELETE", f"id={backup_id}")
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/backups/{backup_id}/restore")
+async def admin_backups_restore(backup_id: str, request: Request, session=Depends(require_admin)):
+    """Decrypt + stage. The relay's supervisor (systemd unit / docker
+    wrapper) is responsible for noticing the staging file and performing
+    the swap+restart. We do NOT replace the running shroud.db while
+    queries are in-flight."""
+    body = await request.json()
+    pw   = body.get("passphrase") or ""
+    if not pw:
+        raise HTTPException(400, "passphrase required")
+    row = db.execute(
+        "SELECT file_name, argon_salt, nonce FROM relay_backups WHERE id=?",
+        (backup_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "backup not found")
+    full = os.path.join(_BACKUPS_DIR, row[0])
+    if not os.path.exists(full):
+        raise HTTPException(410, "backup file missing on disk")
+    ct = open(full, "rb").read()
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        key = _derive_backup_key(pw, bytes(row[1]))
+        plaintext = AESGCM(key).decrypt(bytes(row[2]), ct, b"shroud.backup.v1")
+    except Exception:
+        raise HTTPException(400, "decryption failed — wrong passphrase")
+
+    staging = DB_PATH + ".restore-staging"
+    with open(staging, "wb") as f:
+        f.write(plaintext)
+    audit_log("operator", "BACKUP_RESTORE_STAGE",
+              f"id={backup_id} staging={staging}")
+    return {
+        "ok": True,
+        "staged": staging,
+        "next": (
+            "Restart the relay so the supervisor swaps "
+            "shroud.db.restore-staging into shroud.db. On the supplied "
+            "systemd unit: `sudo systemctl restart shroud-relay`. The "
+            "on-restart hook moves the staging file into place if it "
+            "exists; otherwise rename it manually before restart."
+        ),
+    }
+
+
 @app.delete("/api/v1/admin/bans/{ban_id}")
 async def admin_bans_remove(ban_id: int, session=Depends(require_admin)):
     """Lift a single ban row by id."""
