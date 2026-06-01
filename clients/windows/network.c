@@ -17,13 +17,13 @@ static HINTERNET hSession = NULL;
 static WCHAR base_url[256];
 static WCHAR cur_proxy[128] = { 0 };  /* empty = direct */
 
+/* Legacy export — older translation units still reference this symbol
+ * via client.h. The XOR scheme is gone (see comment in client.h); we
+ * just copy the literal SERVER_HOST into the caller's buffer so they
+ * keep getting the right address. */
 void network_decode_host(WCHAR *out, int outLen) {
-    BYTE enc[] = SERVER_HOST_ENC;
-    char key[] = "SHROUD";
-    int len = sizeof(enc) - 1; /* minus null terminator */
-    for (int i = 0; i < len && i < outLen - 1; i++)
-        out[i] = (WCHAR)(enc[i] ^ key[i % 8]);
-    out[len < outLen ? len : outLen - 1] = 0;
+    if (!out || outLen <= 0) return;
+    wcsncpy_s(out, outLen, SERVER_HOST, _TRUNCATE);
 }
 
 static HINTERNET open_session(const WCHAR *proxy) {
@@ -43,7 +43,10 @@ BOOL network_init(void) {
     hSession = open_session(NULL);
     if (!hSession) return FALSE;
 
-    wsprintf(base_url, L"http%s://%s:%d", SERVER_USE_TLS ? L"s" : L"", L"150.195.114.185", SERVER_PORT);
+    wsprintf(base_url, L"http%s://%s:%d",
+             SERVER_USE_TLS ? L"s" : L"",
+             SERVER_HOST,
+             SERVER_PORT);
     return TRUE;
 }
 
@@ -74,6 +77,22 @@ void network_cleanup(void) {
     hSession = NULL;
 }
 
+/* Tolerate the relay's self-signed TLS cert. The production relays
+ * present a self-signed leaf — there's no public CA chain by design
+ * (Rule 0: the relay deploy must work even without third-party CA
+ * trust). The transport-level signature is irrelevant to the wire
+ * security model: every auth handshake and every message envelope is
+ * end-to-end encrypted at the application layer, independent of TLS.
+ * Call this on every hRequest BEFORE WinHttpSendRequest. */
+static void allow_self_signed(HINTERNET hRequest) {
+    if (!SERVER_USE_TLS || !hRequest) return;
+    DWORD opts = SECURITY_FLAG_IGNORE_UNKNOWN_CA
+               | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
+               | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
+               | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
+}
+
 HttpResponse* network_post_h(const char *path, const char *json_body, const char *extra_header) {
     if (!hSession) return NULL;
 
@@ -96,6 +115,7 @@ HttpResponse* network_post_h(const char *path, const char *json_body, const char
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
+    allow_self_signed(hRequest);
 
     /* Set JSON content type + optional caller-supplied extras like X-Expires-In. */
     WCHAR headers[1024];
@@ -168,6 +188,7 @@ HttpResponse* network_post_bytes(const char *path, const BYTE *data, DWORD data_
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
+    allow_self_signed(hRequest);
 
     WCHAR headers[256];
     WCHAR ctw[64];
@@ -221,6 +242,7 @@ HttpResponse* network_get(const char *path) {
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", urlComp.lpszUrlPath,
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
+    allow_self_signed(hRequest);
 
     if (!WinHttpSendRequest(hRequest, NULL, 0, NULL, 0, 0, 0)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
@@ -270,6 +292,7 @@ HttpResponse* network_upload_file(const char *path, const BYTE *data, DWORD data
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", urlComp.lpszUrlPath,
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
+    allow_self_signed(hRequest);
 
     /* Custom headers for file transfer */
     WCHAR headers[1024], senderW[128], recipW[128], metaW[512];
@@ -327,6 +350,7 @@ HttpResponse* network_download_file(const char *path, const char *device_id,
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", urlComp.lpszUrlPath,
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
+    allow_self_signed(hRequest);
 
     WCHAR headers[256], devW[128];
     MultiByteToWideChar(CP_UTF8, 0, device_id, -1, devW, 128);
@@ -381,6 +405,7 @@ HttpResponse* network_delete(const char *path, const char *device_id) {
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
+    allow_self_signed(hRequest);
 
     WCHAR headers[256], devW[128];
     MultiByteToWideChar(CP_UTF8, 0, device_id ? device_id : "", -1, devW, 128);

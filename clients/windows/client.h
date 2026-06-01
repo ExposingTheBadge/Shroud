@@ -31,11 +31,26 @@
 #pragma comment(lib, "comdlg32.lib")
 
 /* ── Configuration ────────────────────────────────────────────────── */
-/* XOR-encrypted with key "SHROUD" */
-#define SERVER_HOST_ENC   {0x2f,0x3c,0x3b,0x23,0x6e,0x63,0x66,0x7f,0x7e,0x77,0x66,0x7e,0x6a,0x61,0x62,0x78,0x7f,0x7f,0x69,0x79,0x77,0x66,0x6e,0x79,0x71,0x7a,0x7f,0x74,0x00}
-void network_decode_host(WCHAR *out, int outLen);
+/*
+ * Bootstrap relay endpoint. The XOR-encoded SERVER_HOST_ENC scheme that
+ * lived here through v2.4.x had two bugs: the wsprintf in network_init
+ * ignored the decoded value (so the binary always pointed at a stale
+ * literal IP regardless of what the encode bytes said), and the encoder
+ * disagreed with the decoder on key indexing (decoder read past the
+ * end of "SHROUD"). Both bugs masked each other for years but broke
+ * the moment the legacy hardcoded IP went away.
+ *
+ * Real obfuscation against strings(1) does nothing useful here — the
+ * binary makes plaintext HTTPS calls to the address either way. The
+ * operator-manifest endpoint published by the bootstrap relay is the
+ * proper relay-discovery mechanism going forward; clients hit this
+ * address only long enough to fetch + verify the signed manifest, then
+ * route through whatever relay (clearnet or .onion) the manifest
+ * points them at.
+ */
+#define SERVER_HOST       L"44.202.225.57"
 #define SERVER_PORT       58443
-#define SERVER_USE_TLS    0
+#define SERVER_USE_TLS    1
 
 #define AES_KEY_LEN       32
 #define AES_GCM_IV_LEN    12
