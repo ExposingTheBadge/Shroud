@@ -19,6 +19,7 @@ set(WIN_MODULES
     oqs_sig.c
     ed25519.c
     anon_routing.c
+    error_reporter.c
 )
 
 add_executable(shroud
@@ -37,7 +38,7 @@ target_link_libraries(shroud PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Network
-    bcrypt ncrypt winhttp ws2_32 crypt32 tbs user32 gdi32 advapi32 comdlg32 shell32 dwmapi uxtheme
+    bcrypt ncrypt winhttp ws2_32 crypt32 tbs user32 gdi32 advapi32 comdlg32 shell32 dwmapi uxtheme dbghelp
 )
 
 target_compile_definitions(shroud PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
