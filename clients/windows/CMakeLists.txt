@@ -42,5 +42,11 @@ target_link_libraries(shroud PRIVATE
     bcrypt ncrypt winhttp ws2_32 crypt32 tbs user32 gdi32 advapi32 comdlg32 shell32 dwmapi uxtheme dbghelp
 )
 
-target_compile_definitions(shroud PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+target_compile_definitions(shroud PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN
+    # Tie the runtime version string to project(SHROUD VERSION ...). The
+    # release workflow only bumps VERSION + the CMake project() line; this
+    # propagates the bump into the binary without any extra hand-edit step.
+    CLIENT_VERSION="${PROJECT_VERSION}"
+)
 set_target_properties(shroud PROPERTIES WIN32_EXECUTABLE TRUE)

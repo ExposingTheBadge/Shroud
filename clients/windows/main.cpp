@@ -6,7 +6,12 @@
 #include <QtNetwork>
 #include <QtCore>
 
-#define CLIENT_VERSION "2.4.5"
+/* CLIENT_VERSION is injected by CMake from PROJECT_VERSION (which mirrors
+ * the repo VERSION file). Fallback string here is only used when somebody
+ * builds main.cpp outside the project CMakeLists — never in release. */
+#ifndef CLIENT_VERSION
+#define CLIENT_VERSION "0.0.0-localdev"
+#endif
 
 extern "C" {
 #include "client.h"
