@@ -394,6 +394,23 @@ function toast(msg) {
 }
 
 /* ─── Federation ──────────────────────────────────────────────────── */
+async function forceFederationSync() {
+  try {
+    const r = await fetch('/api/v1/admin/federation/sync-now', {
+      method: 'POST', credentials: 'include',
+      headers: { 'X-CSRF-Token': getCookie('shroud_csrf') || '' }
+    });
+    if (!r.ok) { alert('Sync failed: ' + r.status); return; }
+    const d = await r.json();
+    let total = 0;
+    for (const p of (d.peers || [])) total += (p.applied || 0);
+    toast(`Synced — applied ${total} new event(s).`);
+    loadFederation();
+  } catch (e) {
+    alert('Sync failed: ' + e);
+  }
+}
+
 async function loadFederation() {
   try {
     const r = await fetch('/api/v1/admin/federation', { credentials: 'include' });

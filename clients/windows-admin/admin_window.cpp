@@ -10,6 +10,7 @@
 #include "tabs/relay_ssh_tab.h"
 #include "tabs/claude_chat_tab.h"
 #include "tabs/settings_tab.h"
+#include "tabs/errors_tab.h"
 #include <QVBoxLayout>
 #include <QApplication>
 #include <QIcon>
@@ -33,6 +34,7 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
     m_ssh        = new RelaySshTab(m_client);
     m_claude     = new ClaudeChatTab(m_client);
     m_settings   = new SettingsTab(m_client);
+    m_errors     = new ErrorsTab(m_client);
 
     m_tabs->addTab(m_federation, "Federation");
     m_tabs->addTab(m_stats,      "Stats");
@@ -44,6 +46,7 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
     m_tabs->addTab(m_manifest,   "Manifest");
     m_tabs->addTab(m_ssh,        "Relays (SSH)");
     m_tabs->addTab(m_claude,     "Claude Chat");
+    m_tabs->addTab(m_errors,     "Error Codes");
     m_tabs->addTab(m_settings,   "Settings");
 
     setCentralWidget(m_tabs);

@@ -4349,6 +4349,47 @@ async def admin_bans_lift_user(request: Request, session=Depends(require_admin))
     return {"ok": True, "deleted": deleted, "username": username}
 
 
+@app.post("/api/v1/admin/federation/sync-now")
+async def admin_federation_force_sync(session=Depends(require_admin)):
+    """Force an immediate state-event pull from every peer instead of
+    waiting for the hourly timer. Returns the per-peer applied counts
+    so the dashboard can show progress."""
+    if not FEDERATION_ENABLED:
+        raise HTTPException(503, "federation disabled on this relay")
+    import httpx
+    row = db.execute(
+        "SELECT COALESCE(MAX(origin_ts), 0) FROM federation_state_events"
+    ).fetchone()
+    since_ts = int(row[0]) if row and row[0] is not None else 0
+    out = []
+    async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+        for p in _federation_active_peers():
+            applied = 0
+            err = ""
+            try:
+                r = await client.get(
+                    p["endpoint"].rstrip("/")
+                    + f"/api/v1/federation/state-events/since?since_ts={since_ts}&limit=2000"
+                )
+                if r.status_code == 200:
+                    body = r.json()
+                    for ev in body.get("events", []):
+                        if _seen_state_event(ev["event_id"]):
+                            continue
+                        _apply_state_event(ev["event_kind"], ev["payload"])
+                        _federation_outbox_state_event(
+                            ev["event_kind"], ev["payload"],
+                            event_id=ev["event_id"], ts=ev["ts"],
+                        )
+                        applied += 1
+                else:
+                    err = f"HTTP {r.status_code}"
+            except Exception as e:
+                err = str(e)[:200]
+            out.append({"endpoint": p["endpoint"], "applied": applied, "error": err})
+    return {"since_ts": since_ts, "peers": out}
+
+
 @app.get("/api/v1/admin/federation")
 async def admin_federation_health(session=Depends(require_admin)):
     """Aggregated federation health — polls every active peer's

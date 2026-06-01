@@ -89,3 +89,4 @@ skills-lock.json
 
 # Per-developer Azure Artifact Signing scratch (rename scripts, etc.)
 .azure-signing/
+releases/

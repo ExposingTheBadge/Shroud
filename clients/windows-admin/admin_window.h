@@ -21,6 +21,7 @@ class ManifestTab;
 class RelaySshTab;
 class ClaudeChatTab;
 class SettingsTab;
+class ErrorsTab;
 
 class AdminWindow : public QMainWindow {
     Q_OBJECT
@@ -49,6 +50,7 @@ private:
     RelaySshTab     *m_ssh;
     ClaudeChatTab   *m_claude;
     SettingsTab     *m_settings;
+    ErrorsTab       *m_errors;
 };
 
 #endif

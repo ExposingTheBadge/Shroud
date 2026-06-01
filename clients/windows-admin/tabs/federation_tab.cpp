@@ -26,9 +26,31 @@ FederationTab::FederationTab(AdminClient *client, QWidget *parent)
     m_summary  = new QLabel("Polling…");
     m_summary->setStyleSheet("font-size:14px;font-weight:600");
     m_refreshBtn = new QPushButton("Refresh");
+    auto *syncBtn = new QPushButton("Sync state now");
+    syncBtn->setStyleSheet("background:#2e7d32;color:white;padding:4px 10px");
     bar->addWidget(m_summary, 1);
+    bar->addWidget(syncBtn);
     bar->addWidget(m_refreshBtn);
     root->addLayout(bar);
+
+    connect(syncBtn, &QPushButton::clicked, [this]() {
+        m_summary->setText("Triggering state-event sync from every peer…");
+        m_client->postJson("/api/v1/admin/federation/sync-now", QJsonObject(),
+            [this](const QJsonDocument &d, const QString &err) {
+                if (!err.isEmpty()) {
+                    m_summary->setText("Sync failed: " + err);
+                    return;
+                }
+                int total = 0;
+                for (const auto &p : d.object().value("peers").toArray()) {
+                    total += p.toObject().value("applied").toInt();
+                }
+                m_summary->setText(
+                    QString("Applied %1 new state event(s) — refresh in 1s.")
+                        .arg(total));
+                QTimer::singleShot(1000, this, &FederationTab::refresh);
+            });
+    });
 
     auto *gridContainer = new QFrame;
     m_grid = new QGridLayout(gridContainer);

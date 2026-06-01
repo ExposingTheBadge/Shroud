@@ -30,6 +30,7 @@ set(ADMIN_SOURCES
     tabs/relay_ssh_tab.cpp
     tabs/claude_chat_tab.cpp
     tabs/settings_tab.cpp
+    tabs/errors_tab.cpp
 )
 
 set(ADMIN_HEADERS
@@ -46,6 +47,7 @@ set(ADMIN_HEADERS
     tabs/relay_ssh_tab.h
     tabs/claude_chat_tab.h
     tabs/settings_tab.h
+    tabs/errors_tab.h
 )
 
 add_executable(shroud-admin
