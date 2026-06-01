@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/">
+        <file>shroud-admin.png</file>
+    </qresource>
+</RCC>

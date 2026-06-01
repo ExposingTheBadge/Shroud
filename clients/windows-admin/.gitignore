@@ -1,0 +1,22 @@
+# Build artifacts — never commit, never release
+build/
+out/
+dist/
+*.exe
+*.pdb
+*.obj
+*.ilk
+*.exp
+*.lib
+*.log
+shroud-admin.exe
+shroud-admin.pdb
+shroud-admin.msi
+*.zip
+.vs/
+.vscode/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+ninja_log
+*.ninja_log

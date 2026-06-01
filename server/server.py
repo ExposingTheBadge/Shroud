@@ -603,6 +603,24 @@ def init_db():
             updated_at TEXT DEFAULT (datetime('now'))
         );
 
+        -- v2.6.0 — admin-managed bans. Banning a username also fingerprints
+        -- every HWID seen on devices linked to that user so the same
+        -- hardware can't just re-register under a new username. The HWID
+        -- side of the ban is enforced in /api/v1/register and /api/v1/devices.
+        -- Bans never expire automatically; admin must clear them.
+        CREATE TABLE IF NOT EXISTS bans (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind        TEXT NOT NULL CHECK(kind IN ('username','hwid','ip')),
+            value       TEXT NOT NULL,
+            reason      TEXT DEFAULT '',
+            banned_by   TEXT DEFAULT '',
+            banned_at   TEXT DEFAULT (datetime('now')),
+            origin_user TEXT DEFAULT '',  -- username that triggered this ban
+            UNIQUE(kind, value)
+        );
+        CREATE INDEX IF NOT EXISTS idx_bans_kind_value ON bans(kind, value);
+        CREATE INDEX IF NOT EXISTS idx_bans_origin    ON bans(origin_user);
+
         -- Cumulative counters that survive restart. Recent-error deque and
         -- rolling latency window deliberately stay in-memory — they're
         -- bounded and meaningful only for the current run.
@@ -1900,6 +1918,14 @@ async def encrypted_auth(request: Request):
     is_register = payload.get("register", False)
     pub_key_hex = payload.get("public_key","")
     existing_did = (payload.get("existing_device_id","") or "").strip()
+    hwid_in = (payload.get("hwid","") or "").strip()
+
+    # v2.6.0: ban enforcement first, before any password / lookup work.
+    ban = _ban_lookup(username=username, hwid=hwid_in)
+    if ban:
+        audit_log(username, "BAN_BLOCK_AUTH",
+                  f"kind={ban['kind']} value={ban['value'][:16]} reason={ban.get('reason','')[:80]}")
+        raise HTTPException(403, "Account banned")
 
     # Register user if new account
     if is_register:
@@ -1977,6 +2003,13 @@ async def register_device(req: RegisterDeviceRequest):
     # Auth user
     norm = norm_user(req.username)
     print(f"[DEVICE REG] username={norm} platform={req.platform} pw_len={len(req.password)} hwid={req.hwid[:16] if req.hwid else 'none'}")
+    # v2.6.0: ban enforcement BEFORE password check so a banned user can't
+    # even probe whether their old password is still valid.
+    ban = _ban_lookup(username=norm, hwid=req.hwid or "")
+    if ban:
+        audit_log(req.username, "BAN_BLOCK_REGISTER",
+                  f"kind={ban['kind']} value={ban['value'][:16]} reason={ban.get('reason','')[:80]}")
+        raise HTTPException(403, "Account banned")
     user = db.execute(
         "SELECT id, password_hash, password_salt FROM users WHERE username = ?",
         (norm,)
@@ -3731,6 +3764,162 @@ def _meta_block() -> dict:
         "maintenance_mode":     setting_get("maintenance_mode",     "0") == "1",
         "onion_only":           setting_get("onion_only",           "0") == "1",
     }
+
+
+# ── Bans (admin-managed) ─────────────────────────────────────────────
+#
+# Banning a username also cascades to every HWID we've ever seen for
+# that user (looked up via the `devices` table). Both the username row
+# AND each HWID row land in `bans`. Enforcement runs at the top of
+# /api/v1/register and /api/v1/auth so a banned account / hardware can't
+# even probe credentials. Bans never expire automatically — admin must
+# unban explicitly.
+
+def _ban_lookup(username: str = "", hwid: str = "", ip: str = "") -> dict | None:
+    """Return the first matching ban row as a dict, or None."""
+    checks: list[tuple[str, str]] = []
+    if username:
+        checks.append(("username", norm_user(username)))
+    if hwid:
+        checks.append(("hwid", hwid))
+    if ip:
+        checks.append(("ip", ip))
+    if not checks:
+        return None
+    placeholders = " OR ".join("(kind=? AND value=?)" for _ in checks)
+    args: list[str] = []
+    for k, v in checks:
+        args.extend([k, v])
+    row = db.execute(
+        f"SELECT id, kind, value, reason, banned_by, banned_at, origin_user "
+        f"FROM bans WHERE {placeholders} LIMIT 1",
+        args,
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0], "kind": row[1], "value": row[2],
+        "reason": row[3], "banned_by": row[4],
+        "banned_at": row[5], "origin_user": row[6],
+    }
+
+
+def _ban_username_and_hardware(username: str, reason: str, banned_by: str) -> dict:
+    """Ban a username AND every HWID we've seen on devices linked to that
+    user. Idempotent — INSERT OR IGNORE means re-banning is harmless."""
+    norm = norm_user(username)
+    user = db.execute("SELECT id FROM users WHERE username = ?", (norm,)).fetchone()
+    affected_hwids: list[str] = []
+    if user:
+        affected_hwids = [
+            row[0] for row in db.execute(
+                "SELECT DISTINCT hwid FROM devices WHERE user_id = ? AND hwid != ''",
+                (user[0],),
+            ).fetchall()
+        ]
+    db.execute(
+        "INSERT OR IGNORE INTO bans (kind, value, reason, banned_by, origin_user) "
+        "VALUES (?,?,?,?,?)",
+        ("username", norm, reason, banned_by, norm),
+    )
+    for h in affected_hwids:
+        db.execute(
+            "INSERT OR IGNORE INTO bans (kind, value, reason, banned_by, origin_user) "
+            "VALUES (?,?,?,?,?)",
+            ("hwid", h, reason, banned_by, norm),
+        )
+    db.commit()
+    return {
+        "username": norm,
+        "hwids_banned": affected_hwids,
+        "user_exists": bool(user),
+    }
+
+
+@app.get("/api/v1/admin/bans")
+async def admin_bans_list(session=Depends(require_admin)):
+    """List every ban row. Tiny table, no pagination needed for now."""
+    rows = db.execute(
+        "SELECT id, kind, value, reason, banned_by, banned_at, origin_user "
+        "FROM bans ORDER BY banned_at DESC LIMIT 1000"
+    ).fetchall()
+    return {
+        "bans": [
+            {
+                "id": r[0], "kind": r[1], "value": r[2],
+                "reason": r[3], "banned_by": r[4],
+                "banned_at": r[5], "origin_user": r[6],
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@app.post("/api/v1/admin/bans")
+async def admin_bans_add(request: Request, session=Depends(require_admin)):
+    """Add a ban. Body:
+       { "username": "...", "reason": "...", "kind": "username" | "hwid" | "ip" }
+       When kind=username (default), cascades the ban to every HWID seen
+       on devices linked to that user.
+       When kind=hwid or kind=ip, bans only the literal value provided.
+    """
+    body = await request.json()
+    kind = (body.get("kind") or "username").lower()
+    value = (body.get("value") or body.get("username") or "").strip()
+    reason = (body.get("reason") or "")[:500]
+    if not value:
+        raise HTTPException(400, "value (or username) is required")
+    banned_by = session.get("admin_id", "") if isinstance(session, dict) else str(session)
+
+    if kind == "username":
+        result = _ban_username_and_hardware(value, reason, banned_by)
+        audit_log(banned_by, "BAN_ADD",
+                  f"username={result['username']} hwids={len(result['hwids_banned'])} reason={reason[:80]}")
+        return {"ok": True, **result, "kind": "username"}
+    elif kind in ("hwid", "ip"):
+        db.execute(
+            "INSERT OR IGNORE INTO bans (kind, value, reason, banned_by) "
+            "VALUES (?,?,?,?)",
+            (kind, value, reason, banned_by),
+        )
+        db.commit()
+        audit_log(banned_by, "BAN_ADD", f"{kind}={value[:32]} reason={reason[:80]}")
+        return {"ok": True, "kind": kind, "value": value}
+    else:
+        raise HTTPException(400, "kind must be username | hwid | ip")
+
+
+@app.delete("/api/v1/admin/bans/{ban_id}")
+async def admin_bans_remove(ban_id: int, session=Depends(require_admin)):
+    """Lift a single ban row by id."""
+    row = db.execute("SELECT kind, value FROM bans WHERE id=?", (ban_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "ban not found")
+    db.execute("DELETE FROM bans WHERE id=?", (ban_id,))
+    db.commit()
+    banned_by = session.get("admin_id", "") if isinstance(session, dict) else str(session)
+    audit_log(banned_by, "BAN_REMOVE", f"{row[0]}={row[1][:32]}")
+    return {"ok": True, "id": ban_id}
+
+
+@app.post("/api/v1/admin/bans/lift-user")
+async def admin_bans_lift_user(request: Request, session=Depends(require_admin)):
+    """Lift every ban row tied to a given origin_user — the inverse of the
+    username-ban cascade. Removes the username row AND every HWID row that
+    was banned because of that user."""
+    body = await request.json()
+    username = norm_user(body.get("username", ""))
+    if not username:
+        raise HTTPException(400, "username is required")
+    deleted = db.execute(
+        "DELETE FROM bans WHERE origin_user=? OR (kind='username' AND value=?)",
+        (username, username),
+    ).rowcount
+    db.commit()
+    banned_by = session.get("admin_id", "") if isinstance(session, dict) else str(session)
+    audit_log(banned_by, "BAN_LIFT_USER", f"username={username} rows={deleted}")
+    return {"ok": True, "deleted": deleted, "username": username}
 
 
 @app.get("/api/v1/admin/federation")
