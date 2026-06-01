@@ -5637,11 +5637,36 @@ if __name__ == "__main__":
         default=int(os.environ.get("SHROUD_PORT", PORT)),
         help=f"TCP port to listen on (default {PORT}).",
     )
+    # TLS opts — match the production deploy. With both args set, uvicorn
+    # serves HTTPS. Either arg unset → plain HTTP (admin client must use
+    # http:// in the relay URL field). SHROUD_TLS_KEY / SHROUD_TLS_CERT
+    # env vars are honored too so a systemd / Docker override needs no
+    # arg changes.
+    ap.add_argument(
+        "--ssl-keyfile",
+        default=os.environ.get("SHROUD_TLS_KEY", ""),
+        help="Path to TLS private key. With --ssl-certfile, uvicorn serves HTTPS.",
+    )
+    ap.add_argument(
+        "--ssl-certfile",
+        default=os.environ.get("SHROUD_TLS_CERT", ""),
+        help="Path to TLS certificate (chain).",
+    )
     args = ap.parse_args()
     init_db()
     print(f"[SHROUD] Database initialized")
-    print(f"[SHROUD] Listening on {args.bind}:{args.port}")
+    use_tls = bool(args.ssl_keyfile and args.ssl_certfile)
+    scheme  = "https" if use_tls else "http"
+    print(f"[SHROUD] Listening on {scheme}://{args.bind}:{args.port}")
+    if not use_tls:
+        print(f"[SHROUD] NOTE: TLS NOT configured (no --ssl-keyfile / --ssl-certfile). "
+              f"Point clients at http://{args.bind}:{args.port} — using https:// will "
+              f"surface as 'SSL handshake failed: internal token invalid' on Windows.")
     if args.bind == "0.0.0.0":
         print(f"[SHROUD] WARNING: binding to all interfaces. For onion-only "
               f"deployments pass --bind 127.0.0.1 and let Tor handle external traffic.")
-    uvicorn.run(app, host=args.bind, port=args.port, log_level="info")
+    kwargs = dict(host=args.bind, port=args.port, log_level="info")
+    if use_tls:
+        kwargs["ssl_keyfile"]  = args.ssl_keyfile
+        kwargs["ssl_certfile"] = args.ssl_certfile
+    uvicorn.run(app, **kwargs)
