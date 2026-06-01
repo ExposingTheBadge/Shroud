@@ -11,6 +11,11 @@
 #include <QShortcut>
 #include <QKeySequence>
 #include <QScrollBar>
+#include <QComboBox>
+#include <QProcess>
+#include <QStandardPaths>
+#include <QFileInfo>
+#include <QDir>
 
 static QString escapeHtml(const QString &s) {
     QString out;
@@ -28,11 +33,38 @@ static QString escapeHtml(const QString &s) {
     return out;
 }
 
+QString ClaudeChatTab::locateClaudeCli() {
+    QString found = QStandardPaths::findExecutable("claude");
+    if (!found.isEmpty()) return found;
+    // Common npm-global locations
+    QStringList cands = {
+        QDir::homePath() + "/AppData/Roaming/npm/claude.cmd",
+        QDir::homePath() + "/AppData/Roaming/npm/claude.exe",
+        QDir::homePath() + "/AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/cli.js",
+        QDir::homePath() + "/AppData/Local/Programs/Anthropic/Claude/claude.cmd",
+    };
+    for (const auto &p : cands) if (QFileInfo(p).exists()) return p;
+    return QString();
+}
+
 ClaudeChatTab::ClaudeChatTab(AdminClient *client, QWidget *parent)
     : QWidget(parent), m_client(client) {
     auto *l = new QVBoxLayout(this);
 
-    m_status = new QLabel("Idle. Set Anthropic API key in Settings if not configured.");
+    auto *topBar = new QHBoxLayout;
+    m_backendBox = new QComboBox;
+    QString cli = locateClaudeCli();
+    m_haveClaudeCli = !cli.isEmpty();
+    if (m_haveClaudeCli) m_backendBox->addItem("Claude Code CLI (Max plan)");
+    m_backendBox->addItem("Anthropic API (sk-ant-…)");
+    topBar->addWidget(new QLabel("Backend:"));
+    topBar->addWidget(m_backendBox);
+    topBar->addStretch();
+    l->addLayout(topBar);
+
+    m_status = new QLabel(m_haveClaudeCli
+        ? QString("Idle. Claude CLI: %1").arg(cli)
+        : QString("Idle. Install Claude Code or paste an API key in Settings."));
     m_status->setStyleSheet("color:#888;padding:4px");
     l->addWidget(m_status);
 
@@ -104,21 +136,38 @@ void ClaudeChatTab::onLoadFederationContext() {
         });
 }
 
+void ClaudeChatTab::appendUser(const QString &text) {
+    m_history->append("<div style='color:#7fbfff;margin:8px 0 4px 0'><b>You</b></div>");
+    m_history->append("<div style='margin-left:8px'>" + escapeHtml(text) + "</div>");
+}
+
+void ClaudeChatTab::appendAssistant(const QString &text) {
+    m_history->append("<div style='color:#ffb74d;margin:8px 0 4px 0'><b>Claude</b></div>");
+    m_history->append("<div style='margin-left:8px;white-space:pre-wrap'>"
+                      + escapeHtml(text) + "</div>");
+    auto bar = m_history->verticalScrollBar();
+    if (bar) bar->setValue(bar->maximum());
+}
+
 void ClaudeChatTab::onSend() {
     QString text = m_input->toPlainText().trimmed();
     if (text.isEmpty()) return;
     m_input->clear();
     m_status->setText("Sending…");
     m_sendBtn->setEnabled(false);
+    appendUser(text);
 
+    bool useCli = m_haveClaudeCli
+        && m_backendBox->currentText().startsWith("Claude Code CLI");
+    if (useCli) sendViaCli(text);
+    else        sendViaApi(text);
+}
+
+void ClaudeChatTab::sendViaApi(const QString &text) {
     QJsonObject userMsg;
     userMsg["role"]    = "user";
     userMsg["content"] = text;
     m_messages.append(userMsg);
-
-    m_history->append("<div style='color:#7fbfff;margin:8px 0 4px 0'><b>You</b></div>");
-    m_history->append("<div style='margin-left:8px'>" + escapeHtml(text) + "</div>");
-
     m_client->anthropicMessage(m_messages, m_systemPrompt, 4096,
         [this](const QJsonDocument &d, const QString &err) {
             m_sendBtn->setEnabled(true);
@@ -139,11 +188,69 @@ void ClaudeChatTab::onSend() {
             asst["role"]    = "assistant";
             asst["content"] = reply;
             m_messages.append(asst);
-            m_history->append("<div style='color:#ffb74d;margin:8px 0 4px 0'><b>Claude</b></div>");
-            m_history->append("<div style='margin-left:8px;white-space:pre-wrap'>"
-                              + escapeHtml(reply) + "</div>");
+            appendAssistant(reply);
             m_status->setText("Idle.");
-            auto bar = m_history->verticalScrollBar();
-            if (bar) bar->setValue(bar->maximum());
         });
+}
+
+void ClaudeChatTab::sendViaCli(const QString &text) {
+    QString claude = locateClaudeCli();
+    if (claude.isEmpty()) {
+        m_sendBtn->setEnabled(true);
+        m_status->setText("claude CLI not found — install Claude Code or switch to API.");
+        return;
+    }
+
+    if (m_claudeProc) { m_claudeProc->deleteLater(); m_claudeProc = nullptr; }
+    m_claudePending.clear();
+    m_claudeProc = new QProcess(this);
+    m_claudeProc->setProcessChannelMode(QProcess::SeparateChannels);
+
+    // Append + persist conversation locally — every turn is sent
+    // standalone to the CLI plus system prompt + entire prior
+    // history concatenated as plain text, since `claude --print` is
+    // a one-shot caller and doesn't share session state across runs.
+    QJsonObject userMsg;
+    userMsg["role"]    = "user";
+    userMsg["content"] = text;
+    m_messages.append(userMsg);
+
+    // Compose a single-turn prompt with explicit system + history.
+    QString prompt;
+    prompt += m_systemPrompt + "\n\n";
+    for (const auto &v : m_messages) {
+        auto o = v.toObject();
+        QString role = o.value("role").toString();
+        QString content = o.value("content").toString();
+        if (content.isEmpty()) continue;
+        prompt += (role == "user" ? "User: " : "Assistant: ") + content + "\n\n";
+    }
+    prompt += "Assistant: ";
+
+    QStringList args = { "-p", prompt };
+    connect(m_claudeProc, &QProcess::readyReadStandardOutput, this, [this]() {
+        m_claudePending += QString::fromUtf8(m_claudeProc->readAllStandardOutput());
+    });
+    connect(m_claudeProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this](int code, QProcess::ExitStatus) {
+        m_sendBtn->setEnabled(true);
+        if (code != 0) {
+            QString err = QString::fromUtf8(m_claudeProc->readAllStandardError()).trimmed();
+            m_status->setText(QString("claude CLI exit %1: %2").arg(code).arg(err.left(200)));
+            return;
+        }
+        QString reply = m_claudePending.trimmed();
+        if (reply.isEmpty()) reply = "(no output)";
+        QJsonObject asst;
+        asst["role"]    = "assistant";
+        asst["content"] = reply;
+        m_messages.append(asst);
+        appendAssistant(reply);
+        m_status->setText("Idle (CLI · Max plan).");
+    });
+    m_claudeProc->start(claude, args);
+    if (!m_claudeProc->waitForStarted(5000)) {
+        m_sendBtn->setEnabled(true);
+        m_status->setText("Couldn't launch claude CLI: " + m_claudeProc->errorString());
+    }
 }
