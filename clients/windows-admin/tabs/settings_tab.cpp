@@ -1,6 +1,7 @@
 #include "settings_tab.h"
 #include "../admin_client.h"
-#include "../oauth_helper.h"
+#include <QDesktopServices>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -92,31 +93,34 @@ SettingsTab::SettingsTab(AdminClient *client, QWidget *parent)
     loginBar->addWidget(m_logoutBtn);
     l->addLayout(loginBar);
 
-    // Claude.ai SSO — preferred over the raw API key. Tokens persist to
-    // QSettings and auto-refresh on next API call when stale, so this is
-    // a one-time login per Windows account.
+    // Claude API access. Anthropic's OAuth (Claude Code's PKCE flow)
+    // can't reliably be reused by third-party apps — every attempt
+    // hit a different 'Invalid request format' at a different step
+    // depending on URL encoding / scope set / redirect URI guess. So
+    // we ship the practical path: a button that opens the official
+    // API-keys console for the user, plus the existing key field
+    // which persists across launches via QSettings.
+    //
+    // The key entered here is saved on every keystroke (no need to
+    // click Save), so the next launch already has it. Same QSettings
+    // backend, no plaintext envelope around the key.
     auto *claudeBar = new QHBoxLayout;
     m_claudeStatus = new QLabel;
     m_claudeStatus->setStyleSheet("color:#888;padding:0 6px");
-    m_claudeSignInBtn  = new QPushButton("Sign in with Claude.ai");
+    m_claudeSignInBtn  = new QPushButton("Open Anthropic Console");
     m_claudeSignInBtn->setStyleSheet("background:#5a2e7a;color:white;padding:6px 12px");
-    m_claudeSignOutBtn = new QPushButton("Clear Claude tokens");
+    m_claudeSignOutBtn = new QPushButton("Clear key");
     auto refreshClaudeStatus = [this]() {
-        if (OAuthHelper::hasFreshToken()) {
-            QString email = QSettings("SHROUD","admin").value("anthropic_account_email").toString();
-            qint64 exp = OAuthHelper::expiresAt();
-            QDateTime dt = QDateTime::fromSecsSinceEpoch(exp);
-            QString who = email.isEmpty() ? "Signed in" : "Signed in as " + email;
-            m_claudeStatus->setText(who + " · token good until " + dt.toString("HH:mm"));
+        QString k = m_anthropicKey->text().trimmed();
+        if (k.startsWith("sk-ant-")) {
+            m_claudeStatus->setText(QString("API key saved (%1…%2)")
+                .arg(k.left(11)).arg(k.right(4)));
             m_claudeStatus->setStyleSheet("color:#7fff7f;padding:0 6px");
-        } else if (!OAuthHelper::refreshTokenStored().isEmpty()) {
-            m_claudeStatus->setText("Token stale — will auto-refresh on next chat send.");
+        } else if (!k.isEmpty()) {
+            m_claudeStatus->setText("Key set but doesn't match the sk-ant-… format.");
             m_claudeStatus->setStyleSheet("color:#ffb74d;padding:0 6px");
-        } else if (!m_anthropicKey->text().isEmpty()) {
-            m_claudeStatus->setText("Using legacy API key (not SSO).");
-            m_claudeStatus->setStyleSheet("color:#aaa;padding:0 6px");
         } else {
-            m_claudeStatus->setText("Not signed in.");
+            m_claudeStatus->setText("No API key configured.");
             m_claudeStatus->setStyleSheet("color:#888;padding:0 6px");
         }
     };
@@ -127,45 +131,22 @@ SettingsTab::SettingsTab(AdminClient *client, QWidget *parent)
     claudeBar->addWidget(m_claudeSignOutBtn);
     l->addLayout(claudeBar);
 
-    connect(m_claudeSignInBtn, &QPushButton::clicked, [this, refreshClaudeStatus]() {
-        m_claudeSignInBtn->setEnabled(false);
-        m_claudeStatus->setText("Opening browser…");
-        // Helper outlives the browser handoff — same instance must do
-        // the PKCE start + finishWithCode so the code_verifier is the
-        // one Anthropic expects.
-        auto *oa = new OAuthHelper(this);
-        oa->start([this, oa, refreshClaudeStatus](bool ok, const QString &err) {
-            m_claudeSignInBtn->setEnabled(true);
-            if (ok) {
-                refreshClaudeStatus();
-            } else {
-                m_claudeStatus->setText("Sign-in failed: " + err);
-                m_claudeStatus->setStyleSheet("color:#ff8a8a;padding:0 6px");
-            }
-            oa->deleteLater();
-        });
-        // Prompt for the pasted code (Anthropic only honors the fixed
-        // console.anthropic.com/oauth/code/callback redirect — there is
-        // no localhost option, so the user copies the code off the
-        // callback page and pastes it here).
-        bool ok = false;
-        QString code = QInputDialog::getText(this,
-            "Paste the Anthropic auth code",
-            "Your browser opened the Anthropic authorize page.\n"
-            "After clicking Authorize, paste the code (or the full URL "
-            "from the callback page) here.",
-            QLineEdit::Normal, "", &ok);
-        if (!ok || code.trimmed().isEmpty()) {
-            m_claudeStatus->setText("Sign-in cancelled.");
-            m_claudeSignInBtn->setEnabled(true);
-            oa->deleteLater();
-            return;
-        }
-        m_claudeStatus->setText("Exchanging code for tokens…");
-        oa->finishWithCode(code);
+    // Open the official Anthropic console key page. Operator generates
+    // a key there, copies it, pastes into the Anthropic API key field
+    // below. Key persists via QSettings on every keystroke.
+    connect(m_claudeSignInBtn, &QPushButton::clicked, []() {
+        QDesktopServices::openUrl(QUrl("https://console.anthropic.com/settings/keys"));
     });
-    connect(m_claudeSignOutBtn, &QPushButton::clicked, [refreshClaudeStatus]() {
-        OAuthHelper::clear();
+    connect(m_claudeSignOutBtn, &QPushButton::clicked, [this, refreshClaudeStatus]() {
+        m_anthropicKey->clear();
+        m_client->setAnthropicKey("");
+        refreshClaudeStatus();
+    });
+    // Save the API key on every edit so it survives even without
+    // clicking the global Save button.
+    connect(m_anthropicKey, &QLineEdit::textChanged,
+            [this, refreshClaudeStatus](const QString &v) {
+        m_client->setAnthropicKey(v.trimmed());
         refreshClaudeStatus();
     });
 
