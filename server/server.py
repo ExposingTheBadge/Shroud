@@ -2806,6 +2806,11 @@ def _apply_state_event(kind: str, payload: dict) -> None:
                 (payload["kind"], payload["value"]),
             )
         elif kind == "setting.changed":
+            # Defense in depth: even if an older relay broadcast a
+            # per-deployment setting, we silently drop it on receive.
+            _NEVER_MIRROR_KEYS = ("onion_only",)
+            if payload["key"] in _NEVER_MIRROR_KEYS:
+                return
             db.execute(
                 "INSERT INTO server_settings (key, value, updated_at) "
                 "VALUES (?,?,datetime('now')) "
@@ -3863,10 +3868,12 @@ def setting_set(key: str, value: str):
     db.commit()
     # Per-user transient counters (e.g. srp_fail:<uid>) shouldn't bloat
     # the federation outbox or leak per-account metadata across relays.
-    # Only gossip the operator-set toggles.
-    _GOSSIP_SETTINGS = (
-        "registration_enabled", "maintenance_mode", "onion_only",
-    )
+    # Only gossip the operator-set toggles that genuinely apply to every
+    # relay. `onion_only` is intentionally NOT in this list — it's a
+    # per-relay deployment choice (a relay needs Tor running locally
+    # before going onion-only) and forcing it across the federation
+    # locks operators out of their own admin UIs.
+    _GOSSIP_SETTINGS = ("registration_enabled", "maintenance_mode")
     if key in _GOSSIP_SETTINGS:
         _federation_outbox_state_event("setting.changed",
                                        {"key": key, "value": value})
