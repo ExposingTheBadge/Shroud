@@ -83,20 +83,20 @@ QString OAuthHelper::authorizeUrl() const {
     auto enc = [](const QString &s) -> QString {
         return QString::fromUtf8(QUrl::toPercentEncoding(s));
     };
-    return QString("%1?code=true"
-                   "&client_id=%2"
-                   "&response_type=code"
-                   "&redirect_uri=%3"
-                   "&scope=%4"
-                   "&code_challenge=%5"
-                   "&code_challenge_method=S256"
-                   "&state=%6")
-        .arg(AUTH_URL)
-        .arg(QString::fromUtf8(CLIENT_ID))
-        .arg(enc(redirectUri()))
-        .arg(enc(QString::fromUtf8(SCOPES)))
-        .arg(challenge)       // base64url is already URL-safe
-        .arg(m_state);        // base64url is already URL-safe
+    // Build with plain string concat — chained QString::arg() rescans
+    // the result of each substitution, so the percent-encoded
+    // redirect_uri's '%2F' looked like a fresh '%2' placeholder and the
+    // next .arg() chopped into it. Anthropic saw 'scope=<state value>'
+    // and 400'd with 'Unknown scope: ...'.
+    return QString(AUTH_URL)
+         + "?code=true"
+         + "&client_id="            + QString::fromUtf8(CLIENT_ID)
+         + "&response_type=code"
+         + "&redirect_uri="         + enc(redirectUri())
+         + "&scope="                + enc(QString::fromUtf8(SCOPES))
+         + "&code_challenge="       + challenge
+         + "&code_challenge_method=S256"
+         + "&state="                + m_state;
 }
 
 void OAuthHelper::start(std::function<void(bool, const QString &)> cb) {
