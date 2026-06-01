@@ -32,7 +32,7 @@ BansTab::BansTab(AdminClient *client, QWidget *parent)
     m_kindBox = new QComboBox;
     m_kindBox->addItems({"username", "hwid", "ip"});
     m_inputValue  = new QLineEdit;  m_inputValue->setPlaceholderText("username | hwid hex | IP address");
-    m_inputReason = new QLineEdit;  m_inputReason->setPlaceholderText("Reason (visible in audit log)");
+    m_inputReason = new QLineEdit;  m_inputReason->setPlaceholderText("Reason — shown to the banned user when they try to log in. Leave empty for generic 'Account banned'.");
     fl->addRow("Kind", m_kindBox);
     fl->addRow("Value", m_inputValue);
     fl->addRow("Reason", m_inputReason);

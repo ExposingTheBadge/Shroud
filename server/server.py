@@ -1949,11 +1949,14 @@ async def encrypted_auth(request: Request):
     hwid_in = (payload.get("hwid","") or "").strip()
 
     # v2.6.0: ban enforcement first, before any password / lookup work.
+    # The ban's `reason` field is surfaced to the user when the admin
+    # sets one; without a reason the response is a generic "Account banned".
     ban = _ban_lookup(username=username, hwid=hwid_in)
     if ban:
         audit_log(username, "BAN_BLOCK_AUTH",
                   f"kind={ban['kind']} value={ban['value'][:16]} reason={ban.get('reason','')[:80]}")
-        raise HTTPException(403, "Account banned")
+        msg = ban.get("reason") or "Account banned"
+        raise HTTPException(403, msg)
 
     # Register user if new account
     if is_register:
@@ -2032,12 +2035,15 @@ async def register_device(req: RegisterDeviceRequest):
     norm = norm_user(req.username)
     print(f"[DEVICE REG] username={norm} platform={req.platform} pw_len={len(req.password)} hwid={req.hwid[:16] if req.hwid else 'none'}")
     # v2.6.0: ban enforcement BEFORE password check so a banned user can't
-    # even probe whether their old password is still valid.
+    # even probe whether their old password is still valid. The ban's
+    # `reason` field is surfaced to the user when the admin sets one;
+    # without a reason the response is a generic "Account banned".
     ban = _ban_lookup(username=norm, hwid=req.hwid or "")
     if ban:
         audit_log(req.username, "BAN_BLOCK_REGISTER",
                   f"kind={ban['kind']} value={ban['value'][:16]} reason={ban.get('reason','')[:80]}")
-        raise HTTPException(403, "Account banned")
+        msg = ban.get("reason") or "Account banned"
+        raise HTTPException(403, msg)
     user = db.execute(
         "SELECT id, password_hash, password_salt FROM users WHERE username = ?",
         (norm,)
