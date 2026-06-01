@@ -1,5 +1,6 @@
 #include "stats_tab.h"
 #include "../admin_client.h"
+#include "../sparkline_widget.h"
 #include <QGridLayout>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -165,14 +166,68 @@ StatsTab::StatsTab(AdminClient *client, QWidget *parent)
     l_pend->addStretch();
     grid->addWidget(pendCard, r++, 2);
 
-    grid->setRowStretch(r, 1);
+    // ─── Activity sparklines row ────────────────────────────────
+    QVBoxLayout *l_sReq;
+    auto *sReqCard = makeCard("Requests (last 60 samples)", l_sReq);
+    m_sparkReqs = new SparklineWidget;
+    m_sparkReqs->setMinimumHeight(60);
+    l_sReq->addWidget(m_sparkReqs);
+    grid->addWidget(sReqCard, r, 0);
+
+    QVBoxLayout *l_sErr;
+    auto *sErrCard = makeCard("Errors (last 60 samples)", l_sErr);
+    m_sparkErrs = new SparklineWidget;
+    m_sparkErrs->setLineColor(QColor(0xff, 0x7f, 0x7f));
+    m_sparkErrs->setFillColor(QColor(0xff, 0x7f, 0x7f, 64));
+    m_sparkErrs->setMinimumHeight(60);
+    l_sErr->addWidget(m_sparkErrs);
+    grid->addWidget(sErrCard, r, 1);
+
+    QVBoxLayout *l_sMsg;
+    auto *sMsgCard = makeCard("Messages/hour (24h)", l_sMsg);
+    m_sparkMsgs = new SparklineWidget;
+    m_sparkMsgs->setLineColor(QColor(0x7f, 0xff, 0x7f));
+    m_sparkMsgs->setFillColor(QColor(0x7f, 0xff, 0x7f, 64));
+    m_sparkMsgs->setMinimumHeight(60);
+    l_sMsg->addWidget(m_sparkMsgs);
+    grid->addWidget(sMsgCard, r++, 2);
+
+    QVBoxLayout *l_sAct;
+    auto *sActCard = makeCard("Active devices (60s probes)", l_sAct);
+    m_sparkActive = new SparklineWidget;
+    m_sparkActive->setLineColor(QColor(0x7f, 0xbf, 0xff));
+    m_sparkActive->setFillColor(QColor(0x7f, 0xbf, 0xff, 64));
+    m_sparkActive->setMinimumHeight(60);
+    l_sAct->addWidget(m_sparkActive);
+    grid->addWidget(sActCard, r, 0, 1, 3);
+
+    grid->setRowStretch(r + 1, 1);
 
     connect(&m_timer, &QTimer::timeout, this, &StatsTab::refresh);
     m_timer.start(6'000);
     refresh();
 }
 
+void StatsTab::refreshSeries() {
+    m_client->getJson("/api/v1/admin/stats/activity",
+        [this](const QJsonDocument &d, const QString &err) {
+            if (!err.isEmpty() || !d.isObject()) return;
+            auto o = d.object();
+            auto pull = [&](const QString &k) {
+                QVector<double> out;
+                auto arr = o.value(k).toArray();
+                for (const auto &v : arr) out << v.toVariant().toDouble();
+                return out;
+            };
+            m_sparkReqs->setSeries(pull("requests_per_minute"));
+            m_sparkErrs->setSeries(pull("errors_per_minute"));
+            m_sparkMsgs->setSeries(pull("messages_per_hour"));
+            m_sparkActive->setSeries(pull("active_devices"));
+        });
+}
+
 void StatsTab::refresh() {
+    refreshSeries();
     // Pull /api/v1/admin/stats/overview (rich), /api/v1/relay-stats (no auth),
     // and /api/v1/admin/stats/users (counts).
     m_client->getJson("/api/v1/relay-stats",

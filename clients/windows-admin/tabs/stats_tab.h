@@ -4,6 +4,7 @@
 #include <QTimer>
 class QGridLayout; class QLabel; class QFrame; class QVBoxLayout;
 class AdminClient;
+class SparklineWidget;
 
 class StatsTab : public QWidget {
     Q_OBJECT
@@ -28,5 +29,8 @@ private:
     QLabel *m_errorsTotal, *m_failedLogins, *m_coverCount, *m_coverBytes;
     QLabel *m_onionPct, *m_clearPct, *m_anonPending, *m_diagPending;
     QLabel *m_relayVersion, *m_relayUptime, *m_relayGitSha, *m_relayDisk;
+
+    SparklineWidget *m_sparkReqs, *m_sparkErrs, *m_sparkMsgs, *m_sparkActive;
+    void refreshSeries();
 };
 #endif

@@ -15,6 +15,8 @@
 #include "tabs/audit_tab.h"
 #include "tabs/identity_tab.h"
 #include "tabs/user_detail_dialog.h"
+#include "tabs/backup_tab.h"
+#include "tabs/multisig_tab.h"
 #include <QVBoxLayout>
 #include <QApplication>
 #include <QIcon>
@@ -42,6 +44,8 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
     m_devices    = new DevicesTab(m_client);
     m_audit      = new AuditTab(m_client);
     m_identity   = new IdentityTab(m_client);
+    m_backup     = new BackupTab(m_client);
+    m_multisig   = new MultisigTab(m_client);
 
     m_tabs->addTab(m_federation, "Federation");
     m_tabs->addTab(m_stats,      "Stats");
@@ -52,6 +56,8 @@ AdminWindow::AdminWindow(QWidget *parent) : QMainWindow(parent) {
     m_tabs->addTab(m_bans,       "Bans");
     m_tabs->addTab(m_audit,      "Audit");
     m_tabs->addTab(m_identity,   "Identity");
+    m_tabs->addTab(m_backup,     "Backup");
+    m_tabs->addTab(m_multisig,   "Multisig");
     m_tabs->addTab(m_diag,       "Diagnostics");
     m_tabs->addTab(m_manifest,   "Manifest");
     m_tabs->addTab(m_ssh,        "Relays (SSH)");

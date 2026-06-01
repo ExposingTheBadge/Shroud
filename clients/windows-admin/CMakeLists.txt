@@ -35,6 +35,9 @@ set(ADMIN_SOURCES
     tabs/audit_tab.cpp
     tabs/user_detail_dialog.cpp
     tabs/identity_tab.cpp
+    tabs/backup_tab.cpp
+    tabs/multisig_tab.cpp
+    sparkline_widget.cpp
 )
 
 set(ADMIN_HEADERS
@@ -56,6 +59,9 @@ set(ADMIN_HEADERS
     tabs/audit_tab.h
     tabs/user_detail_dialog.h
     tabs/identity_tab.h
+    tabs/backup_tab.h
+    tabs/multisig_tab.h
+    sparkline_widget.h
 )
 
 add_executable(shroud-admin

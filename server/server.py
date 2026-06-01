@@ -4842,11 +4842,37 @@ async def admin_stats_activity(session=Depends(require_admin)):
             "ORDER BY server_ts DESC LIMIT 50"
         ).fetchall()
     ]
+    # Flat helper series for sparkline-style consumers (shroud-admin's
+    # StatsTab and the web admin's Activity tab). The objects-list shape
+    # above is kept for the legacy consumers that drill into individual
+    # buckets; these arrays let a simple line widget render without
+    # repeatedly walking `series`.
+    requests_per_minute = []
+    errors_per_minute   = []
+    last_req = None
+    for b in series_buckets[-60:]:
+        snap = snaps.get(b, {})
+        req_cum = snap.get("requests_cum", 0)
+        err_cum = snap.get("errors_cum", 0)
+        if last_req is None:
+            requests_per_minute.append(0)
+            errors_per_minute.append(0)
+        else:
+            requests_per_minute.append(max(0, req_cum - last_req[0]))
+            errors_per_minute.append(max(0, err_cum - last_req[1]))
+        last_req = (req_cum, err_cum)
+    messages_per_hour  = [s["messages"]       for s in series[-24:]]
+    active_devices_arr = [s["active_devices"] for s in series[-60:]]
+
     return {
         "series": series,
-        "recent_messages": recent_messages,
-        "onion_requests": ONION_REQ_COUNT,
-        "clear_requests": CLEAR_REQ_COUNT,
+        "requests_per_minute": requests_per_minute,
+        "errors_per_minute":   errors_per_minute,
+        "messages_per_hour":   messages_per_hour,
+        "active_devices":      active_devices_arr,
+        "recent_messages":     recent_messages,
+        "onion_requests":      ONION_REQ_COUNT,
+        "clear_requests":      CLEAR_REQ_COUNT,
     }
 
 
