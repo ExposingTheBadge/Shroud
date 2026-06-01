@@ -24,5 +24,7 @@ private:
     QLabel      *m_status;
     QPushButton *m_saveBtn, *m_testRelayBtn, *m_testAnthropicBtn;
     QPushButton *m_setupBtn, *m_loginBtn, *m_logoutBtn, *m_copyFpBtn;
+    QPushButton *m_claudeSignInBtn, *m_claudeSignOutBtn;
+    QLabel      *m_claudeStatus;
 };
 #endif

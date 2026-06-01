@@ -4,6 +4,8 @@
 #include <QtNetwork/QNetworkProxy>
 #include <QUrlQuery>
 #include <QSysInfo>
+#include <QJsonArray>
+#include "oauth_helper.h"
 
 AdminClient::AdminClient(QObject *parent) : QObject(parent) {
     QSettings s("SHROUD", "admin");
@@ -261,20 +263,46 @@ void AdminClient::onWsTextMessage(const QString &message) {
 void AdminClient::anthropicMessage(const QJsonArray &messages, const QString &system,
                                    int maxTokens,
                                    std::function<void(const QJsonDocument &, const QString &)> cb) {
-    if (m_anthropicKey.isEmpty()) {
-        cb(QJsonDocument(), "Anthropic API key not configured (set in Settings tab)");
+    // Prefer the saved OAuth bearer token; fall back to a raw API key
+    // if the user pasted one but never signed in with claude.ai.
+    QString bearer = OAuthHelper::accessToken();
+    bool useOAuth  = OAuthHelper::hasFreshToken();
+    if (!useOAuth && bearer.isEmpty() && m_anthropicKey.isEmpty()) {
+        cb(QJsonDocument(), "Not signed in to Claude.ai and no API key configured "
+                           "(use 'Sign in with Claude.ai' in Settings).");
         return;
     }
-    QJsonObject body;
-    body["model"]      = "claude-opus-4-7";
-    body["max_tokens"] = maxTokens;
-    body["messages"]   = messages;
-    if (!system.isEmpty()) body["system"] = system;
 
-    QNetworkRequest req((QUrl("https://api.anthropic.com/v1/messages")));
-    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    req.setRawHeader("x-api-key", m_anthropicKey.toUtf8());
-    req.setRawHeader("anthropic-version", "2023-06-01");
-    QNetworkReply *r = m_nam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    replyToCb(r, cb);
+    auto fire = [this, messages, system, maxTokens, cb]() {
+        QJsonObject body;
+        body["model"]      = "claude-opus-4-7";
+        body["max_tokens"] = maxTokens;
+        body["messages"]   = messages;
+        if (!system.isEmpty()) body["system"] = system;
+
+        QNetworkRequest req((QUrl("https://api.anthropic.com/v1/messages")));
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        req.setRawHeader("anthropic-version", "2023-06-01");
+        QString at = OAuthHelper::accessToken();
+        if (!at.isEmpty()) {
+            req.setRawHeader("Authorization", ("Bearer " + at).toUtf8());
+            req.setRawHeader("anthropic-beta", "oauth-2025-04-20");
+        } else {
+            req.setRawHeader("x-api-key", m_anthropicKey.toUtf8());
+        }
+        QNetworkReply *r = m_nam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+        replyToCb(r, cb);
+    };
+
+    if (!useOAuth && !OAuthHelper::refreshTokenStored().isEmpty()) {
+        // Have a refresh token but the access token is stale → refresh first.
+        auto *o = new OAuthHelper(this);
+        o->refresh([fire, o, cb](bool ok, const QString &err) {
+            o->deleteLater();
+            if (!ok) { cb(QJsonDocument(), "Auto-refresh failed: " + err); return; }
+            fire();
+        });
+        return;
+    }
+    fire();
 }

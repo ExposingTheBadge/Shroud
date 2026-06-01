@@ -1,5 +1,6 @@
 #include "settings_tab.h"
 #include "../admin_client.h"
+#include "../oauth_helper.h"
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -12,6 +13,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QFont>
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonObject>
 
@@ -88,6 +90,61 @@ SettingsTab::SettingsTab(AdminClient *client, QWidget *parent)
     loginBar->addWidget(m_loginBtn);
     loginBar->addWidget(m_logoutBtn);
     l->addLayout(loginBar);
+
+    // Claude.ai SSO — preferred over the raw API key. Tokens persist to
+    // QSettings and auto-refresh on next API call when stale, so this is
+    // a one-time login per Windows account.
+    auto *claudeBar = new QHBoxLayout;
+    m_claudeStatus = new QLabel;
+    m_claudeStatus->setStyleSheet("color:#888;padding:0 6px");
+    m_claudeSignInBtn  = new QPushButton("Sign in with Claude.ai");
+    m_claudeSignInBtn->setStyleSheet("background:#5a2e7a;color:white;padding:6px 12px");
+    m_claudeSignOutBtn = new QPushButton("Clear Claude tokens");
+    auto refreshClaudeStatus = [this]() {
+        if (OAuthHelper::hasFreshToken()) {
+            QString email = QSettings("SHROUD","admin").value("anthropic_account_email").toString();
+            qint64 exp = OAuthHelper::expiresAt();
+            QDateTime dt = QDateTime::fromSecsSinceEpoch(exp);
+            QString who = email.isEmpty() ? "Signed in" : "Signed in as " + email;
+            m_claudeStatus->setText(who + " · token good until " + dt.toString("HH:mm"));
+            m_claudeStatus->setStyleSheet("color:#7fff7f;padding:0 6px");
+        } else if (!OAuthHelper::refreshTokenStored().isEmpty()) {
+            m_claudeStatus->setText("Token stale — will auto-refresh on next chat send.");
+            m_claudeStatus->setStyleSheet("color:#ffb74d;padding:0 6px");
+        } else if (!m_anthropicKey->text().isEmpty()) {
+            m_claudeStatus->setText("Using legacy API key (not SSO).");
+            m_claudeStatus->setStyleSheet("color:#aaa;padding:0 6px");
+        } else {
+            m_claudeStatus->setText("Not signed in.");
+            m_claudeStatus->setStyleSheet("color:#888;padding:0 6px");
+        }
+    };
+    refreshClaudeStatus();
+    claudeBar->addWidget(new QLabel("Claude.ai:"));
+    claudeBar->addWidget(m_claudeStatus, 1);
+    claudeBar->addWidget(m_claudeSignInBtn);
+    claudeBar->addWidget(m_claudeSignOutBtn);
+    l->addLayout(claudeBar);
+
+    connect(m_claudeSignInBtn, &QPushButton::clicked, [this, refreshClaudeStatus]() {
+        m_claudeSignInBtn->setEnabled(false);
+        m_claudeStatus->setText("Opening browser…");
+        auto *oa = new OAuthHelper(this);
+        oa->start([this, oa, refreshClaudeStatus](bool ok, const QString &err) {
+            m_claudeSignInBtn->setEnabled(true);
+            oa->deleteLater();
+            if (ok) {
+                refreshClaudeStatus();
+            } else {
+                m_claudeStatus->setText("Sign-in failed: " + err);
+                m_claudeStatus->setStyleSheet("color:#ff8a8a;padding:0 6px");
+            }
+        });
+    });
+    connect(m_claudeSignOutBtn, &QPushButton::clicked, [refreshClaudeStatus]() {
+        OAuthHelper::clear();
+        refreshClaudeStatus();
+    });
 
     auto *bar = new QHBoxLayout;
     m_saveBtn = new QPushButton("Save");

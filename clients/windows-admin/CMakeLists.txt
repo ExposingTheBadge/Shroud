@@ -42,6 +42,7 @@ set(ADMIN_SOURCES
     tabs/backup_tab.cpp
     tabs/multisig_tab.cpp
     sparkline_widget.cpp
+    oauth_helper.cpp
 )
 
 set(ADMIN_HEADERS
@@ -66,6 +67,7 @@ set(ADMIN_HEADERS
     tabs/backup_tab.h
     tabs/multisig_tab.h
     sparkline_widget.h
+    oauth_helper.h
 )
 
 add_executable(shroud-admin
