@@ -865,6 +865,27 @@ except Exception:
     pass
 db = _PerThreadConn(DB_PATH)
 
+def _raise_bad_credentials() -> None:
+    """Wrap EA003 so call sites stay short. Detail explains the v2.4.5
+    ghost-server scenario, which is by far the most common cause of a
+    'real' EA003 right now: the user's old account never reached the
+    federation because the v2.4.5 client was hardcoded to a stale IP."""
+    from crypto.errors import errors, raise_http
+    raise_http(errors.A003_BAD_CREDENTIALS, extra={
+        "hint": (
+            "If you're upgrading from v2.4.5 or earlier, every account "
+            "registered through that build went to a hardcoded address "
+            "that never reached this relay's database. You may need to "
+            "register fresh on v2.6.x."
+        ),
+    })
+
+
+def _raise_username_taken() -> None:
+    from crypto.errors import errors, raise_http
+    raise_http(errors.A005_USERNAME_TAKEN)
+
+
 # ── Models ───────────────────────────────────────────────────────────
 def decrypt_auth_payload(session_id: str, client_pub_hex: str, nonce_hex: str, ct_hex: str, tag_hex: str) -> dict:
     """Decrypt client auth payload using ECDH + AES-256-GCM."""
@@ -1258,7 +1279,7 @@ async def srp_register(request: Request):
     except Exception:
         raise HTTPException(400, "Invalid salt or verifier")
     if db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone():
-        raise HTTPException(409, "Username already registered")
+        _raise_username_taken()
     uid = uuid.uuid4().hex
     db.execute(
         "INSERT INTO users (id, username, password_hash, password_salt, srp_salt, srp_verifier) "
@@ -1698,7 +1719,7 @@ async def encrypted_auth_v2(request: Request):
         if setting_get("registration_enabled", "1") != "1":
             raise HTTPException(403, "Registration is currently disabled")
         if db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone():
-            raise HTTPException(409, "Username already registered")
+            _raise_username_taken()
         user_id = uuid.uuid4().hex
         key, salt = derive_key(password)
         db.execute("INSERT INTO users (id, username, password_hash, password_salt) VALUES (?,?,?,?)",
@@ -1707,9 +1728,9 @@ async def encrypted_auth_v2(request: Request):
     else:
         user = db.execute("SELECT id, password_hash, password_salt FROM users WHERE username=?",
                           (username,)).fetchone()
-        if not user: raise HTTPException(401, "Invalid credentials")
+        if not user: _raise_bad_credentials()
         derived, _ = derive_key(password, user[2])
-        if derived.hex() != user[1]: raise HTTPException(401, "Invalid credentials")
+        if derived.hex() != user[1]: _raise_bad_credentials()
 
     user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
     if platform not in ('windows','ios','android'):
@@ -1907,7 +1928,7 @@ async def change_password(req: ChangePasswordRequest):
         (norm,)
     ).fetchone()
     if not user:
-        raise HTTPException(401, "Invalid credentials")
+        _raise_bad_credentials()
 
     # Verify old password
     derived, _ = derive_key(req.old_password, user[2])
@@ -2000,7 +2021,7 @@ async def encrypted_auth(request: Request):
             raise HTTPException(403, "Registration is currently disabled")
         existing = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
         if existing:
-            raise HTTPException(409, "Username already registered")
+            _raise_username_taken()
         user_id = uuid.uuid4().hex
         key, salt = derive_key(password)
         db.execute("INSERT INTO users (id, username, password_hash, password_salt) VALUES (?,?,?,?)",
@@ -2010,10 +2031,10 @@ async def encrypted_auth(request: Request):
         user = db.execute("SELECT id, password_hash, password_salt FROM users WHERE username=?",
                           (username,)).fetchone()
         if not user:
-            raise HTTPException(401, "Invalid credentials")
+            _raise_bad_credentials()
         derived, _ = derive_key(password, user[2])
         if derived.hex() != user[1]:
-            raise HTTPException(401, "Invalid credentials")
+            _raise_bad_credentials()
 
     # Register / reuse device
     user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
@@ -2052,7 +2073,7 @@ async def register_user(req: RegisterUserRequest):
     norm = norm_user(req.username)
     existing = db.execute("SELECT id FROM users WHERE username = ?", (norm,)).fetchone()
     if existing:
-        raise HTTPException(409, "Username already registered")
+        _raise_username_taken()
 
     user_id = uuid.uuid4().hex
     key, salt = derive_key(req.password)
@@ -2089,13 +2110,13 @@ async def register_device(req: RegisterDeviceRequest):
     ).fetchone()
     if not user:
         print(f"[DEVICE REG] FAIL: username '{norm}' not found")
-        raise HTTPException(401, "Invalid credentials")
+        _raise_bad_credentials()
 
     # Verify password
     derived, _ = derive_key(req.password, user[2])
     if derived.hex() != user[1]:
         print(f"[DEVICE REG] FAIL: password mismatch for '{req.username}' (pw_len={len(req.password)})")
-        raise HTTPException(401, "Invalid credentials")
+        _raise_bad_credentials()
 
     # Check platform
     if req.platform not in ('windows', 'ios', 'android'):
