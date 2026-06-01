@@ -5,6 +5,20 @@ Adapter patch turning the Windows Qt6 client's legacy `/messages/send` +
 `/messages/send-anon` + `/messages/fetch-anon`, backed by the C
 library at [`clients/windows/anon_routing.c`](anon_routing.c).
 
+## ⚠ Required helpers not yet in main.cpp
+
+Before applying this patch, three helpers it references must exist in
+the surrounding `ShroudWindow` class. They do **not** currently exist
+and must be added first:
+
+| Reference | What it does | Adapter strategy |
+|---|---|---|
+| `activeContactDeviceIds()` | Returns a `QStringList` of every contact's device_id | Walk `m_contactList`'s items, pulling `data(Qt::UserRole)` |
+| `handleIncoming(sender, env)` | Dispatch a decoded envelope through the existing display pipeline | Refactor the body of `fetchMessages()`'s `for (const QJsonValue &mv : msgs)` loop into a named method, then call it from both legacy and anon paths |
+| `setting_set(key, value)` | Persist a key/value setting across launches | Either add via `QSettings` or extend the existing `storage_save_blob` API; check the patterns already used for theme/anon flags |
+
+Without these three adapters, the patch will not compile.
+
 This is **a reviewed-before-apply patch**, not a committed code change.
 The Windows client compiles in CI today; applying the patch without
 the small fixups documented below could break the build. Review
