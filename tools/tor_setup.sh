@@ -28,11 +28,77 @@ ADDRESS_LOG="/var/log/shroud-onion-address.txt"
 
 # ── Detect distro + install Tor ──────────────────────────────────────
 
+install_tor_from_torproject_repo() {
+    # The Tor Project distributes el9-compatible RPMs. AL2023 is RHEL 9
+    # based so they install cleanly. Used as a fallback when EPEL isn't
+    # available or doesn't ship tor.
+    cat >/etc/yum.repos.d/tor.repo <<'EOF'
+[tor]
+name=Tor packages from torproject.org (CentOS 9 / EL9 / AL2023)
+baseurl=https://rpm.torproject.org/centos/9/$basearch
+enabled=1
+gpgcheck=1
+gpgkey=https://rpm.torproject.org/centos/public_gpg.key
+cost=100
+EOF
+    rpm --import https://rpm.torproject.org/centos/public_gpg.key 2>/dev/null || true
+
+    # The Tor Project repo declares `torsocks` as a hard dep, but
+    # torsocks lives in EPEL and is unavailable on AL2023. torsocks is
+    # only a SOCKS-wrapper utility — `tor` itself doesn't need it to
+    # run the daemon or a hidden service. We download the tor RPM via
+    # `dnf download` and install it with `rpm -i --nodeps`.
+    arch=$(uname -m)
+    tmpdir=$(mktemp -d)
+    pushd "$tmpdir" >/dev/null
+    if dnf download --resolve --downloadonly --downloaddir="$tmpdir" tor 2>/dev/null; then
+        :
+    else
+        dnf download tor --downloaddir="$tmpdir" 2>/dev/null || true
+    fi
+    # If dnf download didn't work, fall back to direct curl from the repo
+    if ! ls "$tmpdir"/tor-*.rpm >/dev/null 2>&1; then
+        # Find the latest available tor RPM from the repo
+        latest=$(curl -s "https://rpm.torproject.org/centos/9/$arch/" \
+                 | grep -oE 'tor-[0-9.]+-[0-9]+\.el9\.[a-z0-9_]+\.rpm' \
+                 | sort -V | tail -1)
+        if [[ -n "$latest" ]]; then
+            curl -sLO "https://rpm.torproject.org/centos/9/$arch/$latest"
+        fi
+    fi
+    if ls "$tmpdir"/tor-*.rpm >/dev/null 2>&1; then
+        rpm -i --nodeps "$tmpdir"/tor-*.rpm
+    else
+        echo "FATAL: could not obtain a tor RPM from rpm.torproject.org" >&2
+        popd >/dev/null
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    popd >/dev/null
+    rm -rf "$tmpdir"
+}
+
 if command -v apt-get >/dev/null 2>&1; then
     apt-get update
     apt-get install -y tor curl
 elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y tor curl
+    # Try the distro repo first; fall back to EPEL, then the Tor Project
+    # repo for distros (like Amazon Linux 2023) that don't ship tor.
+    # AL2023 ships curl-minimal preinstalled and conflicts with the
+    # full curl package. Don't try to install curl — every AL2023 / EL9
+    # system already has a curl binary that satisfies our needs.
+    if dnf install -y tor 2>/dev/null; then
+        :
+    elif grep -q "Amazon Linux 2023" /etc/os-release 2>/dev/null; then
+        echo "Detected Amazon Linux 2023 — installing tor from rpm.torproject.org"
+        install_tor_from_torproject_repo
+    else
+        echo "Trying EPEL 9 for tor..."
+        dnf install -y \
+            https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm 2>/dev/null \
+            || true
+        dnf install -y tor || install_tor_from_torproject_repo
+    fi
 elif command -v pacman >/dev/null 2>&1; then
     pacman -Sy --noconfirm tor curl
 else
@@ -72,9 +138,14 @@ EOF
 mv "$TMP" "$TORRC"
 
 # Ensure the hidden-service dir exists with the right perms.
+# Different distros / RPM sources use different user accounts for Tor:
+#   - Debian/Ubuntu: debian-tor
+#   - EPEL: tor
+#   - Tor Project RPM (AL2023, EL9): toranon
 mkdir -p "$TOR_HS_DIR"
 chown debian-tor:debian-tor "$TOR_HS_DIR" 2>/dev/null \
     || chown tor:tor "$TOR_HS_DIR" 2>/dev/null \
+    || chown toranon:toranon "$TOR_HS_DIR" 2>/dev/null \
     || true
 chmod 700 "$TOR_HS_DIR"
 
