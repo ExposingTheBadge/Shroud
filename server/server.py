@@ -2805,6 +2805,24 @@ def _apply_state_event(kind: str, payload: dict) -> None:
                 "DELETE FROM bans WHERE kind = ? AND value = ?",
                 (payload["kind"], payload["value"]),
             )
+        elif kind == "admin_fingerprint.added":
+            # Mirror the operator credential row across the federation
+            # so a re-issued admin fingerprint doesn't strand the
+            # operator on a single relay. Idempotent — INSERT OR
+            # IGNORE on the unique fingerprint_id index.
+            db.execute(
+                "INSERT OR IGNORE INTO admin_fingerprints "
+                "(fingerprint_id, password_hash, password_salt, hwid, label) "
+                "VALUES (?,?,?,?,?)",
+                (payload["fingerprint_id"], payload.get("password_hash", ""),
+                 payload.get("password_salt", ""), payload.get("hwid", ""),
+                 payload.get("label", "Admin")),
+            )
+        elif kind == "admin_fingerprint.removed":
+            db.execute(
+                "DELETE FROM admin_fingerprints WHERE fingerprint_id = ?",
+                (payload["fingerprint_id"],),
+            )
         elif kind == "setting.changed":
             # Defense in depth: even if an older relay broadcast a
             # per-deployment setting, we silently drop it on receive.
@@ -4098,6 +4116,16 @@ async def admin_initial_setup(request: Request):
         "INSERT INTO admin_fingerprints (fingerprint_id, password_hash, password_salt, hwid, label) VALUES (?,?,?,?,?)",
         (fp_id, "", "", "", "Primary Admin")
     )
+    # Federate the new admin credential across all peers so the operator
+    # can log into ANY relay with this fingerprint — Rule 0 (no single
+    # point of failure) extended to admin auth.
+    _federation_outbox_state_event("admin_fingerprint.added", {
+        "fingerprint_id": fp_id,
+        "password_hash":  "",
+        "password_salt":  "",
+        "hwid":           "",
+        "label":          "Primary Admin",
+    })
     db.commit()
     return {"ok": True, "fingerprint_id": fp_id, "note": "Save this fingerprint — it cannot be recovered"}
 
@@ -4111,6 +4139,13 @@ async def admin_fingerprint_enroll(request: Request, session=Depends(require_adm
         (fp_id, "", "", "", label)
     )
     db.commit()
+    _federation_outbox_state_event("admin_fingerprint.added", {
+        "fingerprint_id": fp_id,
+        "password_hash":  "",
+        "password_salt":  "",
+        "hwid":           "",
+        "label":          label,
+    })
     return {"ok": True, "fingerprint_id": fp_id}
 
 @app.post("/api/v1/admin/logout")
