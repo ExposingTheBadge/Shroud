@@ -429,12 +429,119 @@ public:
         m_stack = new QStackedWidget;
         setCentralWidget(m_stack);
 
-        if (m_registered) buildChatUI();
-        else buildRegisterUI();
+        routeStartupScreen();
 
         /* Background update check on startup — silent unless a newer version
            is available. Delayed so it doesn't block UI paint. */
         QTimer::singleShot(2000, this, [this]() { checkForUpdates(false); });
+    }
+
+    /* Quick synchronous server-reachability probe. Returns true when /health
+       answers with {"status":"ok"} inside the short timeout window. Restores
+       the default WinHTTP timeouts before returning so normal traffic isn't
+       affected. */
+    bool probeServerReachable() {
+        network_set_timeout(3000, 3000, 3000, 3000);
+        QByteArray hr = httpGet("/health");
+        network_set_timeout(60000, 60000, 30000, 30000);
+        return !hr.isEmpty() && hr.contains("\"status\":\"ok\"");
+    }
+
+    /* Pick the right startup screen. With a reachable server we route to
+       chat (if registered) or the login/register form (if not). When the
+       server is unreachable we surface a plain "Server unavailable" screen
+       so the user understands the situation instead of staring at a login
+       form that can't actually authenticate. */
+    void routeStartupScreen() {
+        if (!probeServerReachable()) {
+            buildServerDownUI();
+            return;
+        }
+        if (m_registered) buildChatUI();
+        else              buildRegisterUI();
+    }
+
+    /* Server-unavailable screen. Single card with title, explanation, a
+       Retry button (re-runs the probe), and Exit. Mirrors the visual style
+       of the login card so the app doesn't feel broken — just paused. */
+    void buildServerDownUI() {
+        auto *w = new QWidget;
+        auto *lay = new QVBoxLayout(w);
+        lay->setContentsMargins(40, 40, 40, 40);
+        lay->setAlignment(Qt::AlignCenter);
+
+        auto *card = new QFrame;
+        card->setObjectName("serverDownCard");
+        card->setStyleSheet(
+            "QFrame#serverDownCard { background:#1c1c22; border:1px solid #3a3a44; "
+            "border-radius:10px; min-width:380px; max-width:440px; }"
+        );
+        auto *cl = new QVBoxLayout(card);
+        cl->setContentsMargins(28, 24, 28, 24);
+        cl->setSpacing(12);
+
+        auto *title = new QLabel("Server unavailable");
+        QFont tf; tf.setPointSize(14); tf.setBold(true);
+        title->setFont(tf);
+        title->setStyleSheet("color:#ff8c1e;");
+        title->setAlignment(Qt::AlignCenter);
+        cl->addWidget(title);
+
+        auto *msg = new QLabel(
+            "SHROUD can't reach the server right now.\n\n"
+            "This is usually temporary — try again in a few minutes. "
+            "If the problem persists, the operator may be doing scheduled "
+            "maintenance.");
+        msg->setWordWrap(true);
+        msg->setAlignment(Qt::AlignCenter);
+        msg->setStyleSheet("color:#cfcfcf;");
+        cl->addWidget(msg);
+
+        auto *status = new QLabel;
+        status->setAlignment(Qt::AlignCenter);
+        status->setStyleSheet("color:#8a8a92; font-size:11px;");
+        cl->addWidget(status);
+
+        auto *retryBtn = new QPushButton("Retry");
+        retryBtn->setMinimumHeight(34);
+        retryBtn->setStyleSheet(
+            "QPushButton { background:#ff8c1e; color:#0a0a0b; font-weight:700; "
+            "border:none; border-radius:6px; padding:6px 16px; }"
+            "QPushButton:hover { background:#ff9c3a; }"
+            "QPushButton:disabled { background:#3a3a3f; color:#8a8a92; }"
+        );
+        cl->addWidget(retryBtn);
+
+        auto *exitBtn = new QPushButton("Exit");
+        exitBtn->setStyleSheet(
+            "QPushButton { background:transparent; color:#cfcfcf; "
+            "border:1px solid #3a3a44; border-radius:6px; padding:6px 16px; }"
+            "QPushButton:hover { background:#222; color:#fff; }"
+        );
+        connect(exitBtn, &QPushButton::clicked, this, &QWidget::close);
+        cl->addWidget(exitBtn);
+
+        connect(retryBtn, &QPushButton::clicked, this, [this, retryBtn, status]() {
+            retryBtn->setEnabled(false);
+            status->setText("Checking...");
+            QApplication::processEvents();
+            if (probeServerReachable()) {
+                /* Wipe the down-screen and route into the normal flow. */
+                while (m_stack->count() > 0) {
+                    QWidget *old = m_stack->widget(0);
+                    m_stack->removeWidget(old);
+                    old->deleteLater();
+                }
+                if (m_registered) buildChatUI();
+                else              buildRegisterUI();
+            } else {
+                status->setText("Still unreachable. Try again in a moment.");
+                retryBtn->setEnabled(true);
+            }
+        });
+
+        lay->addWidget(card);
+        m_stack->addWidget(w);
     }
 
 private:

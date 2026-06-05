@@ -46,12 +46,72 @@ struct ShroudApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if client.isRegistered {
-                MessageListView(client: client)
-            } else {
-                RegistrationView(client: client)
+            // Probe the relay first so users see a clear "Server
+            // unavailable" screen when the relay is down — not a login
+            // form they can't actually use.
+            switch client.serverReachable {
+            case .none:
+                ServerCheckingView()
+            case .some(false):
+                ServerDownView {
+                    Task { await client.checkServerHealth() }
+                }
+            case .some(true):
+                if client.isRegistered {
+                    MessageListView(client: client)
+                } else {
+                    RegistrationView(client: client)
+                }
             }
         }
+    }
+}
+
+// MARK: - Server-health screens
+
+struct ServerCheckingView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+            Text("Connecting to server...")
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct ServerDownView: View {
+    let onRetry: () -> Void
+    @State private var retrying = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Server unavailable")
+                .font(.title2.bold())
+                .foregroundColor(.orange)
+            Text("SHROUD can't reach the server right now. This is usually temporary — try again in a few minutes. If the problem persists, the operator may be doing scheduled maintenance.")
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 24)
+            Button {
+                retrying = true
+                onRetry()
+                // The publisher on `serverReachable` will rebuild this
+                // view; reset the local flag after a brief moment so
+                // re-tap works if it's still down.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                    retrying = false
+                }
+            } label: {
+                Text(retrying ? "Checking..." : "Retry")
+                    .frame(minWidth: 120)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(retrying)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
     }
 }
 
@@ -80,6 +140,10 @@ class ShroudClient: ObservableObject {
     @Published var messages: [SecureMessage] = []
     @Published var contacts: [Contact] = []
     @Published var groups: [ChatGroup] = []
+    // nil = probe in flight, true = reachable, false = server unavailable.
+    // The root WindowGroup switches on this so registration/chat never
+    // appears until we've confirmed the relay is up.
+    @Published var serverReachable: Bool? = nil
 
     private var identityKey: P384.KeyAgreement.PrivateKey?
     private var sessionKeys: [String: SymmetricKey] = [:]
@@ -87,6 +151,26 @@ class ShroudClient: ObservableObject {
 
     init() {
         loadOrCreateIdentity()
+        Task { await checkServerHealth() }
+    }
+
+    @MainActor
+    func checkServerHealth() async {
+        // Force the publisher to fire so the splash re-appears between
+        // retries even when the previous value was already `false`.
+        serverReachable = nil
+        guard let url = URL(string: "\(server)/health") else {
+            serverReachable = false; return
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 5
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            let s = String(data: data, encoding: .utf8) ?? ""
+            serverReachable = s.contains("\"status\":\"ok\"")
+        } catch {
+            serverReachable = false
+        }
     }
 
     // MARK: - Identity

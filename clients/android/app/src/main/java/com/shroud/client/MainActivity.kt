@@ -41,6 +41,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
@@ -198,11 +199,18 @@ class MainActivity : ComponentActivity() {
             }
 
             MaterialTheme(colorScheme = colorSchemeFor(vm.themeName)) {
-                when {
-                    !vm.isRegistered             -> AuthScreen(vm)
-                    vm.pinHash == null           -> PinSetupScreen(vm)
-                    vm.pinLocked                 -> PinUnlockScreen(vm)
-                    else                         -> ChatScreen(vm)
+                // Probe the relay first so users see a clear "Server
+                // unavailable" screen when the relay is down — not a
+                // login form they can't actually use.
+                when (vm.serverReachable) {
+                    null  -> ServerCheckingScreen()
+                    false -> ServerDownScreen { vm.checkServerHealth() }
+                    true  -> when {
+                        !vm.isRegistered   -> AuthScreen(vm)
+                        vm.pinHash == null -> PinSetupScreen(vm)
+                        vm.pinLocked       -> PinUnlockScreen(vm)
+                        else               -> ChatScreen(vm)
+                    }
                 }
             }
         }
@@ -236,6 +244,33 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
     var useAnonRouting by mutableStateOf(true)
     /** Theme persisted in prefs. Names match the Windows presets. */
     var themeName by mutableStateOf("Nord")
+
+    /** Result of the startup health probe.
+     *  null  → probe in flight (splash shown)
+     *  false → relay unreachable (ServerDownScreen shown)
+     *  true  → reachable; routing falls through to auth/PIN/chat
+     *  Without this gate, an unreachable relay would dump the user on a
+     *  login form they can't actually use. */
+    var serverReachable by mutableStateOf<Boolean?>(null)
+
+    /** Synchronously checks `<relay>/health` with a short timeout.
+     *  Runs on IO dispatcher; flips `serverReachable` on completion so
+     *  the Composable tree recomposes. Retried from the ServerDownScreen
+     *  button. */
+    fun checkServerHealth() {
+        serverReachable = null
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    val r = NetworkClient.get("/health")
+                    r.contains("\"status\":\"ok\"")
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+            serverReachable = ok
+        }
+    }
 
     /* ── PIN lock (v2.4.5) ───────────────────────────────────────────
      * Mandatory PIN, set on first launch after auth. Screen-off and a
@@ -370,6 +405,10 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
             deviceID = sid; username = su; savedPassword = sp; isRegistered = true
             startHeartbeat()
         }
+
+        // Probe the relay so the UI can show "Server unavailable" instead
+        // of an auth form when the relay is down.
+        checkServerHealth()
     }
 
     /** Load my X25519 identity (priv, pub) from disk. Returns null if
@@ -1245,6 +1284,35 @@ fun TooltipIconButton(
                  else "$contentDesc — $tip"
     IconButton(onClick = onClick, enabled = enabled) {
         Icon(icon, contentDescription = merged)
+    }
+}
+
+@Composable
+fun ServerCheckingScreen() {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator()
+            Spacer(Modifier.height(12.dp))
+            Text("Connecting to server...",
+                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+fun ServerDownScreen(onRetry: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Server unavailable",
+                 style = MaterialTheme.typography.headlineSmall,
+                 color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(12.dp))
+            Text("SHROUD can't reach the server right now. This is usually temporary — try again in a few minutes. If the problem persists, the operator may be doing scheduled maintenance.",
+                 textAlign = TextAlign.Center,
+                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = onRetry) { Text("Retry") }
+        }
     }
 }
 

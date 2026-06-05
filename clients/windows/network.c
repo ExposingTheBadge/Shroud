@@ -77,6 +77,17 @@ void network_cleanup(void) {
     hSession = NULL;
 }
 
+/* Override the WinHTTP session-wide timeouts. All values in ms; pass -1
+ * to leave a stage unchanged. The defaults (60s resolve/connect, 30s
+ * send/receive) hang the startup splash forever when the server is
+ * unreachable, so callers (e.g. the startup health probe) dial these
+ * down briefly and restore them. */
+void network_set_timeout(int resolve_ms, int connect_ms,
+                         int send_ms, int receive_ms) {
+    if (!hSession) return;
+    WinHttpSetTimeouts(hSession, resolve_ms, connect_ms, send_ms, receive_ms);
+}
+
 /* Tolerate the relay's self-signed TLS cert. The production relays
  * present a self-signed leaf — there's no public CA chain by design
  * (Rule 0: the relay deploy must work even without third-party CA
