@@ -121,11 +121,6 @@ BOOL   crypto_pq_hybrid_client(const BYTE *server_blob, DWORD server_blob_len,
 /* ── Network API ──────────────────────────────────────────────────── */
 BOOL   network_init(void);
 void   network_cleanup(void);
-/* Override WinHTTP session-wide timeouts (ms). Pass -1 to leave a stage
- * unchanged. Used by the startup health probe so an unreachable server
- * doesn't hang the splash for 60s. */
-void   network_set_timeout(int resolve_ms, int connect_ms,
-                           int send_ms, int receive_ms);
 /* Route subsequent requests through a SOCKS5 (or HTTP CONNECT) proxy.
  * Pass "socks=127.0.0.1:9050" to tunnel through a local Tor daemon, or
  * NULL/"" to disable. Returns FALSE if the session couldn't be rebuilt
