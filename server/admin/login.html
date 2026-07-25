@@ -16,6 +16,18 @@
   <div class="fp-label" id="fpLabel">Paste your fingerprint into the grid</div>
   <div class="fp-grid" id="fpGrid"></div>
 
+  <!-- First-run only. /api/v1/admin/setup is gated on a token the relay
+       writes to SHROUD_DATA_DIR/admin_setup_token at mode 0600, so that
+       claiming admin requires host access rather than just reaching the
+       port. Hidden entirely once an admin exists. -->
+  <div id="setupTokenWrap" style="display:none">
+    <label>Setup token</label>
+    <input type="text" class="text" id="setupToken" placeholder="from admin_setup_token on the relay" autocomplete="off">
+    <p class="fp-status" style="margin-top:-4px">
+      <code>sudo cat /opt/shroud/data/admin_setup_token</code>
+    </p>
+  </div>
+
   <label>Password</label>
   <input type="password" class="text" id="pw" placeholder="Admin password" autocomplete="current-password">
 

@@ -139,26 +139,48 @@
         document.getElementById('setupBtn').style.display = 'block';
         document.getElementById('fpBtn').style.display = 'none';
         pwInput.placeholder = 'Set admin password (12+ chars)';
-        document.getElementById('setupBtn').disabled = false;
-        pwInput.addEventListener('input', function () {
-          document.getElementById('setupBtn').disabled = this.value.length < 12;
-        });
+        // Setup is token-gated; reveal the field and require both.
+        document.getElementById('setupTokenWrap').style.display = 'block';
+        const tokInput = document.getElementById('setupToken');
+        const syncSetupBtn = function () {
+          document.getElementById('setupBtn').disabled =
+            pwInput.value.length < 12 || tokInput.value.trim().length === 0;
+        };
+        syncSetupBtn();
+        pwInput.addEventListener('input', syncSetupBtn);
+        tokInput.addEventListener('input', syncSetupBtn);
       }
     } catch (e) {}
   })();
 
   document.getElementById('setupBtn').addEventListener('click', async function () {
     const pw = pwInput.value;
-    if (pw.length < 12) return;
+    const tok = (document.getElementById('setupToken') || {}).value || '';
+    if (pw.length < 12 || !tok.trim()) return;
     this.disabled = true;
     document.getElementById('fpStatus').textContent = 'Generating fingerprint...';
     try {
       const r = await fetch('/api/v1/admin/setup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Setup-Token': tok.trim(),
+        },
         body: JSON.stringify({ password: pw }),
       });
       const d = await r.json();
+      // Surface the server's actual reason. This used to collapse every
+      // failure into a bare "Setup failed", which said nothing about a
+      // missing or wrong setup token.
+      if (!r.ok) {
+        const detail = (d && (d.detail && d.detail.detail || d.detail)) || ('HTTP ' + r.status);
+        document.getElementById('fpStatus').innerHTML =
+          '<span style="color:var(--danger)">' +
+          String(detail).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])) +
+          '</span>';
+        this.disabled = false;
+        return;
+      }
       if (d.ok) {
         document.getElementById('fpStatus').innerHTML =
           '<span style="color:var(--green)">Your fingerprint:</span><br>' +

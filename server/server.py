@@ -4158,7 +4158,38 @@ def is_ip_banned(ip: str) -> bool:
     ).fetchone()[0]
     return count >= MAX_FAILED_ATTEMPTS
 
-AUDIT_LOG = os.path.join(os.path.dirname(__file__), "audit.log")
+def _audit_log_path() -> str:
+    """Where the audit trail lives.
+
+    This used to be unconditionally next to server.py, i.e. inside the
+    source checkout — /opt/shroud/src/server/audit.log on a relay. Two
+    consequences: the backup endpoints only capture SHROUD_DATA_DIR, so
+    the audit trail was never in any backup and a host rebuild lost it
+    entirely; and it sat in a git working tree that deploys reset, where
+    a `git clean -xfd` would take it (it is gitignored, so -x is enough).
+
+    Prefers SHROUD_DATA_DIR and migrates an existing file across once so
+    no history is stranded.
+    """
+    legacy = os.path.join(os.path.dirname(__file__), "audit.log")
+    data_dir = os.environ.get("SHROUD_DATA_DIR", "")
+    if not data_dir:
+        return legacy
+    target = os.path.join(data_dir, "audit.log")
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        if os.path.exists(legacy) and not os.path.exists(target):
+            shutil.move(legacy, target)
+            print(f"[SHROUD] Migrated audit log {legacy} -> {target}",
+                  file=sys.stderr, flush=True)
+    except OSError as e:
+        print(f"[SHROUD] Could not place audit log in {data_dir}: {e} — "
+              f"falling back to {legacy}", file=sys.stderr, flush=True)
+        return legacy
+    return target
+
+
+AUDIT_LOG = _audit_log_path()
 _audit_log_broken = False
 
 
