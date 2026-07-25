@@ -27,7 +27,36 @@ if [ ! -d /opt/shroud/venv ]; then
 fi
 source /opt/shroud/venv/bin/activate
 pip install --upgrade pip
-pip install fastapi 'uvicorn[standard]' pydantic cryptography
+pip install fastapi 'uvicorn[standard]' pydantic cryptography boto3
+
+# ── 3b. liboqs — post-quantum primitives ─────────────────────────────
+# Without this the relay boots fine but logs "PQ hybrid unavailable" and
+# silently runs classical-only: no ML-KEM-1024 hybrid, no triple-hybrid
+# signature. Every relay in the fleet sat that way until 2026-07-25.
+#
+# Build only the mechanisms SHROUD asks for. The full algorithm set is
+# ~1600 compile targets and takes ~30 min on a t3.micro; this is ~250 and
+# takes about a minute. 2 GB of swap keeps a parallel compile from
+# OOM-killing the relay on a 1 GiB box.
+if ! /opt/shroud/venv/bin/python -c "import oqs" >/dev/null 2>&1; then
+    if ! swapon --show | grep -q swapfile; then
+        dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+        chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
+    fi
+    dnf install -y -q cmake gcc gcc-c++ ninja-build openssl-devel python3.11-devel
+    rm -rf /tmp/liboqs-build
+    git clone -q --depth 1 --branch 0.16.0 \
+        https://github.com/open-quantum-safe/liboqs /tmp/liboqs-build
+    cmake -S /tmp/liboqs-build -B /tmp/liboqs-build/build -GNinja \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+        -DOQS_BUILD_ONLY_LIB=ON \
+        -DOQS_MINIMAL_BUILD="KEM_ml_kem_1024;SIG_ml_dsa_87;SIG_slh_dsa_pure_sha2_256s" \
+        -DCMAKE_INSTALL_PREFIX=/usr/local
+    ninja -C /tmp/liboqs-build/build -j"$(nproc)"
+    ninja -C /tmp/liboqs-build/build install
+    ldconfig
+    pip install liboqs-python
+fi
 
 # ── 4. Self-signed TLS cert (clients pin server identity separately) ──
 # IMDSv2: get a token first, then ask for metadata. AL2023 enforces this.
@@ -71,6 +100,14 @@ User=ec2-user
 WorkingDirectory=/opt/shroud/src
 Environment=PYTHONUNBUFFERED=1
 Environment=SHROUD_DATA_DIR=/opt/shroud/data
+# liboqs-python searches OQS_INSTALL_PATH first. Without it the binding
+# falls back to $HOME/_oqs and COMPILES liboqs from source at import
+# time, pinning every vCPU for ~30 minutes while the relay is starting.
+Environment=OQS_INSTALL_PATH=/usr/local
+# Pin the hash-based signature mechanism. Auto-selection is per-host, and
+# SLH-DSA and SPHINCS+ signatures do not cross-verify, so a fleet on
+# mixed liboqs versions would silently split. See crypto/hybrid_sig.py.
+Environment=SHROUD_SPH_MECH=SLH_DSA_PURE_SHA2_256S
 ExecStart=/opt/shroud/venv/bin/uvicorn server.server:app \
     --host 0.0.0.0 \
     --port 58443 \
