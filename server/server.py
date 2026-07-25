@@ -59,6 +59,7 @@ import asyncio
 # to everyone. The set is mutated only from the asyncio event loop, so no
 # lock is needed.
 _WS_ADMIN_SUBS: "Set[WebSocket]" = set()
+_WS_ADMIN_TASKS: set = set()
 
 def publish_event(event_type: str, payload: dict) -> None:
     """Broadcast a JSON event to all connected admin WebSocket clients.
@@ -84,7 +85,12 @@ def publish_event(event_type: str, payload: dict) -> None:
             except Exception:
                 _WS_ADMIN_SUBS.discard(sub)
 
-    loop.create_task(_send_all())
+    # Hold a reference: a bare create_task() is only weakly held by the
+    # loop, so it can be garbage-collected mid-send and silently drop
+    # the admin live-tail event. Discard on completion to avoid a leak.
+    _t = loop.create_task(_send_all())
+    _WS_ADMIN_TASKS.add(_t)
+    _t.add_done_callback(_WS_ADMIN_TASKS.discard)
 
 # Try to import crypto — works when running from project root
 try:
@@ -1749,7 +1755,7 @@ async def encrypted_auth_v2(request: Request):
                           (username,)).fetchone()
         if not user: _raise_bad_credentials()
         derived, _ = derive_key(password, user[2])
-        if derived.hex() != user[1]: _raise_bad_credentials()
+        if not hmac.compare_digest(derived.hex(), user[1]): _raise_bad_credentials()
 
     user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
     if platform not in ('windows','ios','android'):
@@ -1951,7 +1957,7 @@ async def change_password(req: ChangePasswordRequest):
 
     # Verify old password
     derived, _ = derive_key(req.old_password, user[2])
-    if derived.hex() != user[1]:
+    if not hmac.compare_digest(derived.hex(), user[1]):
         raise HTTPException(401, "Current password is incorrect")
 
     # Hash new password and update
@@ -2072,7 +2078,7 @@ async def encrypted_auth(request: Request):
         if not user:
             _raise_bad_credentials()
         derived, _ = derive_key(password, user[2])
-        if derived.hex() != user[1]:
+        if not hmac.compare_digest(derived.hex(), user[1]):
             _raise_bad_credentials()
 
     # Register / reuse device
@@ -2160,7 +2166,7 @@ async def register_device(req: RegisterDeviceRequest):
 
     # Verify password
     derived, _ = derive_key(req.password, user[2])
-    if derived.hex() != user[1]:
+    if not hmac.compare_digest(derived.hex(), user[1]):
         print(f"[DEVICE REG] FAIL: password mismatch for '{req.username}' (pw_len={len(req.password)})")
         _raise_bad_credentials()
 

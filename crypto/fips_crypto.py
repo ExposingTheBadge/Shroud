@@ -232,20 +232,72 @@ def hybrid_key_exchange_decaps(ecdh_priv, ecdh_pub_peer, kyber_ct, kyber_sk):
 
 # ── Self-Test (FIPS 140-2 requirement) ───────────────────────────────
 def fips_self_test() -> bool:
-    """Run FIPS 140-2 required self-tests. Returns True on pass."""
-    # AES-GCM known-answer test
-    key = bytes.fromhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
-    bytes.fromhex("000102030405060708090a0b")
-    plain = b"FIPS 140-2 self-test"
-    enc = encrypt_aes_gcm(key, plain)
-    dec = decrypt_aes_gcm(key, enc["nonce"], enc["ciphertext"])
-    if dec != plain:
+    """Run FIPS 140-2 required self-tests. Returns True on pass.
+
+    These are known-answer tests: fixed key, fixed nonce, fixed input,
+    compared against published expected output. What was here before was
+    labelled a KAT but only did encrypt-then-decrypt and checked the
+    plaintext came back — it declared a fixed nonce and never used it
+    (encrypt_aes_gcm picks its own random one), so nothing was ever
+    compared to a known answer. That test passes for any transform that
+    round-trips, including one that isn't AES at all, while the relay
+    logs "FIPS 140-2 self-test: PASSED" on the strength of it.
+
+    Vectors are the published ones so this checks the implementation
+    against the standard rather than against itself:
+      - AES-256-GCM: NIST GCM spec Test Case 14
+      - HMAC-SHA256: RFC 4231 Test Case 1
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    # ── AES-256-GCM known-answer test (NIST GCM Test Case 14) ──
+    kat_key = bytes(32)
+    kat_iv = bytes(12)
+    kat_pt = bytes(16)
+    expected_ct = bytes.fromhex("cea7403d4d606b6e074ec5d3baf39d18")
+    expected_tag = bytes.fromhex("d0d1c8a799996bf0265b98b5d48ab919")
+    out = AESGCM(kat_key).encrypt(kat_iv, kat_pt, None)
+    if out[:16] != expected_ct or out[16:] != expected_tag:
+        return False
+    # Decrypt direction, and reject a tampered tag.
+    if AESGCM(kat_key).decrypt(kat_iv, expected_ct + expected_tag, None) != kat_pt:
+        return False
+    try:
+        bad = bytearray(expected_ct + expected_tag)
+        bad[-1] ^= 0x01
+        AESGCM(kat_key).decrypt(kat_iv, bytes(bad), None)
+        return False          # a forged tag must not verify
+    except Exception:         # noqa: BLE001 — InvalidTag is the pass path
+        pass
+
+    # ── HMAC-SHA256 known-answer test (RFC 4231 Test Case 1) ──
+    if hmac_sign(b"\x0b" * 20, b"Hi There").hex() != (
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    ):
         return False
 
-    # HMAC known-answer test
+    # ── The wrappers SHROUD actually calls ──
+    # encrypt_aes_gcm picks its own random nonce, so it can't take a
+    # fixed-nonce KAT directly. Instead: encrypt with the wrapper, then
+    # decrypt independently with the raw primitive using the nonce it
+    # returned. A wrapper that round-trips against itself proves nothing
+    # — any reversible transform passes that — but one whose output the
+    # standard primitive can decrypt really is AES-256-GCM.
+    key = bytes.fromhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+    plain = b"FIPS 140-2 self-test"
+    enc = encrypt_aes_gcm(key, plain)
+    try:
+        if AESGCM(key).decrypt(enc["nonce"], enc["ciphertext"], b"") != plain:
+            return False
+    except Exception:                                        # noqa: BLE001
+        return False
+    if decrypt_aes_gcm(key, enc["nonce"], enc["ciphertext"]) != plain:
+        return False
+    if len(enc["nonce"]) != GCM_IV_LEN:
+        return False
+
     hkey = bytes(32)
-    mac = hmac_sign(hkey, b"test")
-    if not hmac_verify(hkey, b"test", mac):
+    if not hmac_verify(hkey, b"test", hmac_sign(hkey, b"test")):
         return False
 
     return True
