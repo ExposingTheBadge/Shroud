@@ -265,7 +265,7 @@ struct ReceivedMessage {
 }
 
 class NetworkClient {
-    var relayURL: URL = URL(string: "https://44.202.225.57:58443")!
+    var relayURL: URL = URL(string: "https://100.30.51.8:58443")!
 
     func sendSealedAnon(to contact: Contact, body: String) async throws {
         // Implementation calls into AnonRouting.swift + URLSession.

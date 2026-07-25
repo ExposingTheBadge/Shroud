@@ -19,7 +19,7 @@ struct RelayDef {
 };
 
 static const RelayDef RELAYS[] = {
-    {"us-east-1", "shroud-relay.pem",         "44.202.225.57"},
+    {"us-east-1", "shroud-relay.pem",         "100.30.51.8"},
     {"us-east-2", "shroud-relay-useast2.pem", "3.142.185.104"},
     {"us-west-2", "shroud-relay-uswest2.pem", "54.214.75.14"},
     {"eu-west-1", "shroud-relay-euwest1.pem", "54.171.165.223"},

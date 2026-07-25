@@ -89,7 +89,7 @@ A user who runs **today's** stale Linux client gets:
 - Identity-key reuse across messages (no forward secrecy, no break-in
   recovery — a full ratchet rollback if anyone leaks the identity key
   exposes every prior conversation).
-- Plaintext HTTP only (`http://150.195.114.185:58443` was hardcoded
+- Plaintext HTTP only (a bare `http://<relay-ip>:58443` was hardcoded
   before we required TLS; this is its own problem).
 - No Tor support, even though the v1.5 onion-only server setting exists.
 

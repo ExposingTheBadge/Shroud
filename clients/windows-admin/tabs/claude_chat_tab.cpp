@@ -138,7 +138,7 @@ and of the operator's local relay):
 
 | Region | Host | Operator |
 |---|---|---|
-| us-east-1 | `44.202.225.57:58443` | Brent Gordon |
+| us-east-1 | `100.30.51.8:58443` | Brent Gordon |
 | us-east-2 | `3.142.185.104:58443` | Brent Gordon |
 | us-west-2 | `54.214.75.14:58443` | Brent Gordon |
 | eu-west-1 | `54.171.165.223:58443` | Brent Gordon |

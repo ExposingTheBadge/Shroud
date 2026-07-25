@@ -38,7 +38,7 @@ if REPO_ROOT not in sys.path:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SHROUD <-> Discord bridge")
-    ap.add_argument("--relay-url", default="https://44.202.225.57:58443")
+    ap.add_argument("--relay-url", default="https://100.30.51.8:58443")
     ap.add_argument("--shroud-identity", required=True)
     ap.add_argument("--shroud-contact", required=True)
     ap.add_argument("--discord-channel-id", type=int, required=True)

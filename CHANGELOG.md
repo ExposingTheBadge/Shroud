@@ -149,7 +149,7 @@ The shape of the project changed substantially. Headline additions:
   attestation verifier)
 - AWS plain (`deploy/aws-simple/` user-data for free-tier t3.micro)
 - Docker Compose (`deploy/docker-compose/`)
-- Live production relay: `https://44.202.225.57:58443` (us-east-1)
+- Live production relay: `https://100.30.51.8:58443` (us-east-1)
 
 **Tests + CI**
 - `tests/run_all.py` runs every module's `_self_test` (21+ green)

@@ -48,10 +48,10 @@ from crypto.anon_routing import (  # noqa: E402
 
 # Source of truth lives in SESSION_NOTES.md
 RELAYS = {
-    "us-east-1 (Virginia)":  "https://44.202.225.57:58443",
-    "us-east-2 (Ohio)":      "https://3.142.185.104:58443",
-    "us-west-2 (Oregon)":    "https://54.214.75.14:58443",
-    "eu-west-1 (Ireland)":   "https://54.171.165.223:58443",
+    "us-east-1 (Virginia)":  "https://100.30.51.8:58443",
+    "us-east-2 (Ohio)":      "https://18.222.72.227:58443",
+    "us-west-2 (Oregon)":    "https://52.38.93.230:58443",
+    "eu-west-1 (Ireland)":   "https://52.50.29.221:58443",
 }
 ORIGIN = "us-east-1 (Virginia)"
 

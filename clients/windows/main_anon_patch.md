@@ -10,7 +10,7 @@ It mirrors the iOS `NetworkClientAnon` and Android
 ```cpp
 #include "anon_client.h"
 
-shroud::AnonClient client(L"44.202.225.57", 58443, /*tolerate_self_signed=*/true);
+shroud::AnonClient client(L"100.30.51.8", 58443, /*tolerate_self_signed=*/true);
 
 shroud::RoutingContext ctx;
 memcpy(ctx.my_priv,    /* my X25519 priv */, 32);

@@ -15,7 +15,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define SERVER_URL    "http://150.195.114.185:58443"
+#define SERVER_URL    "http://relay.example:58443"
 #define APP_VERSION   "1.2.0"
 #define CONFIG_DIR    ".shroud"
 #define DOWNLOAD_DIR  "Downloads/SHROUD"

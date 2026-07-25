@@ -19,10 +19,10 @@ compaction.
 
 | Region | Public IP | Instance ID | SSH key file | Operator Ed25519 pubkey |
 |---|---|---|---|---|
-| us-east-1 (Virginia) | `44.202.225.57` | `i-017e9f45b02f31d04` | `Documents\AWS-Keys\shroud-relay.pem` | `3e82643a345451f867b2d336c97f12def70c59afb4fd95e7714f8a72920ef374` |
-| us-east-2 (Ohio) | `3.142.185.104` | `i-09802917ea14f357a` | `Documents\AWS-Keys\shroud-relay-useast2.pem` | `958f11b92f4ae1b8f3b03cfbf020efd67d89afb8a65a51674f146145f8262d93` |
-| us-west-2 (Oregon) | `54.214.75.14` | `i-0dc3f833728c551df` | `Documents\AWS-Keys\shroud-relay-uswest2.pem` | `2cf90ad74ca6ac49de311dd481994735e47a61ad148234621c19edd498ba40f2` |
-| eu-west-1 (Ireland) | `54.171.165.223` | `i-032f9c65978e3a7a5` | `Documents\AWS-Keys\shroud-relay-euwest1.pem` | `79f49802d116f91ba70f4079b967e0c89532d0b3dbce65f1b6d8436699eb0417` |
+| us-east-1 (Virginia) | `100.30.51.8` | `i-017e9f45b02f31d04` | `Documents\AWS-Keys\shroud-relay.pem` | `3e82643a345451f867b2d336c97f12def70c59afb4fd95e7714f8a72920ef374` |
+| us-east-2 (Ohio) | `18.222.72.227` | `i-09802917ea14f357a` | `Documents\AWS-Keys\shroud-relay-useast2.pem` | `958f11b92f4ae1b8f3b03cfbf020efd67d89afb8a65a51674f146145f8262d93` |
+| us-west-2 (Oregon) | `52.38.93.230` | `i-0dc3f833728c551df` | `Documents\AWS-Keys\shroud-relay-uswest2.pem` | `2cf90ad74ca6ac49de311dd481994735e47a61ad148234621c19edd498ba40f2` |
+| eu-west-1 (Ireland) | `52.50.29.221` | `i-032f9c65978e3a7a5` | `Documents\AWS-Keys\shroud-relay-euwest1.pem` | `79f49802d116f91ba70f4079b967e0c89532d0b3dbce65f1b6d8436699eb0417` |
 
 Each relay has:
 - t3.micro (1 vCPU, 1 GiB RAM, 8 GB gp3 EBS)
@@ -250,7 +250,7 @@ cd /opt/shroud/src && sudo git pull origin master && sudo systemctl restart shro
 ```pwsh
 python -m tools.federation_join `
   --my-endpoint https://<new-relay>:58443 `
-  --existing-relay-url https://44.202.225.57:58443 `
+  --existing-relay-url https://100.30.51.8:58443 `
   --keyfile ~/.config/shroud/operator.ed25519.json
 ```
 

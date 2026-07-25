@@ -24,7 +24,7 @@ Usage::
     # Build + sign a manifest. Pulls federation peers from the home relay.
     python -m tools.build_operator_manifest build \\
         --keyfile ~/.config/shroud/manifest.ed25519.json \\
-        --home-relay https://44.202.225.57:58443 \\
+        --home-relay https://100.30.51.8:58443 \\
         --diag-pubkey 7191a786437e38ebe616b9508b3110afb1a635e08ac034a330093acca708fd54 \\
         --stickers-cdn https://stickers.example/ \\
         --ttl-days 30 \\

@@ -21,7 +21,7 @@ Example::
     from clients.python_sdk import ShroudClient, Contact
 
     client = ShroudClient(
-        relay_url="https://44.202.225.57:58443",
+        relay_url="https://100.30.51.8:58443",
         verify_tls=False,                # self-signed dev relay
         identity_path="./alice.id.json", # persisted between runs
     )

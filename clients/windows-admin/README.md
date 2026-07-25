@@ -41,7 +41,7 @@ your operator workstation.
 
 On first launch the app prompts for:
 
-- Home relay URL (default `https://44.202.225.57:58443`)
+- Home relay URL (default `https://100.30.51.8:58443`)
 - Admin login (passwordless fingerprint enrollment uses the standard
   SHROUD admin flow — your fingerprint must already be registered on
   the relay)

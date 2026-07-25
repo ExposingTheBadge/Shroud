@@ -297,7 +297,7 @@ def _load_json(path: str) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description="SHROUD voice call demo")
     ap.add_argument("role", choices=["caller", "callee"])
-    ap.add_argument("--relay-url", default="https://44.202.225.57:58443")
+    ap.add_argument("--relay-url", default="https://100.30.51.8:58443")
     ap.add_argument("--identity", required=True,
                     help="JSON with priv_x25519_hex + pub_x25519_hex")
     ap.add_argument("--contact", required=True,

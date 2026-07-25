@@ -23,7 +23,7 @@ extern "C" {
  * manifest.
  *
  *   operator_diag_pubkey : 32 bytes
- *   relay_base_url       : null-terminated UTF-8, e.g. "https://44.202.225.57:58443"
+ *   relay_base_url       : null-terminated UTF-8, e.g. "https://100.30.51.8:58443"
  */
 void error_reporter_install(const BYTE operator_diag_pubkey[32],
                             const char *relay_base_url);

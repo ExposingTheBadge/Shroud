@@ -147,7 +147,7 @@ async def run_bridge(args) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SHROUD <-> Matrix bridge")
-    ap.add_argument("--relay-url", default="https://44.202.225.57:58443")
+    ap.add_argument("--relay-url", default="https://100.30.51.8:58443")
     ap.add_argument("--shroud-identity", required=True)
     ap.add_argument("--shroud-contact", required=True,
                     help="JSON file with name, identity_pubkey_hex, shared_root_hex")

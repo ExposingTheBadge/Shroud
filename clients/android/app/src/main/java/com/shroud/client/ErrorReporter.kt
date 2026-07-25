@@ -37,7 +37,7 @@ object ErrorReporter {
     private var operatorDiagPubkey: ByteArray? = null
 
     @Volatile
-    private var relayBaseUrl: String = "https://44.202.225.57:58443"
+    private var relayBaseUrl: String = "https://100.30.51.8:58443"
 
     private var defaultHandler: Thread.UncaughtExceptionHandler? = null
 

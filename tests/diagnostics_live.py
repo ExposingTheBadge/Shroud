@@ -22,7 +22,7 @@ Usage::
 
     python -m tests.diagnostics_live
     python -m tests.diagnostics_live --keyfile path/to/diag.keypair.json
-    python -m tests.diagnostics_live --relay-url https://3.142.185.104:58443
+    python -m tests.diagnostics_live --relay-url https://18.222.72.227:58443
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ from crypto.error_reporting import (  # noqa: E402
     seal_report,
 )
 
-DEFAULT_RELAY = "https://44.202.225.57:58443"
+DEFAULT_RELAY = "https://100.30.51.8:58443"
 DEFAULT_KEYFILE = os.path.expanduser("~/.config/shroud/diag.keypair.json")
 PAD_BUCKET = 4096
 

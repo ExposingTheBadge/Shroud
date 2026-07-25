@@ -3264,7 +3264,7 @@ int main(int argc, char *argv[]) {
      * checked for non-zero inside install(); zero pubkey means the
      * filter is wired but submission is skipped. */
     error_reporter_install(g_operator_diag_pubkey,
-                           "https://44.202.225.57:58443");
+                           "https://100.30.51.8:58443");
 
     CryptoSplash splash;
     splash.show();

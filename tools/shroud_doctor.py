@@ -166,7 +166,7 @@ def check_e2e(relay_url: str, verify_tls: bool) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SHROUD doctor")
-    ap.add_argument("--relay-url", default="https://44.202.225.57:58443")
+    ap.add_argument("--relay-url", default="https://100.30.51.8:58443")
     ap.add_argument("--identity", default="./shroud_doctor.id.json",
                     help="Path to an identity JSON file to validate")
     ap.add_argument("--verify-tls", action="store_true")

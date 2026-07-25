@@ -11,7 +11,7 @@ import { Hex } from '../web/anon_routing.js';
 const RELAY_URL_KEY = 'shroud_relay_url';
 const IDENTITY_KEY = 'shroud_identity';
 const CONTACTS_KEY = 'shroud_contacts';
-const DEFAULT_RELAY = 'https://44.202.225.57:58443';
+const DEFAULT_RELAY = 'https://100.30.51.8:58443';
 
 const relayInput   = document.getElementById('relay');
 const pubkeyDiv    = document.getElementById('pubkey');

@@ -51,4 +51,4 @@ jobs:
       - name: Run e2e tests
         run: python -m tests.e2e_anon_protocol
         env:
-          SHROUD_RELAY_URL: https://44.202.225.57:58443
+          SHROUD_RELAY_URL: https://100.30.51.8:58443

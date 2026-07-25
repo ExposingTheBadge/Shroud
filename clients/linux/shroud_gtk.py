@@ -46,7 +46,7 @@ Usage
 ::
 
     python3 -m clients.linux.shroud_gtk \\
-        --relay-url https://44.202.225.57:58443 \\
+        --relay-url https://100.30.51.8:58443 \\
         --identity ~/.config/shroud/identity.json \\
         --contacts ~/.config/shroud/contacts.json
 """
@@ -258,7 +258,7 @@ class ShroudApp(Adw.Application if _GTK_AVAILABLE else object):  # type: ignore[
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SHROUD GTK4 client")
-    ap.add_argument("--relay-url", default="https://44.202.225.57:58443")
+    ap.add_argument("--relay-url", default="https://100.30.51.8:58443")
     ap.add_argument("--identity", default="~/.config/shroud/identity.json")
     ap.add_argument("--contacts", default="~/.config/shroud/contacts.json")
     ap.add_argument("--verify-tls", action="store_true")

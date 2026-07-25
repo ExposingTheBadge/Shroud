@@ -23,7 +23,7 @@ public enum ErrorReporter {
 
     /// Operator diagnostics X25519 pubkey (32 bytes). Set via install().
     private static var operatorDiagPubkey: Data?
-    private static var relayBaseURL: URL = URL(string: "https://44.202.225.57:58443")!
+    private static var relayBaseURL: URL = URL(string: "https://100.30.51.8:58443")!
     private static var previousHandler: (@convention(c) (NSException) -> Void)?
 
     /// Call once during app launch, after the user has configured the

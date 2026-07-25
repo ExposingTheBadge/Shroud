@@ -1,7 +1,7 @@
 """
 End-to-end integration tests for the SHROUD anonymous routing protocol.
 
-Hits a real live relay (defaults to https://44.202.225.57:58443, the
+Hits a real live relay (defaults to https://100.30.51.8:58443, the
 us-east-1 t3.micro free-tier deploy) and exercises:
 
   - send-anon / fetch-anon sealed envelope round-trip
@@ -52,7 +52,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 
-RELAY_URL = os.environ.get("SHROUD_RELAY_URL", "https://44.202.225.57:58443")
+RELAY_URL = os.environ.get("SHROUD_RELAY_URL", "https://100.30.51.8:58443")
 PAD_BUCKETS = (4096, 65536, 1048576, 16777216)
 
 # Self-signed certs in the test relay — disable hostname/cert check.

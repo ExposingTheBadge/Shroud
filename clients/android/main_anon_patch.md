@@ -177,7 +177,7 @@ cd clients/android
 ```
 
 Run the assembled APK against the live AWS relay
-(https://44.202.225.57:58443). The app's outbound messages should
+(https://100.30.51.8:58443). The app's outbound messages should
 now arrive on the relay as opaque sealed envelopes addressed to
 routing tags rather than as `/messages/send` payloads with
 plaintext `sender_device_id`.

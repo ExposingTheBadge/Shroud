@@ -47,7 +47,7 @@ then load the resulting Xcode project.
 After install, right-click the extension icon → **Options** to
 configure:
 
-  - Relay URL (defaults to `https://44.202.225.57:58443`)
+  - Relay URL (defaults to `https://100.30.51.8:58443`)
   - Your SHROUD identity (paste an X25519 keypair or generate)
   - Contacts (per-contact name + pubkey + shared root)
 

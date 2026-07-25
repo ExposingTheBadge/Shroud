@@ -22,7 +22,7 @@ Usage::
 
     python -m tools.federation_join \\
         --my-endpoint https://relay-b.example:58443 \\
-        --existing-relay-url https://44.202.225.57:58443 \\
+        --existing-relay-url https://100.30.51.8:58443 \\
         --keyfile ~/.config/shroud/operator.ed25519.json
 """
 from __future__ import annotations

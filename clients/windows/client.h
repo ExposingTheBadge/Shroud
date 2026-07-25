@@ -48,7 +48,7 @@
  * route through whatever relay (clearnet or .onion) the manifest
  * points them at.
  */
-#define SERVER_HOST       L"44.202.225.57"
+#define SERVER_HOST       L"100.30.51.8"
 #define SERVER_PORT       58443
 #define SERVER_USE_TLS    1
 

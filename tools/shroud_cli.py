@@ -21,7 +21,7 @@ Commands::
 
 Usage::
 
-    python -m tools.shroud_cli --relay-url https://44.202.225.57:58443
+    python -m tools.shroud_cli --relay-url https://100.30.51.8:58443
 
 State is persisted to:
   ~/.config/shroud-cli/identity.json
@@ -57,7 +57,7 @@ def _save_contacts(path: str, client: ShroudClient) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SHROUD CLI")
-    ap.add_argument("--relay-url", default="https://44.202.225.57:58443")
+    ap.add_argument("--relay-url", default="https://100.30.51.8:58443")
     ap.add_argument("--identity",
                     default="~/.config/shroud-cli/identity.json")
     ap.add_argument("--contacts",

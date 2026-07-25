@@ -93,3 +93,6 @@ releases/
  
 zig/.zig-cache/
 zig/zig-out/
+
+# Local AWS MCP tooling config (not shipped)
+.mcp.json

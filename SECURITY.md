@@ -63,7 +63,7 @@ The following reports will be closed without action:
   their own dev console
 - Phishing / social engineering against SHROUD users that doesn't
   exploit a protocol or implementation bug
-- Reports against the deployed AWS relay at `44.202.225.57:58443`
+- Reports against the deployed AWS relay at `100.30.51.8:58443`
   that are essentially "the TLS cert is self-signed" or "the HTTP
   response headers don't have X-Frame-Options". This is a relay,
   not a website — those headers don't matter.

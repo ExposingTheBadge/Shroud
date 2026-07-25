@@ -12,10 +12,10 @@ It's the operator runbook. The protocol spec lives in
 
 | Region | Public IP | Operator | Endpoint |
 |---|---|---|---|
-| us-east-1 (Virginia) | `44.202.225.57` | Brent Gordon | `https://44.202.225.57:58443` |
-| us-east-2 (Ohio) | `3.142.185.104` | Brent Gordon | `https://3.142.185.104:58443` |
-| us-west-2 (Oregon) | `54.214.75.14` | Brent Gordon | `https://54.214.75.14:58443` |
-| eu-west-1 (Ireland) | `54.171.165.223` | Brent Gordon | `https://54.171.165.223:58443` |
+| us-east-1 (Virginia) | `100.30.51.8` | Brent Gordon | `https://100.30.51.8:58443` |
+| us-east-2 (Ohio) | `18.222.72.227` | Brent Gordon | `https://18.222.72.227:58443` |
+| us-west-2 (Oregon) | `52.38.93.230` | Brent Gordon | `https://52.38.93.230:58443` |
+| eu-west-1 (Ireland) | `52.50.29.221` | Brent Gordon | `https://52.50.29.221:58443` |
 
 All four:
 
@@ -108,7 +108,7 @@ is a two-step manual ceremony:
    ```pwsh
    python -m tools.federation_join `
        --my-endpoint https://<new-relay>:58443 `
-       --existing-relay-url https://44.202.225.57:58443 `
+       --existing-relay-url https://100.30.51.8:58443 `
        --keyfile ~/.config/shroud/operator.ed25519.json
    ```
 

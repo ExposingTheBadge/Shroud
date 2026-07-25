@@ -34,7 +34,7 @@ from clients.python_sdk import ShroudClient, Contact, ReceivedMessage
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="SHROUD echo bot")
-    ap.add_argument("--relay-url", default="https://44.202.225.57:58443")
+    ap.add_argument("--relay-url", default="https://100.30.51.8:58443")
     ap.add_argument("--identity", default="./echo_bot.id.json",
                     help="Where to persist the bot's identity")
     ap.add_argument("--verify-tls", action="store_true",

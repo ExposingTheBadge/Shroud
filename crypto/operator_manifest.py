@@ -19,7 +19,7 @@ Wire format::
 
     {
       "schema":              "shroud.operator.v1",
-      "relay_url":           "https://44.202.225.57:58443",
+      "relay_url":           "https://100.30.51.8:58443",
       "diagnostics_pubkey_hex": "<32 byte X25519 pubkey>",
       "stickers_cdn":        "https://stickers.shroud.example/",
       "issued_at":           1700000000,
@@ -167,7 +167,7 @@ def _self_test() -> None:
 
     now = int(time.time())
     m = OperatorManifest(
-        relay_url="https://44.202.225.57:58443",
+        relay_url="https://100.30.51.8:58443",
         diagnostics_pubkey_hex="aa" * 32,
         stickers_cdn="https://stickers.example/",
         issued_at=now,

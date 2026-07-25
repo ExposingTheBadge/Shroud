@@ -9,7 +9,7 @@
 
 AdminClient::AdminClient(QObject *parent) : QObject(parent) {
     QSettings s("SHROUD", "admin");
-    m_relayUrl       = s.value("relay_url", "https://44.202.225.57:58443").toString();
+    m_relayUrl       = s.value("relay_url", "https://100.30.51.8:58443").toString();
     m_anthropicKey   = s.value("anthropic_key", "").toString();
     m_sessionCookie  = s.value("admin_session", "").toString();
     m_socksProxy     = s.value("socks_proxy", "").toString();

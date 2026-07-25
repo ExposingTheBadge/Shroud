@@ -385,6 +385,60 @@ Short version: you can use it, study it, modify it, redistribute it, and run you
 
 ---
 
+## Zig Native Crypto Layer (Planned)
+
+The core cryptographic primitives in [crypto/](crypto/) are being migrated from Python to a **Zig-compiled native library** (`shroud_crypto.dll` / `libshroud_crypto.so`). The Python server and client orchestration remain unchanged — only the hot crypto paths move to Zig.
+
+### Why
+
+Python cannot make the security guarantees that a messenger with SHROUD's threat model requires:
+
+- **Constant-time operations:** Timing side-channels in key comparison, HMAC verification, and ratchet stepping are nearly impossible to prevent in Python. Zig provides explicit control over loops and memory access patterns that the compiler cannot optimize away.
+- **Key material zeroing:** After a ratchet key is used, it must be destroyed. Python's garbage collector may keep copies of key bytes in memory indefinitely — across generations, in interned string tables, or in `bytes` object freelists. Zig allows `@memset(key_buf, 0, key_buf.len)` with a guarantee the compiler won't elide it.
+- **No GC-retained secrets:** Every `bytes` object holding key material in Python is subject to GC timing. A heap dump, core dump, or cold-boot attack captures whatever the GC hasn't collected. Zig allocates on the stack or in an arena that is explicitly wiped.
+- **Supply chain:** Moving crypto out of Python eliminates runtime dependencies on `cryptography`, `pycryptodome`, or `cffi` — each of which is a supply chain attack surface. Zig links to nothing by default.
+- **Performance:** ML-KEM-1024 encapsulation/decapsulation and X25519 scalar multiply in native code are orders of magnitude faster than Python, reducing latency on initial key exchange and group ratchet operations.
+
+### What moves to Zig
+
+| Component | Current file | Zig benefit |
+|---|---|---|
+| Double Ratchet | `crypto/double_ratchet.py` | Constant-time ratchet step, key zeroing after use |
+| PQ Double Ratchet | `crypto/pq_double_ratchet.py` | Same, plus fast ML-KEM operations |
+| ML-KEM-1024 | `crypto/ml_kem_1024.py` | Native lattice arithmetic, no Python overhead |
+| TreeKEM | `crypto/treekem.py` | Fast tree operations for large groups |
+| Hybrid signatures | `crypto/hybrid_sig.py` | Constant-time Ed25519 + ML-DSA verify |
+| SRP-6a | `crypto/srp6a.py` | Constant-time modular exponentiation |
+| FIPS crypto | `crypto/fips_crypto.py` | FIPS-validated primitives without OpenSSL dependency |
+
+### Architecture
+
+```
+┌───────────────────────────┐
+│  Server / Client (Python)  │  ← unchanged: session management, routing, UI
+├───────────────────────────┤
+│  ctypes / cffi bridge      │  ← thin C ABI bridge to Zig library
+├───────────────────────────┤
+│  Zig crypto library        │  ← NEW: constant-time, key-zeroing, no GC
+│  (ratchet, KEM, TreeKEM,   │
+│   signatures, SRP)         │
+└───────────────────────────┘
+```
+
+### Status
+
+🔲 Scaffold `zig/` project with `build.zig`
+🔲 Port Double Ratchet state machine and chain key derivation
+🔲 Port ML-KEM-1024 encaps/decaps
+🔲 Port TreeKEM tree update and key rotation
+🔲 Port hybrid signature verification (Ed25519 + ML-DSA-87)
+🔲 Port SRP-6a verifier
+🔲 Python ctypes bridge with explicit memory lifetime management
+🔲 Side-by-side test vectors: Python vs Zig output must be identical
+🔲 Integrate into server and Windows client builds
+
+---
+
 ## Acknowledgments
 
 SHROUD builds on a lot of others' work:

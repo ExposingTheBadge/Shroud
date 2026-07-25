@@ -20,7 +20,7 @@ Usage:
     # Poll the relay:
     python -m tools.diagnostics_inbox poll \\
         --keyfile ~/.config/shroud/diag.keypair.json \\
-        --relay-url https://44.202.225.57:58443
+        --relay-url https://100.30.51.8:58443
 
     # Operator inspects the decrypted reports, then optionally files
     # GitHub issues for the underlying bugs (manually, deduplicated).
@@ -194,7 +194,7 @@ def main() -> int:
 
     pl = sub.add_parser("poll", help="drain pending reports")
     pl.add_argument("--keyfile", required=True)
-    pl.add_argument("--relay-url", default="https://44.202.225.57:58443")
+    pl.add_argument("--relay-url", default="https://100.30.51.8:58443")
     pl.add_argument("--window", type=int, default=24,
                     help="how many past epochs to scan (1 epoch = 1 hour)")
     pl.add_argument("--limit", type=int, default=100)
