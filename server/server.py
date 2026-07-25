@@ -4835,32 +4835,43 @@ async def admin_backups_take(request: Request, session=Depends(require_admin)):
     if len(pw) < 8:
         raise HTTPException(400, "passphrase must be at least 8 characters")
 
-    # 1) Use SQLite's online backup API into a temp file so we don't lock
-    #    the DB during the dump.
     backup_id = uuid.uuid4().hex
-    tmp_path  = os.path.join(_BACKUPS_DIR, f".{backup_id}.tmp")
-    enc_path  = os.path.join(_BACKUPS_DIR, f"{backup_id}.bin")
-    src = sqlite3.connect(DB_PATH)
-    dst = sqlite3.connect(tmp_path)
-    try:
-        with dst:
-            src.backup(dst)
-    finally:
-        src.close(); dst.close()
 
-    plaintext = open(tmp_path, "rb").read()
-    try: os.remove(tmp_path)
-    except OSError: pass
+    def _take() -> tuple[bytes, bytes, str, int]:
+        """BLOCKING: dump, read, key-derive, encrypt, write.
 
-    # 2) Encrypt
-    salt  = _secrets_for_backups.token_bytes(16)
-    nonce = _secrets_for_backups.token_bytes(12)
-    key   = _derive_backup_key(pw, salt)
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    ct    = AESGCM(key).encrypt(nonce, plaintext, b"shroud.backup.v1")
-    with open(enc_path, "wb") as f:
-        f.write(ct)
-    size  = os.path.getsize(enc_path)
+        All of this ran inline on the event loop. The Argon2id derivation
+        alone is 64 MiB and t=3 — roughly a second of solid CPU — on top
+        of copying and encrypting the entire database. On a 1 GiB
+        single-core relay that stalls every other request for seconds,
+        so taking a backup meant a brief outage for every user.
+        """
+        tmp_path = os.path.join(_BACKUPS_DIR, f".{backup_id}.tmp")
+        enc_path = os.path.join(_BACKUPS_DIR, f"{backup_id}.bin")
+        # SQLite's online backup API, so the live DB is never locked.
+        src = sqlite3.connect(DB_PATH)
+        dst = sqlite3.connect(tmp_path)
+        try:
+            with dst:
+                src.backup(dst)
+        finally:
+            src.close(); dst.close()
+
+        with open(tmp_path, "rb") as f:
+            plaintext = f.read()
+        try: os.remove(tmp_path)
+        except OSError: pass
+
+        salt  = _secrets_for_backups.token_bytes(16)
+        nonce = _secrets_for_backups.token_bytes(12)
+        key   = _derive_backup_key(pw, salt)
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        ct    = AESGCM(key).encrypt(nonce, plaintext, b"shroud.backup.v1")
+        with open(enc_path, "wb") as f:
+            f.write(ct)
+        return salt, nonce, enc_path, os.path.getsize(enc_path)
+
+    salt, nonce, enc_path, size = await asyncio.to_thread(_take)
 
     # 3) Catalog
     db.execute(
@@ -4923,17 +4934,24 @@ async def admin_backups_restore(backup_id: str, request: Request, session=Depend
     full = os.path.join(_BACKUPS_DIR, row[0])
     if not os.path.exists(full):
         raise HTTPException(410, "backup file missing on disk")
-    ct = open(full, "rb").read()
-    try:
+    staging = DB_PATH + ".restore-staging"
+
+    def _restore() -> bool:
+        """BLOCKING: read, Argon2id, decrypt, write staging. Same reason
+        as _take() — inline this pins the event loop for seconds."""
+        with open(full, "rb") as f:
+            ct = f.read()
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         key = _derive_backup_key(pw, bytes(row[1]))
         plaintext = AESGCM(key).decrypt(bytes(row[2]), ct, b"shroud.backup.v1")
+        with open(staging, "wb") as f:
+            f.write(plaintext)
+        return True
+
+    try:
+        await asyncio.to_thread(_restore)
     except Exception:
         raise HTTPException(400, "decryption failed — wrong passphrase")
-
-    staging = DB_PATH + ".restore-staging"
-    with open(staging, "wb") as f:
-        f.write(plaintext)
     audit_log("operator", "BACKUP_RESTORE_STAGE",
               f"id={backup_id} staging={staging}")
     return {
