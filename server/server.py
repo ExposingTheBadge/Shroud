@@ -2187,13 +2187,28 @@ async def register_device(req: RegisterDeviceRequest):
     # Use existing device ID if re-registering same hardware
     if existing:
         device_id = existing[0]
-        # Update public key if changed (new keypair generated)
+        # Update public key if changed (new keypair generated).
+        #
+        # This used to be wrapped in a bare `except: pass`, so a
+        # re-registration carrying a malformed key silently left the OLD
+        # key on file and still returned success. The client would then
+        # be holding a private key the server has no matching public key
+        # for, and every message encrypted to it would be undecryptable
+        # with nothing anywhere reporting a problem. Validate exactly as
+        # the new-device branch below does, and fail loudly.
         try:
             pub_key_bytes = bytes.fromhex(req.public_key)
-            db.execute("UPDATE devices SET public_key=?, device_name=?, last_seen=datetime('now') WHERE id=?",
-                       (pub_key_bytes, req.device_name, device_id))
-        except:
-            pass
+            deserialize_public_key(pub_key_bytes)
+        except Exception as e:                               # noqa: BLE001
+            print(f"[DEVICE REG] FAIL: key format error on re-register "
+                  f"for '{req.username}': {e}")
+            raise HTTPException(400, "Invalid public key format")
+
+        db.execute(
+            "UPDATE devices SET public_key=?, device_name=?, "
+            "last_seen=datetime('now') WHERE id=?",
+            (pub_key_bytes, req.device_name, device_id),
+        )
     else:
         device_id = generate_device_id()
         try:
@@ -4082,13 +4097,30 @@ def is_ip_banned(ip: str) -> bool:
     return count >= MAX_FAILED_ATTEMPTS
 
 AUDIT_LOG = os.path.join(os.path.dirname(__file__), "audit.log")
+_audit_log_broken = False
+
+
 def audit_log(ip: str, event: str, detail: str = ""):
+    """Append one audit line. Never raises — an audit write must not be
+    able to fail a request — but it no longer fails *silently*.
+
+    A full disk or a bad mode on audit.log used to swallow every entry
+    with a bare `except: pass`, so destructive operator actions (bans,
+    backup restores, EC2 stop/start) would leave no trace at all and
+    nothing would say so. Now the first failure is reported on stderr;
+    subsequent ones are suppressed so a broken log can't flood output.
+    """
+    global _audit_log_broken
     try:
         ts = datetime.now(tz=timezone.utc).isoformat()
-        with open(AUDIT_LOG, "a") as f:
+        with open(AUDIT_LOG, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] {ip} — {event} {detail}\n")
-    except:
-        pass
+        _audit_log_broken = False
+    except Exception as e:                                   # noqa: BLE001
+        if not _audit_log_broken:
+            _audit_log_broken = True
+            print(f"[SHROUD] AUDIT LOG WRITE FAILING ({AUDIT_LOG}): {e} — "
+                  f"audit entries are being lost", file=sys.stderr, flush=True)
 
 def check_csrf(request: Request):
     """Validate CSRF token for state-changing admin operations."""
