@@ -928,12 +928,13 @@ def _raise_bad_credentials(username: str = "", reason: str = "",
         # username oracle. The operator-side audit entry carries the
         # difference; see _raise_bad_credentials above.
         "hint": (
-            "Accounts are per-relay: registering on one relay does not "
-            "create an account on another. If you have not registered "
-            "against this relay yet, use Register rather than Login. "
-            "Upgrading from v2.4.5 or earlier also requires registering "
-            "fresh — that build wrote to a hardcoded address that never "
-            "reached this database."
+            "If you have not registered yet, use Register rather than "
+            "Login. Accounts mirror across every relay in a federation "
+            "within seconds, so an account made on one federated relay "
+            "works on all of them — but a standalone relay with no peers "
+            "keeps its own separate set. Upgrading from v2.4.5 or earlier "
+            "also requires registering fresh: that build wrote to a "
+            "hardcoded address that never reached this database."
         ),
     })
 
@@ -1482,6 +1483,11 @@ def _wipe_user_cascade(user_id: str, reason: str) -> dict:
     db.execute("DELETE FROM group_invites WHERE from_user_id=? OR to_user_id=?", (user_id, user_id))
     db.execute("DELETE FROM users WHERE id=?", (user_id,))
     db.commit()
+    # user.created and device.added federate, but deletion did not, so a
+    # wiped account survived on every peer and could still authenticate
+    # there. Panic-wipe in particular is meant to be exactly that — a
+    # wipe — and it was leaving the account live on three of four relays.
+    _federation_outbox_state_event("user.deleted", {"user_id": user_id})
     audit_admin(reason, "wipe_user_cascade", user_id, f"devices={len(devs)} files={files_removed}")
     return {"devices_removed": len(devs), "files_removed": files_removed}
 
@@ -2877,6 +2883,16 @@ def _apply_state_event(kind: str, payload: dict) -> None:
                  bytes.fromhex(payload["public_key_hex"]),
                  payload.get("hwid", "")),
             )
+        elif kind == "user.deleted":
+            # Mirror of user.created. Take the devices too: leaving them
+            # behind orphans rows that still satisfy the device lookups
+            # on the message paths.
+            uid = payload["user_id"]
+            db.execute("DELETE FROM devices WHERE user_id = ?", (uid,))
+            db.execute("DELETE FROM friendships WHERE user_a=? OR user_b=?", (uid, uid))
+            db.execute("DELETE FROM friend_requests WHERE from_user_id=? OR to_user_id=?", (uid, uid))
+            db.execute("DELETE FROM group_invites WHERE from_user_id=? OR to_user_id=?", (uid, uid))
+            db.execute("DELETE FROM users WHERE id = ?", (uid,))
         elif kind == "device.removed":
             db.execute("DELETE FROM devices WHERE id = ?", (payload["device_id"],))
         elif kind == "password.changed":
@@ -6358,6 +6374,9 @@ async def admin_delete_user(user_id: str, session=Depends(require_admin_csrf)):
     db.execute("DELETE FROM group_invites WHERE from_user_id=? OR to_user_id=?", (user_id, user_id))
     db.execute("DELETE FROM users WHERE id=?", (user_id,))
     db.commit()
+    # Propagate, or the operator deletes an account here and it keeps
+    # working on every other relay in the federation.
+    _federation_outbox_state_event("user.deleted", {"user_id": user_id})
     audit_admin(session[0][:8], "delete_user", user_id, f"devices={len(devs)} files={len(file_rows)}")
     return {"deleted_user": user_id, "devices_removed": len(devs), "files_removed": len(file_rows)}
 
