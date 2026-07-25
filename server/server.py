@@ -4332,9 +4332,52 @@ async def admin_fingerprint_login(request: Request):
     resp.set_cookie(key="shroud_csrf", value=csrf, httponly=False, samesite="strict", max_age=SESSION_TIMEOUT_SEC, path="/")
     return resp
 
+ADMIN_SETUP_TOKEN_PATH = os.path.join(
+    os.environ.get("SHROUD_DATA_DIR", os.path.dirname(DB_PATH)),
+    "admin_setup_token")
+
+
+def _admin_setup_token() -> str:
+    """Read (minting if absent) the one-time token that gates /admin/setup.
+
+    /admin/setup used to be reachable by anyone who could open port 58443:
+    it only checked that no admin row existed yet, so on a relay that had
+    never been configured the first stranger to POST a 12-character
+    password became permanent admin. Because the new credential is
+    gossiped as an admin_fingerprint.added state event, claiming one relay
+    handed the attacker admin on every federated peer too.
+
+    The token is written to SHROUD_DATA_DIR mode 0600, so proving you can
+    read it means proving you already have operator access to the host.
+    """
+    try:
+        if os.path.exists(ADMIN_SETUP_TOKEN_PATH):
+            with open(ADMIN_SETUP_TOKEN_PATH, "r", encoding="utf-8") as f:
+                tok = f.read().strip()
+            if tok:
+                return tok
+        tok = secrets.token_urlsafe(32)
+        fd = os.open(ADMIN_SETUP_TOKEN_PATH,
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(tok)
+        print(f"[SHROUD] Admin not configured. One-time setup token written "
+              f"to {ADMIN_SETUP_TOKEN_PATH} (mode 600). Read it over SSH and "
+              f"send it as X-Setup-Token to POST /api/v1/admin/setup.",
+              file=sys.stderr, flush=True)
+        return tok
+    except OSError as e:
+        # Fail CLOSED. If the token can't be persisted we must not fall
+        # back to letting anyone configure the relay.
+        print(f"[SHROUD] Cannot write {ADMIN_SETUP_TOKEN_PATH}: {e} — "
+              f"admin setup is disabled", file=sys.stderr, flush=True)
+        return ""
+
+
 @app.post("/api/v1/admin/setup")
 async def admin_initial_setup(request: Request):
-    """One-time setup — only works when no fingerprints exist."""
+    """One-time setup — only works when no fingerprints exist AND the
+    caller presents the on-disk setup token."""
     existing = db.execute("SELECT COUNT(*) FROM admin_fingerprints").fetchone()[0]
     if existing > 0:
         raise HTTPException(403, "Admin already configured. Use fingerprint login.")
@@ -4342,6 +4385,18 @@ async def admin_initial_setup(request: Request):
     ip, _ = get_client_info(request)
     if is_ip_banned(ip):
         raise HTTPException(403, "IP banned")
+
+    expected = _admin_setup_token()
+    supplied = (request.headers.get("X-Setup-Token", "") or "").strip()
+    if not expected or not supplied or not hmac.compare_digest(supplied, expected):
+        audit_log(ip, "ADMIN_SETUP_DENIED", "bad or missing X-Setup-Token")
+        db.execute(
+            "INSERT INTO login_attempts (ip, hwid, fingerprint_id, success) "
+            "VALUES (?,?,?,?)", (ip, "", "setup", 0))
+        db.commit()
+        raise HTTPException(
+            403, "Setup token required. Read admin_setup_token from the "
+                 "relay's data directory and send it as X-Setup-Token.")
 
     # login.js already collects and length-checks a password here; it was
     # simply thrown away server-side. Store it so the second factor is real.
@@ -4370,6 +4425,13 @@ async def admin_initial_setup(request: Request):
         "label":          "Primary Admin",
     })
     db.commit()
+    audit_log(ip, "ADMIN_SETUP_COMPLETE", f"fp={fp_id[:16]}...")
+    # Burn the token so it can't be replayed if the admin row is ever
+    # deleted and the relay drops back into needs-setup.
+    try:
+        os.remove(ADMIN_SETUP_TOKEN_PATH)
+    except OSError:
+        pass
     return {"ok": True, "fingerprint_id": fp_id, "note": "Save this fingerprint — it cannot be recovered"}
 
 @app.post("/api/v1/admin/fingerprint-enroll")
