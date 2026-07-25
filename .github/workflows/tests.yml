@@ -29,6 +29,12 @@ jobs:
       - name: Run all module self-tests
         run: python -m tests.run_all
 
+      # Catches admin UI <-> API drift. A renamed or dropped response
+      # field does not raise; the dashboard just renders blank tiles and
+      # still looks healthy.
+      - name: Admin dashboard / API contract
+        run: python -m tests.admin_api_contract
+
   cross-client-vectors:
     name: Cross-client protocol vectors
     runs-on: ubuntu-latest
