@@ -29,6 +29,40 @@ jobs:
       - name: Run all module self-tests
         run: python -m tests.run_all
 
+  cross-client-vectors:
+    name: Cross-client protocol vectors
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install cryptography
+
+      # Guards against any client's routing-tag / seal-key derivation
+      # drifting from crypto/anon_routing.py. Drift is silent at runtime:
+      # messages land on a tag nobody polls and envelopes never open.
+      - name: Check every client agrees with the Python reference
+        run: python -m tests.cross_client_vectors
+
   e2e-against-live-relay:
     name: E2E against live AWS relay (best-effort)
     runs-on: ubuntu-latest

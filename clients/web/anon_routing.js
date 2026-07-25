@@ -73,31 +73,22 @@ function _fromHex(s) {
 
 // ── HKDF-SHA256 ──────────────────────────────────────────────────────
 
-async function _hkdfExtract(salt, ikm) {
+// WebCrypto's HKDF deriveBits IS the complete RFC 5869 construction —
+// Extract followed by Expand — not the two primitives exposed separately.
+// This file used to call it once to "extract" and again to "expand",
+// which runs the whole KDF twice and produces bytes unrelated to what
+// crypto/anon_routing.py (and the Kotlin/Swift/C/Go clients) derive.
+// That silently broke web clients in both directions: outbound messages
+// landed on a routing tag nobody polls, and sealed envelopes could not be
+// decrypted across platforms. There is no intermediate PRK to match —
+// one call is the entire KDF.
+async function _hkdf(salt, ikm, info, length) {
     const key = await _subtle.importKey('raw', ikm, { name: 'HKDF' }, false, ['deriveBits']);
     const bits = await _subtle.deriveBits(
-        { name: 'HKDF', hash: 'SHA-256', salt, info: new Uint8Array(0) },
-        key, 256
-    );
-    return new Uint8Array(bits);
-}
-
-async function _hkdfExpand(prk, info, length) {
-    const key = await _subtle.importKey('raw', prk, { name: 'HKDF' }, false, ['deriveBits']);
-    const bits = await _subtle.deriveBits(
-        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info },
+        { name: 'HKDF', hash: 'SHA-256', salt, info },
         key, length * 8
     );
     return new Uint8Array(bits);
-}
-
-// HKDF as a single call. Web crypto's HKDF API does the extract+expand
-// in one go when you pass both `salt` and `info`. For wire-format
-// parity with the Python ref we explicitly do extract-then-expand so
-// the intermediate PRK matches across implementations.
-async function _hkdf(salt, ikm, info, length) {
-    const prk = await _hkdfExtract(salt, ikm);
-    return _hkdfExpand(prk, info, length);
 }
 
 
@@ -193,8 +184,7 @@ async function _importPriv(rawPriv) {
 
 async function _deriveSealKey(ecdhShared, ephPub, recipientPub) {
     const ikm = _concat(ecdhShared, ephPub, recipientPub);
-    const prk = await _hkdfExtract(SEAL_SALT, ikm);
-    return _hkdfExpand(prk, SEAL_KEY_INFO, 32);
+    return _hkdf(SEAL_SALT, ikm, SEAL_KEY_INFO, 32);
 }
 
 export async function seal(payload, recipientPub) {
