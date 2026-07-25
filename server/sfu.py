@@ -185,14 +185,58 @@ async def sfu_websocket(ws: WebSocket, session_id: str, token: str) -> None:
 
 
 def main() -> None:
-    """Run the SFU as a standalone HTTPS service on port 58444."""
+    """Run the SFU as a standalone service on port 58444.
+
+    This said "HTTPS" and then called uvicorn with no ssl_keyfile or
+    ssl_certfile, so it bound 0.0.0.0 in the clear. That matters more
+    here than it looks: the media itself is DTLS-SRTP between
+    participants, but the join tokens are not protected by it. They are
+    returned in the /sfu/sessions response and then appear in the
+    WebSocket path, and they are the *only* access control the SFU has —
+    sfu_websocket admits anyone presenting a token in the session. On a
+    plaintext channel an on-path observer can lift a token and join the
+    call, and also read the session/participant graph the module docstring
+    claims it does not expose.
+
+    Takes the same TLS flags and environment variables as server.py so a
+    systemd or Docker deployment configures both the same way, and says
+    so loudly when TLS is absent instead of silently serving cleartext.
+    """
+    import argparse
+    import os
+    import sys
     import uvicorn
-    uvicorn.run(
-        "server.sfu:app",
-        host="0.0.0.0",
-        port=58444,
-        log_level="info",
-    )
+
+    ap = argparse.ArgumentParser(description="SHROUD SFU (group-call media relay)")
+    ap.add_argument("--bind", default=os.environ.get("SHROUD_SFU_BIND", "0.0.0.0"),
+                    help="Interface to listen on (default 0.0.0.0).")
+    ap.add_argument("--port", type=int,
+                    default=int(os.environ.get("SHROUD_SFU_PORT", "58444")),
+                    help="TCP port to listen on (default 58444).")
+    ap.add_argument("--ssl-keyfile", default=os.environ.get("SHROUD_TLS_KEY", ""),
+                    help="TLS private key. With --ssl-certfile, serves HTTPS/WSS.")
+    ap.add_argument("--ssl-certfile", default=os.environ.get("SHROUD_TLS_CERT", ""),
+                    help="TLS certificate chain.")
+    args = ap.parse_args()
+
+    kwargs = dict(host=args.bind, port=args.port, log_level="info")
+    if args.ssl_keyfile and args.ssl_certfile:
+        kwargs["ssl_keyfile"] = args.ssl_keyfile
+        kwargs["ssl_certfile"] = args.ssl_certfile
+        print(f"[SHROUD-SFU] Listening on https://{args.bind}:{args.port} (wss)")
+    else:
+        print(f"[SHROUD-SFU] Listening on http://{args.bind}:{args.port}", flush=True)
+        print("[SHROUD-SFU] WARNING: no TLS configured. Join tokens are the only "
+              "access control on a call and they travel in the session response "
+              "and the WebSocket path — in cleartext anyone on-path can join. "
+              "Pass --ssl-keyfile/--ssl-certfile (or SHROUD_TLS_KEY/SHROUD_TLS_CERT), "
+              "or bind to 127.0.0.1 and terminate TLS in front.",
+              file=sys.stderr, flush=True)
+        if args.bind not in ("127.0.0.1", "localhost", "::1"):
+            print(f"[SHROUD-SFU] WARNING: bound to {args.bind} without TLS — "
+                  f"reachable off-host in the clear.", file=sys.stderr, flush=True)
+
+    uvicorn.run("server.sfu:app", **kwargs)
 
 
 if __name__ == "__main__":
