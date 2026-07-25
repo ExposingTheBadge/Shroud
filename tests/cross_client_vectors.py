@@ -33,6 +33,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_MODULE = os.path.join(REPO, "clients", "web", "anon_routing.js")
 GO_SDK = os.path.join(REPO, "clients", "go_sdk")
 RUST_SDK = os.path.join(REPO, "clients", "rust_sdk")
+WIN_CLIENT = os.path.join(REPO, "clients", "windows")
 
 # Fixed inputs — any change here invalidates the pinned expectations.
 ID_A = bytes(range(32))
@@ -122,11 +123,54 @@ def _check_rust(ref: dict) -> tuple[bool, str]:
     return True, "matches reference"
 
 
+def _check_windows_c(ref: dict) -> tuple[bool, str]:
+    """Windows client's anon_routing.c — needs MSVC, so Windows only."""
+    if os.name != "nt":
+        return True, "SKIP (not Windows)"
+    vcvars = None
+    for edition in ("Community", "Professional", "Enterprise", "BuildTools"):
+        p = (r"C:\Program Files\Microsoft Visual Studio\2022"
+             rf"\{edition}\VC\Auxiliary\Build\vcvars64.bat")
+        if os.path.exists(p):
+            vcvars = p
+            break
+    if not vcvars:
+        return True, "SKIP (no MSVC 2022 found)"
+    src = os.path.join(WIN_CLIENT, "tests", "anon_vectors.c")
+    if not os.path.exists(src):
+        return False, f"missing {src}"
+    exe = os.path.join(WIN_CLIENT, "tests", "anon_vectors.exe")
+    # Via a .bat: passing `call "C:\Program Files\..." && cl ...` straight
+    # to cmd /c gets mangled by cmd's own quote handling and fails with
+    # no output at all.
+    script = (
+        "@echo off\r\n"
+        f'call "{vcvars}" >nul 2>&1\r\n'
+        "cl /nologo /I. /Fe:tests\\anon_vectors.exe /Fo:tests\\ "
+        "tests\\anon_vectors.c anon_routing.c crypto.c ratchet.c kyber1024.c "
+        "ed25519.c oqs_sig.c bcrypt.lib ncrypt.lib crypt32.lib tbs.lib "
+        "winhttp.lib ws2_32.lib\r\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        bat = os.path.join(td, "build_vectors.bat")
+        with open(bat, "w", encoding="ascii") as f:
+            f.write(script)
+        r = subprocess.run([bat], cwd=WIN_CLIENT, capture_output=True,
+                           text=True, timeout=900, shell=False)
+    if r.returncode != 0 or not os.path.exists(exe):
+        return False, "compile failed: " + (r.stdout + r.stderr).strip()[-300:]
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        return False, r.stdout.strip()[-300:]
+    return True, "matches reference"
+
+
 CHECKS = (
     ("python (reference)", _check_python),
     ("web / browser", _check_web),
     ("go sdk", _check_go),
     ("rust sdk", _check_rust),
+    ("windows client (C)", _check_windows_c),
 )
 
 

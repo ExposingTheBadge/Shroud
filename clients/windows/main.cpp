@@ -19,6 +19,7 @@ extern "C" {
 #include "ratchet.h"
 }
 #include "error_reporter.h"
+#include "anon_client.h"
 }
 
 /* ===================================================================
@@ -451,6 +452,21 @@ private:
     QString m_selectedRecip;
     QStringList m_friends;
     QLabel *m_maintenanceBanner = nullptr;
+
+    /* ── Anonymous routing (Rules 1 & 2) ──────────────────────────────
+     * The legacy /messages/{send,fetch} path posts sender_device_id and
+     * recipient_device_id in clear, so the relay learns exactly who is
+     * talking to whom — the two things Rules 1 and 2 exist to prevent.
+     * anon_client.cpp shipped and was compiled into the binary months
+     * ago but nothing ever called it, so Windows stayed on the
+     * identified path while Android moved over.
+     *
+     * On by default, matching the Android client's useAnonRouting flag.
+     * Falls back to the legacy path per-message whenever a routing
+     * context can't be built (peer has no published ratchet bundle,
+     * i.e. a pre-v1.6 client), so a mixed fleet keeps working. */
+    bool m_anonRouting = true;
+    QHash<QString, QByteArray> m_peerX25519;   // device_id -> 32-byte pub
 
     /* Single source of truth for whether the server is in maintenance.
      * Called from the heartbeat poll and from any send-attempt that
@@ -1238,6 +1254,64 @@ private:
     }
 
     /* Resolve a username to its first device_id by calling /contacts/devices. */
+    /* ── Anonymous-routing helpers ────────────────────────────────── */
+
+    /* Our long-term X25519 identity, as written by publishRatchetBundle:
+     * a DPAPI-wrapped 64-byte blob of (priv || pub). */
+    bool loadAnonIdentity(BYTE priv[32], BYTE pub[32]) {
+        std::wstring wIdPath = (ratchetKeyDir() + "/identity.x25519").toStdWString();
+        BYTE *plain = NULL; DWORD plainLen = 0;
+        if (!storage_load_blob(wIdPath.c_str(), &plain, &plainLen)) return false;
+        if (plainLen < 64) { free(plain); return false; }
+        memcpy(priv, plain, 32);
+        memcpy(pub,  plain + 32, 32);
+        SecureZeroMemory(plain, plainLen);
+        free(plain);
+        return true;
+    }
+
+    /* Peer's published X25519 identity pubkey, cached per device id. */
+    QByteArray peerX25519Pub(const QString &deviceId) {
+        if (deviceId.isEmpty()) return QByteArray();
+        auto it = m_peerX25519.constFind(deviceId);
+        if (it != m_peerX25519.constEnd()) return it.value();
+        QByteArray b = httpGet(QString("/api/v1/ratchet/bundle/%1").arg(deviceId).toUtf8().constData());
+        QString hex = jsonStr(b, "x25519_pub");
+        if (hex.isEmpty()) return QByteArray();          // pre-v1.6 peer
+        QByteArray pub = QByteArray::fromHex(hex.toUtf8());
+        if (pub.size() != 32) return QByteArray();
+        m_peerX25519.insert(deviceId, pub);
+        return pub;
+    }
+
+    /* Build the routing context for one peer.
+     *
+     * shared_root is ECDH(my_identity_priv, peer_identity_pub). Both
+     * sides compute the same value with no extra state, which is what
+     * makes the per-pair routing tag agree. The Double Ratchet's chain
+     * root would give the tag forward secrecy too, but reaching it means
+     * parsing the on-disk session blob format — a wrong layout
+     * assumption there silently corrupts encrypted state in production.
+     * The sealed envelope itself (Rule 1) is unaffected either way: that
+     * uses the recipient's identity pubkey directly. */
+    bool buildRoutingContext(const QString &peerDeviceId, shroud::RoutingContext &ctx) {
+        QByteArray peerPub = peerX25519Pub(peerDeviceId);
+        if (peerPub.size() != 32) return false;
+        BYTE myPriv[32], myPub[32];
+        if (!loadAnonIdentity(myPriv, myPub)) return false;
+        memcpy(ctx.my_priv,  myPriv, 32);
+        memcpy(ctx.my_pub,   myPub,  32);
+        memcpy(ctx.peer_pub, peerPub.constData(), 32);
+        bool ok = ratchet_x25519_dh(myPriv, (const BYTE *)peerPub.constData(),
+                                    ctx.shared_root) ? true : false;
+        SecureZeroMemory(myPriv, sizeof(myPriv));
+        return ok;
+    }
+
+    shroud::AnonClient makeAnonClient() {
+        return shroud::AnonClient(SERVER_HOST, SERVER_PORT, /*tolerate_self_signed=*/true);
+    }
+
     QString resolveUsernameToDevice(const QString &username) {
         QByteArray r = httpPost("/api/v1/contacts/devices",
             jsonBody({{"device_id", m_deviceId}, {"contact_username", username}}));
@@ -2173,14 +2247,45 @@ private:
             free(ih); free(ch); free(th); free(sh);
         }
 
-        QByteArray jb = jsonBody({
-            {"sender_device_id", m_deviceId}, {"recipient_device_id", m_selectedRecip},
-            {"envelope", env}
-        });
         QByteArray expHdr;
         if (gDisappearEnabled && gDisappearSeconds > 0) {
             expHdr = QByteArray("X-Expires-In: ") + QByteArray::number(gDisappearSeconds);
         }
+
+        /* Rule 1 + Rule 2: seal the whole legacy envelope inside an
+         * anonymous one so the relay sees only opaque bytes and a
+         * per-pair routing tag — no sender or recipient device id. Falls
+         * back to the identified path only when the peer has published
+         * no ratchet bundle. */
+        if (m_anonRouting) {
+            shroud::RoutingContext ctx;
+            if (buildRoutingContext(m_selectedRecip, ctx)) {
+                QByteArray inner = jsonBody({{"envelope", env}, {"ts", ts}});
+                shroud::AnonClient ac = makeAnonClient();
+                bool sent = ac.sendSealed(ctx, (const BYTE *)inner.constData(),
+                                          (DWORD)inner.size(),
+                                          (gDisappearEnabled && gDisappearSeconds > 0)
+                                              ? gDisappearSeconds : 0);
+                SecureZeroMemory(&ctx, sizeof(ctx));
+                if (sent) {
+                    m_chatLog->append(QString("<b>[%1]</b> %2")
+                        .arg(m_username.toHtmlEscaped(), mdToHtml(body)));
+                    m_msgInput->clear();
+                    return;
+                }
+                /* Sealed send failed (relay down / 5xx). Fall through to
+                 * the legacy path rather than silently losing the
+                 * message — the user still gets delivery, and the status
+                 * bar records that this one was not anonymous. */
+                m_statusBar->setText("Sealed send failed — retried on the legacy path");
+                m_statusBar->setStyleSheet("color: #ffc048; font-size: 11px; font-weight: bold;");
+            }
+        }
+
+        QByteArray jb = jsonBody({
+            {"sender_device_id", m_deviceId}, {"recipient_device_id", m_selectedRecip},
+            {"envelope", env}
+        });
         QByteArray sendResp = httpPost("/api/v1/messages/send", jb, expHdr);
         /* Fast-path: server gates sends behind setting_get("maintenance_mode")
          * and replies 503 {"detail":"maintenance"}. Catch it here so the UI
@@ -2262,8 +2367,56 @@ private:
         return localPath;
     }
 
+    /* Rule 2: poll by per-pair routing tag instead of device id, so the
+     * relay never learns which mailbox is ours. Runs alongside the
+     * legacy fetch — peers still on the old path keep being delivered. */
+    void fetchAnonMessages() {
+        if (!m_anonRouting || m_friends.isEmpty()) return;
+        BYTE myPriv[32], myPub[32];
+        if (!loadAnonIdentity(myPriv, myPub)) return;
+
+        std::vector<std::pair<std::vector<BYTE>, std::vector<BYTE>>> contacts;
+        for (const QString &uname : m_friends) {
+            QString did = resolveUsernameToDevice(uname);
+            if (did.isEmpty()) continue;
+            QByteArray peerPub = peerX25519Pub(did);
+            if (peerPub.size() != 32) continue;
+            BYTE root[32];
+            if (!ratchet_x25519_dh(myPriv, (const BYTE *)peerPub.constData(), root)) continue;
+            contacts.emplace_back(
+                std::vector<BYTE>((const BYTE *)peerPub.constData(),
+                                  (const BYTE *)peerPub.constData() + 32),
+                std::vector<BYTE>(root, root + 32));
+            SecureZeroMemory(root, sizeof(root));
+        }
+        if (contacts.empty()) { SecureZeroMemory(myPriv, sizeof(myPriv)); return; }
+
+        std::vector<shroud::IncomingAnon> in;
+        shroud::AnonClient ac = makeAnonClient();
+        ac.fetchMessages(myPriv, myPub, contacts, in);
+        SecureZeroMemory(myPriv, sizeof(myPriv));
+
+        for (const auto &msg : in) {
+            QJsonObject outer = QJsonDocument::fromJson(
+                QByteArray((const char *)msg.plaintext.data(),
+                           (int)msg.plaintext.size())).object();
+            QJsonObject env = outer.value("envelope").toObject();
+            if (env.isEmpty()) continue;
+            QString sender = env.value("sender").toString();
+            QJsonObject plain = decryptEnvelope(env, sender);
+            QString senderName = plain.value("name").toString();
+            if (senderName.isEmpty()) senderName = sender.left(12);
+            QString body = plain.value("body").toString();
+            if (!body.isEmpty()) {
+                m_chatLog->append(QString("<b>[%1]</b> %2")
+                    .arg(senderName.toHtmlEscaped(), mdToHtml(body)));
+            }
+        }
+    }
+
     void fetchMessages() {
         if (m_deviceId.isEmpty()) return;
+        fetchAnonMessages();
         QByteArray r = httpPost("/api/v1/messages/fetch", jsonBody({{"device_id", m_deviceId}}));
         m_statusBar->setText("Online — AES-256-GCM | ECDH P-384");
         m_statusBar->setStyleSheet("color: #2ed573; font-size: 11px; font-weight: bold;");

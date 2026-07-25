@@ -101,3 +101,5 @@ clients/qt6/build-*/
 clients/windows-admin/build-*/
 clients/rust_sdk/target/
 
+clients/windows/tests/*.exe
+clients/windows/tests/*.obj
