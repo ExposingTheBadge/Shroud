@@ -472,6 +472,76 @@ function renderFederation(d) {
   document.getElementById('fedReqTotal').textContent = reqTotal.toLocaleString();
   document.getElementById('fedAnonPending').textContent = anonPending.toLocaleString();
   document.getElementById('fedDiagPending').textContent = diagPending.toLocaleString();
+  renderAws(d.aws);
+}
+
+function renderAws(aws) {
+  const body = document.getElementById('awsBody');
+  const pill = document.getElementById('awsSummaryPill');
+  const hint = document.getElementById('awsHint');
+  if (!body || !pill || !hint) return;
+
+  if (!aws || !aws.available) {
+    pill.textContent = 'unavailable';
+    pill.style.background = '#3a1010';
+    pill.style.color = '#ff8a8a';
+    hint.innerHTML = `<span style="color:#ff8a8a">${escapeHtml((aws && aws.error) || 'AWS inventory unavailable')}</span>`;
+    body.innerHTML = '';
+    return;
+  }
+
+  pill.style.background = '';
+  pill.style.color = '';
+  const s = aws.summary || {};
+  pill.textContent = `${s.running}/${s.total} running`;
+  hint.textContent = `${s.running} running · ${s.stopped} stopped · ${s.other || 0} other across ${s.regions_with_assets} region(s).`;
+
+  const regions = Object.keys(aws.regions || {}).sort();
+  if (regions.length === 0) {
+    body.innerHTML = `<div style="padding:14px;color:var(--dim);font-size:12px">No EC2 instances found in any region.</div>`;
+    return;
+  }
+
+  let html = '';
+  for (const rg of regions) {
+    const rgData = aws.regions[rg] || {};
+    const items = rgData.instances || [];
+    const err = rgData.error;
+    html += `<div style="margin:14px 0 6px 0;display:flex;align-items:center;gap:8px">
+      <div style="color:var(--accent);font-size:11px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700">${escapeHtml(rg)}</div>
+      <div style="color:var(--dim);font-size:11px">${items.length} instance${items.length === 1 ? '' : 's'}</div>
+      ${err ? `<div style="color:#ff8a8a;font-size:11px">${escapeHtml(err)}</div>` : ''}
+    </div>`;
+    if (items.length === 0) continue;
+    html += `<table style="width:100%;font-family:Consolas,monospace;font-size:11px;border-collapse:collapse">
+      <thead><tr style="color:var(--dim);text-align:left;border-bottom:1px solid var(--bd)">
+        <th style="padding:4px 6px">Name</th>
+        <th style="padding:4px 6px">Instance ID</th>
+        <th style="padding:4px 6px">State</th>
+        <th style="padding:4px 6px">Type</th>
+        <th style="padding:4px 6px">Public IP</th>
+        <th style="padding:4px 6px">AZ</th>
+        <th style="padding:4px 6px">Platform</th>
+      </tr></thead><tbody>`;
+    for (const i of items) {
+      const st = i.state;
+      const stColor = st === 'running' ? 'var(--ok)'
+                    : st === 'stopped' ? '#888'
+                    : st === 'pending' || st === 'stopping' || st === 'shutting-down' ? '#ffb84d'
+                    : '#ff8a8a';
+      html += `<tr style="border-bottom:1px solid rgba(255,255,255,0.04)">
+        <td style="padding:4px 6px">${escapeHtml(i.name || '—')}</td>
+        <td style="padding:4px 6px;color:var(--dim)">${escapeHtml(i.id)}</td>
+        <td style="padding:4px 6px;color:${stColor};font-weight:700">${escapeHtml(st)}</td>
+        <td style="padding:4px 6px">${escapeHtml(i.type)}</td>
+        <td style="padding:4px 6px">${i.pub_ip ? escapeHtml(i.pub_ip) : '<span style="color:var(--dim)">—</span>'}</td>
+        <td style="padding:4px 6px;color:var(--dim)">${escapeHtml(i.az)}</td>
+        <td style="padding:4px 6px;color:var(--dim)">${escapeHtml(i.platform || '')}</td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+  body.innerHTML = html;
 }
 
 function fmtUptime(secs) {

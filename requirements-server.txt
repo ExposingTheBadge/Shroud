@@ -10,3 +10,10 @@ pydantic
 cryptography
 liboqs-python
 argon2-cffi
+
+# Optional — powers the "AWS assets" panel in the admin Federation tab
+# (/api/v1/admin/aws/*). The relay runs fine without it; the panel just
+# reports "boto3 not installed" instead. Needs an IAM instance role with
+# ec2:DescribeRegions + ec2:DescribeInstances to read, and
+# ec2:StartInstances / ec2:StopInstances / ec2:RebootInstances to act.
+boto3
