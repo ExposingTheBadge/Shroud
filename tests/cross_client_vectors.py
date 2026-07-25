@@ -32,6 +32,7 @@ from crypto import anon_routing as ar  # noqa: E402
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_MODULE = os.path.join(REPO, "clients", "web", "anon_routing.js")
 GO_SDK = os.path.join(REPO, "clients", "go_sdk")
+RUST_SDK = os.path.join(REPO, "clients", "rust_sdk")
 
 # Fixed inputs — any change here invalidates the pinned expectations.
 ID_A = bytes(range(32))
@@ -110,10 +111,22 @@ def _check_go(ref: dict) -> tuple[bool, str]:
     return True, "matches reference"
 
 
+def _check_rust(ref: dict) -> tuple[bool, str]:
+    cargo = shutil.which("cargo")
+    if not cargo:
+        return True, "SKIP (cargo not installed)"
+    r = subprocess.run([cargo, "test", "--release", "--test", "cross_lang_vectors"],
+                       cwd=RUST_SDK, capture_output=True, text=True, timeout=900)
+    if r.returncode != 0:
+        return False, (r.stdout + r.stderr).strip()[:300]
+    return True, "matches reference"
+
+
 CHECKS = (
     ("python (reference)", _check_python),
     ("web / browser", _check_web),
     ("go sdk", _check_go),
+    ("rust sdk", _check_rust),
 )
 
 

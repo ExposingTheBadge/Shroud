@@ -6,11 +6,27 @@
 #ifndef SHROUD_CLIENT_H
 #define SHROUD_CLIENT_H
 
+/* CMakeLists passes UNICODE/_UNICODE/WIN32_LEAN_AND_MEAN on the command
+ * line, and the Windows SDK headers may already have picked a
+ * NTDDI_VERSION/_WIN32_WINNT. Defining them unconditionally produced
+ * C4005 for every translation unit — 37 warnings that buried the 17 real
+ * type-mismatch ones underneath them. */
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
-#define NTDDI_VERSION 0x0A000000  /* Windows 10 — needed for BCRYPT_ECDH_ALGORITHM, X25519, HKDF */
+#endif
+#ifndef NTDDI_VERSION
+/* Windows 10 — needed for BCRYPT_ECDH_ALGORITHM, X25519, HKDF */
+#define NTDDI_VERSION 0x0A000000
+#endif
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00
+#endif
 
 #include <windows.h>
 #include <wincrypt.h>

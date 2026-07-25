@@ -77,12 +77,12 @@ const char* tpm_manufacturer(void) {
 /* ── TPM-Sealed Key Storage ───────────────────────────────────────── */
 BOOL tpm_seal_key(const BYTE *keyData, DWORD keyLen, const char *label) {
     /* Use NCrypt with platform key storage (backed by TPM if available) */
-    NCRYPT_PROV_HANDLE hProv = NULL;
+    NCRYPT_PROV_HANDLE hProv = 0;
     SECURITY_STATUS s = NCryptOpenStorageProvider(&hProv,
         MS_PLATFORM_KEY_STORAGE_PROVIDER, 0);
     if (BCRYPT_SUCCESS(s)) {
         /* Create a TPM-backed persistent key */
-        NCRYPT_KEY_HANDLE hKey = NULL;
+        NCRYPT_KEY_HANDLE hKey = 0;
         s = NCryptCreatePersistedKey(hProv, &hKey,
             BCRYPT_RSA_ALGORITHM, L"SHROUD_TPM_SEAL", 0,
             NCRYPT_OVERWRITE_KEY_FLAG);

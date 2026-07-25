@@ -96,3 +96,8 @@ zig/zig-out/
 
 # Local AWS MCP tooling config (not shipped)
 .mcp.json
+clients/windows/build-*/
+clients/qt6/build-*/
+clients/windows-admin/build-*/
+clients/rust_sdk/target/
+

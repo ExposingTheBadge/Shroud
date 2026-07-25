@@ -20,6 +20,9 @@ hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 hmac = "0.12"
+# src/lib.rs derives its error enum with thiserror but never declared it,
+# so the crate did not compile at all.
+thiserror = "1.0"
 
 [dev-dependencies]
 hex = "0.4"

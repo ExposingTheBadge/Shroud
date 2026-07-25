@@ -59,6 +59,9 @@ android {
 }
 
 dependencies {
+    // JVM unit tests. AnonRouting is pure java.security/javax.crypto,
+    // so its wire-format vectors can be pinned without a device.
+    testImplementation("junit:junit:4.13.2")
     implementation(platform("androidx.compose:compose-bom:2024.01.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")

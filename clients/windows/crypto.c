@@ -35,7 +35,7 @@ int crypto_keypair_origin(void) { return g_last_kp_origin; }
 KeyPair crypto_generate_keypair(void) {
     KeyPair kp = {0};
     SECURITY_STATUS s;
-    NCRYPT_PROV_HANDLE hProv = NULL;
+    NCRYPT_PROV_HANDLE hProv = 0;
 
     /* 1. Try TPM-backed Platform Crypto Provider. */
     s = NCryptOpenStorageProvider(&hProv, MS_PLATFORM_CRYPTO_PROVIDER, 0);
@@ -49,7 +49,7 @@ KeyPair crypto_generate_keypair(void) {
             s = NCryptFinalizeKey(kp.handle, 0);
             if (BCRYPT_SUCCESS(s)) {
                 kp.pub.len = PUBLIC_KEY_MAX;
-                if (BCRYPT_SUCCESS(NCryptExportKey(kp.handle, NULL, BCRYPT_ECCPUBLIC_BLOB, NULL,
+                if (BCRYPT_SUCCESS(NCryptExportKey(kp.handle, 0, BCRYPT_ECCPUBLIC_BLOB, NULL,
                                                    kp.pub.data, PUBLIC_KEY_MAX, &kp.pub.len, 0))) {
                     NCryptFreeObject(hProv);
                     g_last_kp_origin = 1;
@@ -57,10 +57,10 @@ KeyPair crypto_generate_keypair(void) {
                 }
             }
             NCryptDeleteKey(kp.handle, 0);
-            kp.handle = NULL;
+            kp.handle = 0;
         }
         NCryptFreeObject(hProv);
-        hProv = NULL;
+        hProv = 0;
     }
 
     /* 2. Software fallback — Microsoft Software Key Storage Provider. */
@@ -71,10 +71,10 @@ KeyPair crypto_generate_keypair(void) {
     s = NCryptFinalizeKey(kp.handle, 0);
     if (!BCRYPT_SUCCESS(s)) {
         NCryptDeleteKey(kp.handle, 0); NCryptFreeObject(hProv);
-        kp.handle = NULL; return kp;
+        kp.handle = 0; return kp;
     }
     kp.pub.len = PUBLIC_KEY_MAX;
-    NCryptExportKey(kp.handle, NULL, BCRYPT_ECCPUBLIC_BLOB, NULL,
+    NCryptExportKey(kp.handle, 0, BCRYPT_ECCPUBLIC_BLOB, NULL,
                     kp.pub.data, PUBLIC_KEY_MAX, &kp.pub.len, 0);
     NCryptFreeObject(hProv);
     g_last_kp_origin = 0;

@@ -8,7 +8,7 @@ BOOL storage_save_keypair(const char *device_id, KeyPair *kp) {
     BYTE keyBlob[4096];
     DWORD blobLen = sizeof(keyBlob);
 
-    SECURITY_STATUS s = NCryptExportKey(kp->handle, NULL, BCRYPT_ECCPRIVATE_BLOB,
+    SECURITY_STATUS s = NCryptExportKey(kp->handle, 0, BCRYPT_ECCPRIVATE_BLOB,
                          NULL, keyBlob, blobLen, &blobLen, 0);
     if (!BCRYPT_SUCCESS(s)) return FALSE;
 
@@ -68,9 +68,9 @@ BOOL storage_load_keypair(const char *device_id, KeyPair *kp) {
     free(encrypted);
 
     /* Import private key back into CNG */
-    NCRYPT_PROV_HANDLE hProv = NULL;
+    NCRYPT_PROV_HANDLE hProv = 0;
     NCryptOpenStorageProvider(&hProv, MS_KEY_STORAGE_PROVIDER, 0);
-    SECURITY_STATUS s = NCryptImportKey(hProv, NULL, BCRYPT_ECCPRIVATE_BLOB,
+    SECURITY_STATUS s = NCryptImportKey(hProv, 0, BCRYPT_ECCPRIVATE_BLOB,
                          NULL, &kp->handle, outBlob.pbData, outBlob.cbData, 0);
     NCryptFreeObject(hProv);
     LocalFree(outBlob.pbData);
@@ -78,7 +78,7 @@ BOOL storage_load_keypair(const char *device_id, KeyPair *kp) {
 
     /* Export public key */
     kp->pub.len = PUBLIC_KEY_MAX;
-    NCryptExportKey(kp->handle, NULL, BCRYPT_ECCPUBLIC_BLOB, NULL,
+    NCryptExportKey(kp->handle, 0, BCRYPT_ECCPUBLIC_BLOB, NULL,
                     kp->pub.data, PUBLIC_KEY_MAX, &kp->pub.len, 0);
     return TRUE;
 }
