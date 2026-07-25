@@ -923,11 +923,17 @@ def _raise_bad_credentials(username: str = "", reason: str = "",
                   + (f" {pw_shape}" if pw_shape else ""))
     from crypto.errors import errors, raise_http
     raise_http(errors.A003_BAD_CREDENTIALS, extra={
+        # Deliberately identical whether the username exists or not —
+        # distinguishing them here would turn this endpoint into a
+        # username oracle. The operator-side audit entry carries the
+        # difference; see _raise_bad_credentials above.
         "hint": (
-            "If you're upgrading from v2.4.5 or earlier, every account "
-            "registered through that build went to a hardcoded address "
-            "that never reached this relay's database. You may need to "
-            "register fresh on v2.6.x."
+            "Accounts are per-relay: registering on one relay does not "
+            "create an account on another. If you have not registered "
+            "against this relay yet, use Register rather than Login. "
+            "Upgrading from v2.4.5 or earlier also requires registering "
+            "fresh — that build wrote to a hardcoded address that never "
+            "reached this database."
         ),
     })
 
