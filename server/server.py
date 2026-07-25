@@ -891,11 +891,21 @@ except Exception:
     pass
 db = _PerThreadConn(DB_PATH)
 
-def _raise_bad_credentials() -> None:
+def _raise_bad_credentials(username: str = "", reason: str = "") -> None:
     """Wrap EA003 so call sites stay short. Detail explains the v2.4.5
     ghost-server scenario, which is by far the most common cause of a
     'real' EA003 right now: the user's old account never reached the
-    federation because the v2.4.5 client was hardcoded to a stale IP."""
+    federation because the v2.4.5 client was hardcoded to a stale IP.
+
+    Failed user logins previously left no server-side trace whatsoever —
+    only an anonymous 401 in the access log — so "invalid credentials"
+    was undiagnosable without reproducing it by hand. Records the
+    username and which check failed. Never records the password or any
+    derivative of it.
+    """
+    if username or reason:
+        audit_log("auth", "USER_AUTH_FAIL",
+                  f"username={username[:64]!r} reason={reason}")
     from crypto.errors import errors, raise_http
     raise_http(errors.A003_BAD_CREDENTIALS, extra={
         "hint": (
@@ -1788,9 +1798,9 @@ async def encrypted_auth_v2(request: Request):
     else:
         user = db.execute("SELECT id, password_hash, password_salt FROM users WHERE username=?",
                           (username,)).fetchone()
-        if not user: _raise_bad_credentials()
+        if not user: _raise_bad_credentials(username, "no such user")
         derived, _ = derive_key(password, user[2])
-        if not hmac.compare_digest(derived.hex(), user[1]): _raise_bad_credentials()
+        if not hmac.compare_digest(derived.hex(), user[1]): _raise_bad_credentials(username, "password mismatch")
 
     user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
     if platform not in ('windows','ios','android'):
@@ -1988,7 +1998,7 @@ async def change_password(req: ChangePasswordRequest):
         (norm,)
     ).fetchone()
     if not user:
-        _raise_bad_credentials()
+        _raise_bad_credentials(username, "password mismatch")
 
     # Verify old password
     derived, _ = derive_key(req.old_password, user[2])
@@ -2111,10 +2121,10 @@ async def encrypted_auth(request: Request):
         user = db.execute("SELECT id, password_hash, password_salt FROM users WHERE username=?",
                           (username,)).fetchone()
         if not user:
-            _raise_bad_credentials()
+            _raise_bad_credentials(username, "no such user")
         derived, _ = derive_key(password, user[2])
         if not hmac.compare_digest(derived.hex(), user[1]):
-            _raise_bad_credentials()
+            _raise_bad_credentials(username, "password mismatch")
 
     # Register / reuse device
     user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
@@ -2197,13 +2207,13 @@ async def register_device(req: RegisterDeviceRequest):
     ).fetchone()
     if not user:
         print(f"[DEVICE REG] FAIL: username '{norm}' not found")
-        _raise_bad_credentials()
+        _raise_bad_credentials(username, "no such user")
 
     # Verify password
     derived, _ = derive_key(req.password, user[2])
     if not hmac.compare_digest(derived.hex(), user[1]):
         print(f"[DEVICE REG] FAIL: password mismatch for '{req.username}' (pw_len={len(req.password)})")
-        _raise_bad_credentials()
+        _raise_bad_credentials(username, "password mismatch")
 
     # Check platform
     if req.platform not in ('windows', 'ios', 'android'):
