@@ -65,3 +65,25 @@ DPAPI; everything else is plaintext.
   connections — it's purely an admin client
 - Does NOT phone home anywhere except: (1) your configured SHROUD
   relays, (2) Anthropic's API when you send a chat message
+
+## Building without Visual Studio
+
+The original build used MSVC 2022 + Qt 6.9.2 (`msvc2022_64`). If that
+toolchain isn't installed, MinGW works and needs no Visual Studio:
+
+```pwsh
+pip install aqtinstall
+aqt install-qt   windows desktop 6.9.2 win64_mingw -O D:\Qt -m qtwebsockets
+aqt install-tool windows desktop tools_mingw1310   -O D:\Qt
+
+$env:PATH = "D:\Qt\Tools\mingw1310_64\bin;D:\Qt\6.9.2\mingw_64\bin;$env:PATH"
+cmake -S . -B build-mingw -G "MinGW Makefiles" `
+      -DCMAKE_BUILD_TYPE=Release `
+      -DCMAKE_PREFIX_PATH="D:/Qt/6.9.2/mingw_64" `
+      -DCMAKE_CXX_COMPILER="D:/Qt/Tools/mingw1310_64/bin/g++.exe" `
+      -DCMAKE_MAKE_PROGRAM="D:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe"
+cmake --build build-mingw --parallel 4
+```
+
+Produces `build-mingw/shroud-admin.exe`. `qtwebsockets` is optional —
+CMake sets `SHROUD_ADMIN_HAS_WS` only when it's present.

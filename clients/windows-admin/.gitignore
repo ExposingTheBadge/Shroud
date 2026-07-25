@@ -20,3 +20,4 @@ CMakeFiles/
 cmake_install.cmake
 ninja_log
 *.ninja_log
+build-mingw/
