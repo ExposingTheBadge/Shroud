@@ -1,5 +1,17 @@
 cmake_minimum_required(VERSION 3.16)
-project(SHROUD VERSION 2.6.6 LANGUAGES CXX C)
+
+# Read the version from the repo's VERSION file rather than repeating it
+# here. Keeping the two in step was a manual step in the release process
+# and they drifted: VERSION said 2.6.7 while this line still said 2.6.6,
+# so a freshly built client told the user "SHROUD v2.6.7 is available,
+# you have v2.6.6" about itself. One source of truth removes the step.
+set(SHROUD_VERSION "0.0.0")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION" SHROUD_VERSION)
+    string(STRIP "${SHROUD_VERSION}" SHROUD_VERSION)
+endif()
+project(SHROUD VERSION ${SHROUD_VERSION} LANGUAGES CXX C)
+message(STATUS "SHROUD client version: ${PROJECT_VERSION}")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

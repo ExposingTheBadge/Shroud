@@ -64,9 +64,21 @@
  * route through whatever relay (clearnet or .onion) the manifest
  * points them at.
  */
+/* Overridable at build time so the client can be pointed at a local
+ * relay for development without editing this file:
+ *   cl /DSERVER_HOST=L\"127.0.0.1\" ...
+ *   cmake -DCMAKE_CXX_FLAGS=/DSERVER_HOST=L\"127.0.0.1\" ...
+ * There was previously no way to do that at all — every dev build
+ * talked to the production relay. */
+#ifndef SERVER_HOST
 #define SERVER_HOST       L"100.30.51.8"
+#endif
+#ifndef SERVER_PORT
 #define SERVER_PORT       58443
+#endif
+#ifndef SERVER_USE_TLS
 #define SERVER_USE_TLS    1
+#endif
 
 #define AES_KEY_LEN       32
 #define AES_GCM_IV_LEN    12

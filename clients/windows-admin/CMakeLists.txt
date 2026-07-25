@@ -6,7 +6,15 @@
 # ~/.claude/projects/D--APP-FuseOBD/memory/feedback-shroud-admin-private.md.
 
 cmake_minimum_required(VERSION 3.16)
-project(shroud_admin VERSION 2.6.0 LANGUAGES CXX)
+
+# Same single-source-of-truth as the user client: this had drifted to
+# 2.6.0 against a repo VERSION of 2.6.7.
+set(SHROUD_VERSION "0.0.0")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION" SHROUD_VERSION)
+    string(STRIP "${SHROUD_VERSION}" SHROUD_VERSION)
+endif()
+project(shroud_admin VERSION ${SHROUD_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

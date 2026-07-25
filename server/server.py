@@ -975,9 +975,36 @@ class AuthRequest(BaseModel):
 # ── FIPS Self-Test ───────────────────────────────────────────────────
 # (now in lifespan handler above)
 
+@app.get("/")
+async def root():
+    """Pointer page for anything that reaches the relay root.
+
+    A bare {"detail":"Not Found"} is what an operator saw when they put
+    the relay address in a browser, which reads as "the relay is broken"
+    rather than "that path has no route". Deliberately carries nothing
+    beyond what /health and /api/v1/relay-stats already publish — no
+    counts, no identifiers, nothing that could speak to Rules 1-3.
+    """
+    return {
+        "service": "SHROUD relay",
+        "version": SERVER_VERSION,
+        "status": "ok",
+        "endpoints": {
+            "health": "/health",
+            "version": "/api/v1/version",
+            "relay_stats": "/api/v1/relay-stats",
+            "admin": "/admin",
+        },
+        "note": "Message traffic is anonymous — see /api/v1/error-codes "
+                "and the protocol docs in the repository.",
+    }
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "fips": "140-2 validated", "version": "2.1.0"}
+    # version was hardcoded "2.1.0" here and had gone five minor releases
+    # stale; anything monitoring /health was reading a fixed string.
+    return {"status": "ok", "fips": "140-2 validated", "version": SERVER_VERSION}
 
 
 @app.get("/api/v1/error-codes")
