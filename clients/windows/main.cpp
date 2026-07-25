@@ -14,6 +14,7 @@
 #endif
 
 extern "C" {
+#include <QRegularExpression>
 #include "client.h"
 extern "C" {
 #include "ratchet.h"
@@ -1325,11 +1326,47 @@ private:
        connect we refuse if the fingerprint changed — MITM has to either
        impersonate three independent signature schemes or hijack the
        file on the user's disk. */
-    QString serverPinPath() {
+    /* The pin is per relay endpoint, not global.
+     *
+     * Every relay in the federation carries its OWN identity keypair —
+     * the four production relays currently have four different
+     * fingerprints. A single shared server.pin therefore meant a client
+     * could only ever speak to whichever relay it happened to meet
+     * first: point it at any other member and the pin check hard-refuses
+     * before authentication is even attempted. That defeats the entire
+     * reason for running a multi-region federation, because failing over
+     * to a healthy relay looks exactly like an attack.
+     *
+     * Keying by host:port keeps the TOFU guarantee intact per endpoint —
+     * a given relay still cannot change identity unnoticed — while
+     * letting a client legitimately use more than one of them.
+     *
+     * The legacy single-file pin is retired rather than migrated. It
+     * records no endpoint, so there is no way to tell which relay it was
+     * for; copying it onto the current one would pin the wrong
+     * fingerprint and produce exactly the false mismatch this change
+     * exists to remove. Retiring it costs one TOFU prompt per relay. */
+    QString serverPinDir() {
         QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
         if (base.isEmpty()) base = QDir::tempPath();
-        QDir().mkpath(base + "/SHROUD");
-        return base + "/SHROUD/server.pin";
+        QString dir = base + "/SHROUD/pins";
+        QDir().mkpath(dir);
+        return dir;
+    }
+
+    QString serverPinPath() {
+        QString endpoint = QString("%1_%2")
+            .arg(QString::fromWCharArray(SERVER_HOST))
+            .arg(SERVER_PORT);
+        endpoint.replace(QRegularExpression("[^A-Za-z0-9_.-]"), "_");
+        QString path = serverPinDir() + "/" + endpoint + ".pin";
+
+        /* Retire the endpoint-less legacy pin (see note above). */
+        QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (base.isEmpty()) base = QDir::tempPath();
+        QString legacy = base + "/SHROUD/server.pin";
+        if (QFile::exists(legacy)) QFile::remove(legacy);
+        return path;
     }
     QString loadPinnedFingerprint() {
         QFile f(serverPinPath());
