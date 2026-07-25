@@ -66,24 +66,52 @@ DPAPI; everything else is plaintext.
 - Does NOT phone home anywhere except: (1) your configured SHROUD
   relays, (2) Anthropic's API when you send a chat message
 
-## Building without Visual Studio
+## Building
 
-The original build used MSVC 2022 + Qt 6.9.2 (`msvc2022_64`). If that
-toolchain isn't installed, MinGW works and needs no Visual Studio:
+MSVC 2022 + Qt 6.9.2 `msvc2022_64`. Qt lives on `E:` because `C:` and
+`D:` are both down to ~10 GB free.
 
 ```pwsh
 pip install aqtinstall
-aqt install-qt   windows desktop 6.9.2 win64_mingw -O D:\Qt -m qtwebsockets
-aqt install-tool windows desktop tools_mingw1310   -O D:\Qt
+aqt install-qt windows desktop 6.9.2 win64_msvc2022_64 -O E:\Qt -m qtwebsockets
 
-$env:PATH = "D:\Qt\Tools\mingw1310_64\bin;D:\Qt\6.9.2\mingw_64\bin;$env:PATH"
-cmake -S . -B build-mingw -G "MinGW Makefiles" `
-      -DCMAKE_BUILD_TYPE=Release `
-      -DCMAKE_PREFIX_PATH="D:/Qt/6.9.2/mingw_64" `
-      -DCMAKE_CXX_COMPILER="D:/Qt/Tools/mingw1310_64/bin/g++.exe" `
-      -DCMAKE_MAKE_PROGRAM="D:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe"
-cmake --build build-mingw --parallel 4
+$vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+cmd /c "call `"$vcvars`" && cmake -S . -B build-msvc -G `"NMake Makefiles`" ^
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=E:/Qt/6.9.2/msvc2022_64"
+cmd /c "call `"$vcvars`" && cmake --build build-msvc"
 ```
 
-Produces `build-mingw/shroud-admin.exe`. `qtwebsockets` is optional —
-CMake sets `SHROUD_ADMIN_HAS_WS` only when it's present.
+Produces `build-msvc/shroud-admin.exe`. `qtwebsockets` is optional —
+CMake defines `SHROUD_ADMIN_HAS_WS` only when it's present.
+
+To refresh the runnable bundle in `dist/` (untracked, local only):
+
+```pwsh
+Copy-Item build-msvc\shroud-admin.exe dist\ -Force
+cmd /c "call `"$vcvars`" && E:\Qt\6.9.2\msvc2022_64\bin\windeployqt.exe ^
+        --release --no-translations dist\shroud-admin.exe"
+```
+
+Note: `vswhere.exe` does not report the 2022 installs on this machine —
+it only lists SQL Server Management Studio. Point CMake at `vcvars64.bat`
+directly rather than trusting toolchain auto-detection. Both
+`...\2022\Community` and `...\2022\Enterprise` are present with MSVC
+14.44.35207.
+
+### MinGW fallback
+
+If Visual Studio is ever unavailable, MinGW builds the client cleanly and
+needs no VS at all:
+
+```pwsh
+aqt install-qt   windows desktop 6.9.2 win64_mingw -O E:\Qt -m qtwebsockets
+aqt install-tool windows desktop tools_mingw1310   -O E:\Qt
+
+$env:PATH = "E:\Qt\Tools\mingw1310_64\bin;E:\Qt\6.9.2\mingw_64\bin;$env:PATH"
+cmake -S . -B build-mingw -G "MinGW Makefiles" `
+      -DCMAKE_BUILD_TYPE=Release `
+      -DCMAKE_PREFIX_PATH="E:/Qt/6.9.2/mingw_64" `
+      -DCMAKE_CXX_COMPILER="E:/Qt/Tools/mingw1310_64/bin/g++.exe" `
+      -DCMAKE_MAKE_PROGRAM="E:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe"
+cmake --build build-mingw --parallel 4
+```

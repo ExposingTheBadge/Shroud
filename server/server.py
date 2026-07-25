@@ -3037,36 +3037,69 @@ async def _federation_announce_loop() -> None:
         await asyncio.sleep(FEDERATION_ANNOUNCE_EVERY)
 
 
+# Attempts spread over 2+4+8+16+32 = ~62s of backoff. A relay restart
+# takes about 8s, so the window has to comfortably outlast one; the
+# previous single immediate retry gave up after ~4s and lost every
+# broadcast in flight during a rolling deploy.
+FEDERATION_OUTBOX_MAX_ATTEMPTS = 6
+
+_FEDERATION_PATHS = {
+    "broadcast":   "/api/v1/federation/broadcast",
+    "state-event": "/api/v1/federation/state-event",
+}
+_FEDERATION_DEFAULT_PATH = "/api/v1/federation/delete"
+
+
 async def _federation_loop() -> None:
-    """Background task: drain the outbox, POST to peer endpoints,
-    retry transient failures by re-queueing. We deliberately don't
-    persist the outbox across restarts — losing a few broadcasts on
-    crash is better than spending the bytes on durable bookkeeping."""
+    """Background task: drain the outbox, POST to peer endpoints, retry
+    transient failures with exponential backoff.
+
+    Still deliberately in-memory — a crash may lose queued broadcasts,
+    which is the documented tradeoff against durable bookkeeping. What
+    changed is everything short of a crash:
+
+      - A non-2xx response used to count as success. httpx does not
+        raise on 4xx/5xx, and only exceptions were caught, so a peer
+        answering 503 while it restarted had its messages silently
+        discarded as delivered. Status is now checked.
+      - One immediate retry became attempts with backoff, so a peer
+        bouncing for a few seconds no longer costs the queue.
+      - Giving up is logged. A silent drop is how this fleet ran
+        unfederated for 53 days without anyone noticing.
+    """
     import httpx
 
     while True:
         await asyncio.sleep(2)
+        now = time.time()
         with FEDERATION_OUTBOX_LOCK:
-            batch = FEDERATION_OUTBOX[:]
-            FEDERATION_OUTBOX.clear()
-        if not batch:
+            due = [i for i in FEDERATION_OUTBOX if i.get("next_at", 0) <= now]
+            if due:
+                FEDERATION_OUTBOX[:] = [
+                    i for i in FEDERATION_OUTBOX if i.get("next_at", 0) > now
+                ]
+        if not due:
             continue
         async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-            for item in batch:
+            for item in due:
+                peer = item["peer"].rstrip("/")
+                path = _FEDERATION_PATHS.get(item["kind"], _FEDERATION_DEFAULT_PATH)
                 try:
-                    if item["kind"] == "broadcast":
-                        path = "/api/v1/federation/broadcast"
-                    elif item["kind"] == "state-event":
-                        path = "/api/v1/federation/state-event"
-                    else:
-                        path = "/api/v1/federation/delete"
-                    await client.post(item["peer"].rstrip("/") + path, json=item["body"])
-                except Exception:
-                    # Re-queue once, then drop on second failure.
-                    if not item.get("retried"):
-                        item["retried"] = True
-                        with FEDERATION_OUTBOX_LOCK:
-                            FEDERATION_OUTBOX.append(item)
+                    r = await client.post(peer + path, json=item["body"])
+                    if 200 <= r.status_code < 300:
+                        continue
+                    why = f"HTTP {r.status_code}"
+                except Exception as e:                       # noqa: BLE001
+                    why = type(e).__name__
+
+                item["attempts"] = item.get("attempts", 0) + 1
+                if item["attempts"] >= FEDERATION_OUTBOX_MAX_ATTEMPTS:
+                    print(f"[SHROUD] Federation: dropping {item['kind']} to "
+                          f"{peer} after {item['attempts']} attempts ({why})")
+                    continue
+                item["next_at"] = time.time() + 2 ** item["attempts"]
+                with FEDERATION_OUTBOX_LOCK:
+                    FEDERATION_OUTBOX.append(item)
 
 
 @app.get("/api/v1/federation/peers")
