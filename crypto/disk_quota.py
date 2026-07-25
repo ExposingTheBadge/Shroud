@@ -112,7 +112,6 @@ def sweep(db: sqlite3.Connection, policy: QuotaPolicy | None = None) -> Tuple[in
     db.isolation_level = ""
 
     after = _db_size_bytes(db)
-    max(0, _db_size_bytes(db) - after)  # 0; VACUUM may have shrunk
     return total_deleted, max(0, size - after)
 
 

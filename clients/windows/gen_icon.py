@@ -58,7 +58,6 @@ def draw_icon_small(size):
     img = vertical_gradient(s, BG_TOP, BG_BOT)
     mask = rounded_square_mask(s, int(s * 0.18))
     img.putalpha(mask)
-    d = ImageDraw.Draw(img, "RGBA")
 
     cx, cy = s / 2, s / 2
     R = s * 0.42
@@ -112,7 +111,6 @@ def draw_icon(size):
     mask = rounded_square_mask(s, int(s * 0.18))
     img.putalpha(mask)
 
-    d = ImageDraw.Draw(img, "RGBA")
 
     # Background lattice — faint hex grid behind the main cluster.
     bg_layer = Image.new("RGBA", (s, s), (0, 0, 0, 0))
