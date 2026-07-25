@@ -513,35 +513,78 @@ function renderAws(aws) {
       ${err ? `<div style="color:#ff8a8a;font-size:11px">${escapeHtml(err)}</div>` : ''}
     </div>`;
     if (items.length === 0) continue;
-    html += `<table style="width:100%;font-family:Consolas,monospace;font-size:11px;border-collapse:collapse">
-      <thead><tr style="color:var(--dim);text-align:left;border-bottom:1px solid var(--bd)">
-        <th style="padding:4px 6px">Name</th>
-        <th style="padding:4px 6px">Instance ID</th>
-        <th style="padding:4px 6px">State</th>
-        <th style="padding:4px 6px">Type</th>
-        <th style="padding:4px 6px">Public IP</th>
-        <th style="padding:4px 6px">AZ</th>
-        <th style="padding:4px 6px">Platform</th>
+    html += `<table class="aws-tbl">
+      <thead><tr>
+        <th>Name</th>
+        <th>Instance ID</th>
+        <th>State</th>
+        <th>Type</th>
+        <th>Public IP</th>
+        <th>AZ</th>
+        <th class="act">Actions</th>
       </tr></thead><tbody>`;
     for (const i of items) {
       const st = i.state;
-      const stColor = st === 'running' ? 'var(--ok)'
-                    : st === 'stopped' ? '#888'
-                    : st === 'pending' || st === 'stopping' || st === 'shutting-down' ? '#ffb84d'
-                    : '#ff8a8a';
-      html += `<tr style="border-bottom:1px solid rgba(255,255,255,0.04)">
-        <td style="padding:4px 6px">${escapeHtml(i.name || '—')}</td>
-        <td style="padding:4px 6px;color:var(--dim)">${escapeHtml(i.id)}</td>
-        <td style="padding:4px 6px;color:${stColor};font-weight:700">${escapeHtml(st)}</td>
-        <td style="padding:4px 6px">${escapeHtml(i.type)}</td>
-        <td style="padding:4px 6px">${i.pub_ip ? escapeHtml(i.pub_ip) : '<span style="color:var(--dim)">—</span>'}</td>
-        <td style="padding:4px 6px;color:var(--dim)">${escapeHtml(i.az)}</td>
-        <td style="padding:4px 6px;color:var(--dim)">${escapeHtml(i.platform || '')}</td>
+      const stCls = st === 'running' ? 'run'
+                  : st === 'stopped' ? 'stop'
+                  : (st === 'pending' || st === 'stopping' || st === 'shutting-down' || st === 'rebooting') ? 'pend'
+                  : 'bad';
+      // is_self marks the instance this relay is running on. The server
+      // refuses stop/reboot on it (Rule 0); disable rather than let the
+      // button imply otherwise.
+      const self = !!i.is_self;
+      const a = (act, label, cls, enabled) => enabled
+        ? `<button class="aws-btn ${cls}" onclick="awsAction('${escapeHtml(act)}','${escapeHtml(i.id)}','${escapeHtml(rg)}','${escapeHtml(i.name || '')}')">${label}</button>`
+        : `<button class="aws-btn ${cls}" disabled title="${self ? 'This is the relay serving the admin panel' : 'Not available in state: ' + escapeHtml(st)}">${label}</button>`;
+      html += `<tr${self ? ' class="self"' : ''}>
+        <td>${escapeHtml(i.name || '—')}${self ? '<span class="selftag">this relay</span>' : ''}</td>
+        <td class="dim">${escapeHtml(i.id)}</td>
+        <td><span class="st ${stCls}">${escapeHtml(st)}</span></td>
+        <td>${escapeHtml(i.type)}</td>
+        <td>${i.pub_ip ? escapeHtml(i.pub_ip) : '<span class="dim">—</span>'}</td>
+        <td class="dim">${escapeHtml(i.az)}</td>
+        <td class="act">
+          ${a('start', 'Start', 'go', st === 'stopped')}
+          ${a('stop', 'Stop', 'no', st === 'running' && !self)}
+          ${a('reboot', 'Reboot', 'wr', st === 'running' && !self)}
+        </td>
       </tr>`;
     }
     html += `</tbody></table>`;
   }
   body.innerHTML = html;
+}
+
+/* Start / stop / reboot an EC2 instance. Confirmed through the same
+ * modal every other destructive control uses. The relay re-checks
+ * everything server-side — including refusing to stop itself — so a
+ * stale render can't be used to take the fleet down. */
+async function awsAction(action, instanceId, region, name) {
+  const verb = action === 'start' ? 'Start' : action === 'stop' ? 'Stop' : 'Reboot';
+  const who = name ? `${name} (${instanceId})` : instanceId;
+  const ok = await showModal({
+    title: `${verb} EC2 instance?`,
+    body: `<div style="font-family:Consolas,monospace;font-size:12px">${escapeHtml(who)}<br>` +
+          `<span style="color:var(--dim)">region ${escapeHtml(region)}</span></div>`,
+    impact: action === 'start'
+      ? 'The instance will boot and start billing.'
+      : `The instance will ${action}. If it hosts a relay, that relay leaves the federation until it returns.`,
+    impactClass: action === 'start' ? 'warn' : 'danger',
+    confirmText: verb,
+    confirmClass: action === 'start' ? 'primary' : 'danger',
+  });
+  if (!ok) return;
+  try {
+    const r = await api('POST', '/api/v1/admin/aws/instance/action',
+                        { action, instance_id: instanceId, region });
+    const j = await r.json();
+    toast(`${verb} ${instanceId}: ${j.prev_state || '?'} → ${j.curr_state || '?'}`, 'ok');
+  } catch (e) {
+    toast(`${verb} failed: ${e.message}`, 'err');
+    return;
+  }
+  // EC2 state changes lag the API call; give it a beat before re-reading.
+  setTimeout(loadFederation, 2500);
 }
 
 function fmtUptime(secs) {
@@ -603,44 +646,97 @@ function renderToggles(d) {
 }
 
 /* ─── Render: Overview ───────────────────────────────────────────── */
+/* Overview metric rendering.
+ *
+ * Two rules here, both learned from the version this replaces:
+ *   1. Not every number deserves equal weight. Five headline figures go
+ *      in the KPI row; the rest are grouped by subject underneath.
+ *   2. Colour is a signal, not decoration. A cell is tinted only when
+ *      its value warrants attention — `state` below returns '' for the
+ *      normal case. Previously every tile had a hardcoded colour, so a
+ *      red "Files: 3" sat next to a green "Undelivered: 400" and the
+ *      palette told you nothing.
+ */
+function cell(value, label, state) {
+  return '<div class="cell ' + (state || '') + '"><div class="v">' +
+         esc(value) + '</div><div class="k">' + esc(label) + '</div></div>';
+}
+
+function group(title, cells) {
+  return '<div class="metric-group"><div class="gh">' + esc(title) +
+         '</div><div class="cells">' + cells.join('') + '</div></div>';
+}
+
+function kpi(value, label, sub, state) {
+  return '<div class="kpi ' + (state || '') + '"><div class="val">' +
+         esc(value) + '</div><div class="lbl">' + esc(label) + '</div>' +
+         (sub ? '<div class="sub">' + esc(sub) + '</div>' : '') + '</div>';
+}
+
+// Threshold helper: over `bad` → alert, over `soft` → warn, else neutral.
+function over(n, soft, bad) {
+  n = Number(n) || 0;
+  if (bad !== undefined && n >= bad) return 'alert';
+  if (soft !== undefined && n >= soft) return 'warn';
+  return '';
+}
+
 function renderOverview(d) {
-  const cards = [
-    ['accent', d.total_users,            'Users'],
-    ['ok',     d.total_devices,          'Devices'],
-    ['ok',     d.active_now,             'Active Now (60s)'],
-    ['ok',     d.active_1min,            'Active (5 min)'],
-    ['accent', d.active_today,           'Active Today'],
-    ['warn',   d.os_windows + '/' + d.os_android + '/' + d.os_ios, 'Win/Android/iOS'],
-    ['accent', (d.total_messages || 0).toLocaleString(), 'Total Messages'],
-    ['ok',     (d.msgs_1h || 0).toLocaleString(),   'Msgs / 1h'],
-    ['ok',     (d.msgs_24h || 0).toLocaleString(),  'Msgs / 24h'],
-    ['warn',   d.undelivered,            'Undelivered'],
-    ['purple', d.total_groups,           'Groups'],
-    ['purple', d.total_friendships,      'Friendships'],
-    ['warn',   d.avg_latency_ms + 'ms',  'Avg Msg Latency'],
-    ['warn',   d.avg_req_ms + 'ms',      'Avg Req'],
-    ['warn',   d.p95_req_ms + 'ms',      'p95 Req'],
-    ['danger', d.file_count,             'Files'],
-    ['danger', fmtSize(d.file_total_bytes), 'Encrypted Stored'],
-    ['accent', fmtSize(d.files_dir_bytes),  'Files Folder'],
-    ['accent', fmtSize(d.db_size_bytes),    'Database'],
-    ['warn',   fmtSize(d.disk_free_bytes) + ' free', 'Disk'],
-    ['danger', d.failed_logins_24h,      'Failed Logins 24h'],
-    ['warn',   d.pending_friend_requests,'Pending Friend Req'],
-    ['warn',   d.pending_group_invites,  'Pending Group Inv'],
-    ['purple', (d.requests_total || 0).toLocaleString(), 'Reqs Since Boot'],
-    ['danger', d.errors_total,           'Errors Since Boot'],
-    ['accent', d.ecdh_cache_size,        'ECDH Cache'],
-    ['ok',     fmtSize(d.bytes_24h),     'Msg Bytes / 24h'],
-    ['ok',     fmtSize(d.avg_msg_size),  'Avg Msg Size'],
-    ['purple', d.cover_count,            'Cover Messages'],
-    ['purple', fmtSize(d.cover_bytes),   'Cover Bytes'],
-    ['accent', d.onion_pct + '%',        'Reqs via Onion'],
-  ];
-  $('stats').innerHTML = cards.map(c =>
-    '<div class="card ' + c[0] + '"><div class="val">' + esc(c[1]) +
-    '</div><div class="lbl">' + esc(c[2]) + '</div></div>'
-  ).join('');
+  const num = v => (Number(v) || 0).toLocaleString();
+  const errRate = d.requests_total ? (d.errors_total / d.requests_total) * 100 : 0;
+  const diskFree = Number(d.disk_free_bytes) || 0;
+
+  $('kpis').innerHTML = [
+    kpi(num(d.total_messages), 'Total Messages',
+        num(d.msgs_24h) + ' in the last 24h'),
+    kpi(num(d.active_today), 'Active Today',
+        d.active_now + ' now · ' + d.total_users + ' users', 'good'),
+    kpi(num(d.requests_total), 'Requests Since Boot',
+        errRate.toFixed(1) + '% errored',
+        errRate >= 10 ? 'alert' : errRate >= 3 ? 'warn' : ''),
+    kpi(d.p95_req_ms + 'ms', 'p95 Request',
+        'avg ' + d.avg_req_ms + 'ms', over(d.p95_req_ms, 250, 1000)),
+    kpi(num(d.undelivered), 'Undelivered',
+        'sealed messages queued', over(d.undelivered, 100, 1000)),
+  ].join('');
+
+  $('groups').innerHTML = [
+    group('Fleet', [
+      cell(d.total_users, 'Users'),
+      cell(d.total_devices, 'Devices'),
+      cell(d.active_now, 'Active now (60s)'),
+      cell(d.active_1min, 'Active (5 min)'),
+      cell(d.os_windows + ' / ' + d.os_android + ' / ' + d.os_ios, 'Win / Android / iOS'),
+      cell(d.total_groups, 'Groups'),
+      cell(d.total_friendships, 'Friendships'),
+    ]),
+    group('Traffic', [
+      cell(num(d.msgs_1h), 'Msgs / 1h'),
+      cell(num(d.msgs_24h), 'Msgs / 24h'),
+      cell(fmtSize(d.bytes_24h), 'Msg bytes / 24h'),
+      cell(fmtSize(d.avg_msg_size), 'Avg msg size'),
+      cell(d.avg_latency_ms + 'ms', 'Avg msg latency', over(d.avg_latency_ms, 500, 2000)),
+      cell(num(d.cover_count), 'Cover messages'),
+      cell(fmtSize(d.cover_bytes), 'Cover bytes'),
+      cell(d.onion_pct + '%', 'Reqs via onion'),
+    ]),
+    group('Storage', [
+      cell(d.file_count, 'Files'),
+      cell(fmtSize(d.file_total_bytes), 'Encrypted stored'),
+      cell(fmtSize(d.files_dir_bytes), 'Files folder'),
+      cell(fmtSize(d.db_size_bytes), 'Database'),
+      cell(fmtSize(diskFree), 'Disk free',
+           diskFree && diskFree < 512 * 1024 * 1024 ? 'alert'
+           : diskFree && diskFree < 2 * 1024 * 1024 * 1024 ? 'warn' : ''),
+    ]),
+    group('Integrity', [
+      cell(num(d.errors_total), 'Errors since boot', over(d.errors_total, 1, 500)),
+      cell(d.failed_logins_24h, 'Failed logins 24h', over(d.failed_logins_24h, 5, 25)),
+      cell(d.pending_friend_requests, 'Pending friend req'),
+      cell(d.pending_group_invites, 'Pending group inv'),
+      cell(d.ecdh_cache_size, 'ECDH cache'),
+    ]),
+  ].join('');
 
   /* Hourly chart */
   const hh = d.hourly_activity || [];
@@ -654,18 +750,27 @@ function renderOverview(d) {
     const found = hh.find(x => x.hour === k);
     buckets.push({ hour: dt.getUTCHours() + ':00', count: found ? found.count : 0 });
   }
+  // Peak label + hour ticks: the bars alone gave no way to read a
+  // magnitude or a time without hovering every column.
+  const scale = $('chartScale');
+  if (scale) scale.innerHTML = '<span>peak ' + hMax.toLocaleString() +
+    '/h</span><span>' + (hTotal / 24).toFixed(0) + '/h avg</span>';
+  const xl = $('chartXLabels');
+  if (xl) xl.innerHTML = [0, 6, 12, 18, 23]
+    .map(i => '<span>' + esc(buckets[i].hour) + '</span>').join('');
   $('hourlyChart').innerHTML = buckets.map(b =>
-    '<div class="bar" style="height:' + (b.count / hMax * 100) + '%">' +
-    '<span class="tt">' + b.hour + ' — ' + b.count + '</span></div>'
+    '<div class="bar" style="height:' + Math.max(2, b.count / hMax * 100) + '%">' +
+    '<span class="tt">' + b.hour + ' — ' + b.count.toLocaleString() + '</span></div>'
   ).join('');
 
   /* Top endpoints */
   const ep = d.top_endpoints || [];
   const eMax = Math.max(1, ...ep.map(x => x.count));
   $('endpointList').innerHTML = ep.map(x =>
-    '<div class="item"><span class="label">' + esc(x.path) +
+    '<div class="item"><span class="label" title="' + esc(x.path) + '">' + esc(x.path) +
     '</span><span class="track"><span class="fill" style="width:' +
-    (x.count / eMax * 100) + '%"></span></span><span class="num">' + x.count +
+    (x.count / eMax * 100) + '%"></span></span><span class="num">' +
+    (Number(x.count) || 0).toLocaleString() +
     (x.errors ? ' <span style="color:var(--danger)">(' + x.errors + ')</span>' : '') +
     '</span></div>'
   ).join('') || '<div class="empty">no traffic yet</div>';

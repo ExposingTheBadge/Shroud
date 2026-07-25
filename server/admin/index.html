@@ -46,12 +46,17 @@
 
 <!-- ─── Overview ──────────────────────────────────────────────────── -->
 <div class="section active" data-section="overview">
-  <div class="grid" id="stats"></div>
+  <div class="kpi-row" id="kpis"></div>
+  <div id="groups"></div>
 
-  <div class="row">
+  <div class="row" style="margin-top:14px">
     <div class="panel" style="flex:1 1 60%;margin:0 0 14px">
       <div class="panel-hdr">Messages — last 24h <span class="pill" id="hourlyTotal">—</span></div>
-      <div class="chart" id="hourlyChart"></div>
+      <div class="chart-wrap">
+        <div class="chart-scale" id="chartScale"></div>
+        <div class="chart" id="hourlyChart"></div>
+        <div class="chart-xlabels" id="chartXLabels"></div>
+      </div>
     </div>
     <div class="panel" style="flex:1 1 35%;margin:0 0 14px">
       <div class="panel-hdr">Top Endpoints (since boot)</div>
@@ -60,17 +65,37 @@
   </div>
 
   <div class="panel">
-    <div class="panel-hdr">Server Controls
-      <div class="actions">
-        <button onclick="ctrlConfirm('purge-files', 'Purge Files', 'This deletes expired and already-downloaded files from disk.', 'warn')">Purge Files</button>
-        <button onclick="ctrlConfirm('vacuum',     'Vacuum DB',   'Reclaims disk space by repacking the SQLite database. Briefly locks the DB.', 'warn')">VACUUM DB</button>
-        <button onclick="ctrlConfirm('clear-ecdh', 'Clear ECDH',  'Drops all ephemeral ECDH session keys. In-flight handshakes will need to be retried.', 'warn')">Clear ECDH Cache</button>
-        <button onclick="ctrlConfirm('wipe-rate-limits', 'Reset Rate Limits', 'Resets all per-IP rate-limit buckets to zero.', 'warn')">Reset Rate Limits</button>
-        <button class="danger" onclick="ctrlConfirm('kill-sessions', 'Kill Other Admin Sessions', 'Signs out every OTHER admin session except yours.', 'danger')">Kill Other Admin Sessions</button>
-        <button class="danger" onclick="ctrlConfirm('clear-undelivered', 'Drop Undelivered', null, 'danger')">Drop Undelivered</button>
-      </div>
+    <div class="panel-hdr">Server Controls</div>
+    <div class="ctrl-grid">
+      <button class="ctrl" onclick="ctrlConfirm('purge-files', 'Purge Files', 'This deletes expired and already-downloaded files from disk.', 'warn')">
+        <span class="n">Purge Files</span>
+        <span class="d">Delete expired and already-downloaded files from disk</span>
+      </button>
+      <button class="ctrl" onclick="ctrlConfirm('vacuum', 'Vacuum DB', 'Reclaims disk space by repacking the SQLite database. Briefly locks the DB.', 'warn')">
+        <span class="n">VACUUM DB</span>
+        <span class="d">Repack SQLite to reclaim space · briefly locks the DB</span>
+      </button>
+      <button class="ctrl" onclick="ctrlConfirm('clear-ecdh', 'Clear ECDH', 'Drops all ephemeral ECDH session keys. In-flight handshakes will need to be retried.', 'warn')">
+        <span class="n">Clear ECDH Cache</span>
+        <span class="d">Drop ephemeral session keys · in-flight handshakes retry</span>
+      </button>
+      <button class="ctrl" onclick="ctrlConfirm('wipe-rate-limits', 'Reset Rate Limits', 'Resets all per-IP rate-limit buckets to zero.', 'warn')">
+        <span class="n">Reset Rate Limits</span>
+        <span class="d">Zero every per-IP rate-limit bucket</span>
+      </button>
     </div>
-    <div style="padding:8px 14px;color:var(--dim);font-size:11px">Every control action is recorded in the audit log. Destructive actions show an exact impact preview before they fire.</div>
+    <div class="ctrl-sep">Destructive</div>
+    <div class="ctrl-grid">
+      <button class="ctrl danger" onclick="ctrlConfirm('kill-sessions', 'Kill Other Admin Sessions', 'Signs out every OTHER admin session except yours.', 'danger')">
+        <span class="n">Kill Other Admin Sessions</span>
+        <span class="d">Sign out every admin session except this one</span>
+      </button>
+      <button class="ctrl danger" onclick="ctrlConfirm('clear-undelivered', 'Drop Undelivered', null, 'danger')">
+        <span class="n">Drop Undelivered</span>
+        <span class="d">Permanently discard queued sealed messages</span>
+      </button>
+    </div>
+    <div style="padding:4px 16px 14px;color:var(--dim);font-size:11px">Every control action is recorded in the audit log. Destructive actions show an exact impact preview before they fire.</div>
   </div>
 </div>
 

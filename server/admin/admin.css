@@ -217,6 +217,277 @@ body {
 .card.danger .val { color: var(--danger); }
 .card.purple .val { color: var(--purple); }
 
+/* ─── Overview: KPI row + grouped metrics ─────────────────────────────
+ * The overview used to be 31 identically-weighted tiles in one flat
+ * grid, each tinted a fixed colour picked per-metric. Colour therefore
+ * carried no information — "Files" was red whether the count was 3 or
+ * 30000 — and there was no reading order. Now: a handful of headline
+ * numbers up top, everything else grouped by subject, and colour
+ * reserved for values that actually need attention.
+ * ─────────────────────────────────────────────────────────────────── */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+  padding: 14px 20px 4px;
+}
+.kpi {
+  background: linear-gradient(160deg, var(--bg2), var(--bg3));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 15px 16px;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+.kpi::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--accent);
+  opacity: .8;
+}
+.kpi .val {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.05;
+  font-family: Consolas, monospace;
+  color: var(--text);
+  letter-spacing: -.5px;
+  white-space: nowrap;
+}
+.kpi .lbl {
+  font-size: 10px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: .7px;
+  margin-top: 5px;
+}
+.kpi .sub {
+  font-size: 10px;
+  color: var(--dim);
+  font-family: Consolas, monospace;
+  margin-top: 2px;
+  opacity: .75;
+}
+.kpi.alert::before { background: var(--danger); }
+.kpi.alert .val    { color: var(--danger); }
+.kpi.warn::before  { background: var(--warn); }
+.kpi.warn .val     { color: var(--warn); }
+.kpi.good::before  { background: var(--ok); }
+
+/* Groups sit side by side so a 5-cell group doesn't leave two thirds of
+ * a wide viewport empty, and collapse to one column when narrow. */
+#groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+  gap: 0 24px;
+  padding: 0 20px;
+}
+.metric-group { padding: 0; min-width: 0; }
+.metric-group > .gh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin: 12px 0 7px;
+}
+.metric-group > .gh::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+/* auto-fill, not auto-fit: with auto-fit a group holding 5 cells would
+ * stretch each one across the whole viewport. auto-fill keeps the empty
+ * tracks, so cells stay a consistent readable width in every group and
+ * short rows simply end early. */
+.metric-group .cells {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 8px;
+}
+.cell {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px 11px;
+  min-width: 0;
+}
+.cell .v {
+  font-size: 16px;
+  font-weight: 600;
+  font-family: Consolas, monospace;
+  color: var(--text);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cell .k {
+  font-size: 9.5px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Only these three tint a value — everything else stays neutral. */
+.cell.alert { border-color: rgba(255,71,87,.45); }
+.cell.alert .v { color: var(--danger); }
+.cell.warn  { border-color: rgba(255,192,72,.4); }
+.cell.warn  .v { color: var(--warn); }
+.cell.good  .v { color: var(--ok); }
+
+/* ─── Server controls ─────────────────────────────────────────────────
+ * These used to be bare buttons crowded into the panel header, with the
+ * destructive two sitting flush against the routine ones. Now each is a
+ * labelled target that says what it does, and the irreversible pair is
+ * split out under its own heading.
+ * ─────────────────────────────────────────────────────────────────── */
+.ctrl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 8px;
+  padding: 12px 16px 4px;
+}
+/* Scoped under .ctrl-grid so these beat the global `button.danger`
+ * rule further down, which otherwise repaints the destructive pair as
+ * solid red blocks and overrides the padding. */
+.ctrl-grid .ctrl {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  text-align: left;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  transition: border-color .15s, background .15s;
+}
+.ctrl-grid .ctrl:hover { border-color: var(--accent); background: var(--bg2); }
+.ctrl-grid .ctrl .n { font-size: 12px; font-weight: 600; color: var(--text); }
+.ctrl-grid .ctrl .d { font-size: 10.5px; color: var(--dim); line-height: 1.35; }
+.ctrl-grid .ctrl.danger {
+  background: var(--bg3);
+  border-color: rgba(255,71,87,.3);
+  color: var(--text);
+}
+.ctrl-grid .ctrl.danger .n { color: var(--danger); }
+.ctrl-grid .ctrl.danger:hover {
+  border-color: var(--danger);
+  background: rgba(255,71,87,.07);
+  filter: none;
+}
+.ctrl-sep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px 0;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 1.1px;
+  color: var(--danger);
+  opacity: .75;
+}
+.ctrl-sep::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: rgba(255,71,87,.2);
+}
+
+/* ─── AWS asset table ─────────────────────────────────────────────── */
+.aws-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  table-layout: auto;
+}
+.aws-tbl th {
+  text-align: left;
+  color: var(--dim);
+  font-weight: 500;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  font-size: 9.5px;
+  letter-spacing: .6px;
+  white-space: nowrap;
+}
+.aws-tbl td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  white-space: nowrap;
+}
+/* Let Name absorb the slack so the other columns stay tight together
+ * instead of being spread edge-to-edge across a wide viewport. */
+.aws-tbl th:first-child, .aws-tbl td:first-child { width: 99%; }
+.aws-tbl th.act, .aws-tbl td.act { text-align: right; }
+.aws-tbl td.dim { color: var(--dim); }
+.aws-tbl tr.self td { background: rgba(0,212,255,.045); }
+.aws-tbl .selftag {
+  margin-left: 8px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: var(--accent);
+  border: 1px solid rgba(0,212,255,.35);
+  border-radius: 99px;
+  padding: 1px 6px;
+}
+.aws-tbl .st { font-weight: 700; }
+.aws-tbl .st.run  { color: var(--ok); }
+.aws-tbl .st.stop { color: var(--dim); }
+.aws-tbl .st.pend { color: var(--warn); }
+.aws-tbl .st.bad  { color: var(--danger); }
+.aws-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 2px 9px;
+  font-size: 10px;
+  cursor: pointer;
+  margin-left: 4px;
+  font-family: inherit;
+}
+.aws-btn.go:hover:not(:disabled) { border-color: var(--ok); color: var(--ok); }
+.aws-btn.no:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+.aws-btn.wr:hover:not(:disabled) { border-color: var(--warn); color: var(--warn); }
+.aws-btn:disabled { opacity: .3; cursor: not-allowed; }
+
+/* ─── Chart axis furniture ───────────────────────────────────────── */
+.chart-wrap { padding: 6px 14px 10px; }
+.chart-wrap .chart { padding: 0; height: 104px; border-bottom: 1px solid var(--border); }
+.chart-scale {
+  display: flex;
+  justify-content: space-between;
+  font-family: Consolas, monospace;
+  font-size: 9.5px;
+  color: var(--dim);
+  margin-bottom: 3px;
+}
+.chart-xlabels {
+  display: flex;
+  justify-content: space-between;
+  font-family: Consolas, monospace;
+  font-size: 9.5px;
+  color: var(--dim);
+  margin-top: 5px;
+}
+
 /* ─── Panels ──────────────────────────────────────────────────────── */
 .panel {
   background: var(--bg2);
@@ -439,7 +710,7 @@ tr.clickable:hover td {
   font-family: Consolas, monospace;
 }
 .barlist .label {
-  flex: 0 0 140px;
+  flex: 0 0 205px;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
@@ -453,12 +724,17 @@ tr.clickable:hover td {
   overflow: hidden;
   border: 1px solid var(--border);
 }
+/* .fill is a <span>; without display:block an inline box ignores both
+ * height and the width the renderer sets, so every bar collapsed to
+ * nothing and this list rendered as empty tracks. */
 .barlist .fill {
+  display: block;
   height: 100%;
+  min-width: 2px;
   background: linear-gradient(90deg, var(--accent), var(--purple));
 }
 .barlist .num {
-  flex: 0 0 40px;
+  flex: 0 0 62px;
   text-align: right;
   color: var(--dim);
 }
