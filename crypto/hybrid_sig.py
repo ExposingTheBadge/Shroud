@@ -25,13 +25,91 @@ Signature blob (SIG_BLOB):
 
 Total signature: ~34 KB. Verification: ~1-5 ms.
 """
-import struct, hashlib
+import os, struct, hashlib, functools
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.exceptions import InvalidSignature
 import oqs
 
 MLDSA_NAME = "ML-DSA-87"
-SPH_NAME   = "SPHINCS+-SHA2-256s-simple"
+
+# The hash-based signature was standardised as SLH-DSA in FIPS 205 and
+# liboqs renamed the mechanism to match, retiring
+# "SPHINCS+-SHA2-256s-simple" around 0.13. Hardcoding the old spelling
+# is why every relay logged "Hybrid signatures unavailable" and silently
+# fell back to Ed25519-only, so resolve against what the linked liboqs
+# actually exposes.
+#
+# IMPORTANT: the two are NOT interchangeable. Key and signature lengths
+# are identical (64 / 29792), so the blob layout below is unchanged, but
+# FIPS 205 altered the construction and the signatures do not
+# cross-verify — measured, not assumed:
+#
+#     old sig -> SLH-DSA verifier : False
+#     new sig -> SPHINCS+ verifier: False
+#
+# So the whole fleet must resolve to the same mechanism. The order below
+# is deterministic for that reason. Migrating costs nothing today because
+# liboqs was missing everywhere, so no hybrid signature has ever been
+# issued in production — but once keys are in circulation, changing this
+# order invalidates every existing hybrid public key and signature.
+_SPH_CANDIDATES = (
+    "SLH_DSA_PURE_SHA2_256S",       # liboqs >= 0.13 (FIPS 205 naming)
+    "SLH-DSA-SHA2-256s",
+    "SPHINCS+-SHA2-256s-simple",    # liboqs <= 0.12
+)
+
+
+@functools.lru_cache(maxsize=1)
+def sph_name() -> str:
+    """Pick the hash-based mechanism, probing that it actually works.
+
+    Availability alone is not a safe selector: liboqs 0.15 exposes
+    SLH_DSA_PURE_SHA2_256S but a sign/verify roundtrip against it fails
+    (even reusing one Signature object), while 0.16 handles it fine.
+    Selecting on name alone would therefore hand some hosts a mechanism
+    that silently refuses every signature it just produced. So each
+    candidate gets one real keygen/sign/verify before it is accepted.
+
+    Resolved lazily and cached: 256s keygen+sign costs on the order of a
+    second, which is fine once per process on first use but not
+    something to pay at import time in every tool that touches crypto/.
+    """
+    try:
+        enabled = set(oqs.get_enabled_sig_mechanisms())
+    except Exception as e:                               # noqa: BLE001
+        raise RuntimeError(f"liboqs unavailable: {e}") from e
+
+    # Explicit pin wins. Auto-selection is per-host, so a fleet running
+    # mixed liboqs versions can silently split — a 0.15 box resolves to
+    # SPHINCS+ while a 0.16 box resolves to SLH-DSA, and their signatures
+    # do not cross-verify. Set SHROUD_SPH_MECH everywhere to force one.
+    pinned = os.environ.get("SHROUD_SPH_MECH", "").strip()
+    if pinned:
+        if pinned not in enabled:
+            raise RuntimeError(
+                f"SHROUD_SPH_MECH={pinned!r} is not enabled in this liboqs "
+                f"build; enabled: {sorted(enabled)}"
+            )
+        return pinned
+
+    candidates = _SPH_CANDIDATES
+    probe, tried = b"shroud-sph-probe", []
+    for name in candidates:
+        if name not in enabled:
+            continue
+        try:
+            with oqs.Signature(name) as s:
+                pk = s.generate_keypair()
+                if s.verify(probe, s.sign(probe), pk):
+                    return name
+            tried.append(f"{name} (roundtrip failed)")
+        except Exception as e:                           # noqa: BLE001
+            tried.append(f"{name} ({type(e).__name__})")
+    raise RuntimeError(
+        "no working SLH-DSA / SPHINCS+ 256s mechanism in this liboqs "
+        f"build. candidates: {tried or 'none present'}; "
+        f"enabled: {sorted(enabled)}"
+    )
 
 ED_PK_LEN   = 32
 MLDSA_PK_LEN = 2592
@@ -57,7 +135,7 @@ def keygen() -> tuple[bytes, dict]:
     mldsa_pk = mldsa_sigobj.generate_keypair()
     mldsa_sk = mldsa_sigobj.export_secret_key()
 
-    sph_sigobj = oqs.Signature(SPH_NAME)
+    sph_sigobj = oqs.Signature(sph_name())
     sph_pk = sph_sigobj.generate_keypair()
     sph_sk = sph_sigobj.export_secret_key()
 
@@ -82,7 +160,7 @@ def sign(message: bytes, secrets: dict) -> bytes:
     mldsa_sigobj = oqs.Signature(MLDSA_NAME, secrets["mldsa_sk"])
     mldsa_sig = mldsa_sigobj.sign(message)
 
-    sph_sigobj = oqs.Signature(SPH_NAME, secrets["sph_sk"])
+    sph_sigobj = oqs.Signature(sph_name(), secrets["sph_sk"])
     sph_sig = sph_sigobj.sign(message)
 
     assert len(ed_sig)   == ED_SIG_LEN
@@ -120,7 +198,7 @@ def verify(message: bytes, sig_blob: bytes, pk_blob: bytes) -> bool:
 
     if not oqs.Signature(MLDSA_NAME).verify(message, mldsa_sig, mldsa_pk):
         return False
-    if not oqs.Signature(SPH_NAME).verify(message, sph_sig, sph_pk):
+    if not oqs.Signature(sph_name()).verify(message, sph_sig, sph_pk):
         return False
     return True
 
