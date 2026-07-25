@@ -75,11 +75,18 @@ def main() -> int:
     intents.message_content = True
     client = discord.Client(intents=intents)
 
+    # The event loop only holds tasks weakly, so a bare create_task() can
+    # be garbage-collected mid-flight and the bridge would just stop
+    # relaying with no error. Keep a reference for the process lifetime.
+    _tasks: set = set()
+
     @client.event
     async def on_ready():
         print(f"[bridge] discord logged in as {client.user}")
         # Kick off SHROUD poll loop now that discord is ready.
-        asyncio.create_task(shroud_poll_loop())
+        t = asyncio.create_task(shroud_poll_loop())
+        _tasks.add(t)
+        t.add_done_callback(_tasks.discard)
 
     @client.event
     async def on_message(message: discord.Message):

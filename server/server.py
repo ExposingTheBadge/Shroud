@@ -100,8 +100,16 @@ try:
         hmac_sign, hmac_verify, generate_device_id, fips_self_test, fips_random
     )
 except ImportError:
+    # Fallback for running from inside server/ rather than the repo root.
+    # Import the same names explicitly: `import *` here meant a typo in
+    # the list above would silently resolve through the star import on
+    # one path and NameError on the other.
     import fips_crypto as crypto
-    from fips_crypto import *
+    from fips_crypto import (                              # noqa: F401
+        generate_keypair, serialize_public_key, deserialize_public_key,
+        compute_shared_secret, derive_key, encrypt_aes_gcm, decrypt_aes_gcm,
+        hmac_sign, hmac_verify, generate_device_id, fips_self_test, fips_random
+    )
 
 try:
     from crypto import pq_hybrid
