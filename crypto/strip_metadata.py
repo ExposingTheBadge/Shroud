@@ -141,7 +141,9 @@ def _strip_jpeg(data: bytes) -> StripResult:
             # Now copy entropy data verbatim up to the next non-RST marker
             start = i
             while i + 1 < n:
-                if data[i] == 0xFF and data[i + 1] not in (0x00,) + tuple(range(0xD0, 0xD8)):
+                # 0x00 is a stuffed byte; 0xD0-0xD7 are RST markers. Keep
+                # these hex — JPEG marker values are only legible that way.
+                if data[i] == 0xFF and data[i + 1] not in (0x00, *range(0xD0, 0xD8)):
                     break
                 i += 1
             out.extend(data[start:i])
@@ -495,7 +497,7 @@ def _self_test() -> None:
     r = _strip_mp3(mp3)
     assert r.cleaned == b"\xff\xfbAUDIODATA", f"MP3 strip wrong: {r.cleaned!r}"
 
-    print(f"strip_metadata self-tests passed.")
+    print("strip_metadata self-tests passed.")
 
 
 if __name__ == "__main__":

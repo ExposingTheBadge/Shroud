@@ -149,7 +149,7 @@ class Reassembler:
         """Parse one chunk. If this completes a file, return the full
         verified file bytes. Otherwise return None.
         """
-        header, idx, file_id, flags, data = self._parse(payload)
+        _header, idx, file_id, flags, data = self._parse(payload)
 
         bucket = self._by_id.setdefault(file_id, {})
         bucket[idx] = data
@@ -230,7 +230,7 @@ def _self_test() -> None:
         assert "hash mismatch" in str(e)
 
     # Empty file edge case
-    file_id, chunks = split_file(b"")
+    _file_id, chunks = split_file(b"")
     assert len(chunks) == 1
     rsm3 = Reassembler()
     out = rsm3.accept_chunk(chunks[0].payload)

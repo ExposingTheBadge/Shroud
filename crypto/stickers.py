@@ -179,7 +179,6 @@ class LocalStickerCache:
 
 def _self_test() -> None:
     # Hand-built JPEG with EXIF that strip_metadata will trim.
-    import struct
     jpeg = (
         b"\xff\xd8"
         + b"\xff\xe1" + struct.pack(">H", 8) + b"Exif\x00\x00"  # APP1/EXIF

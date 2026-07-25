@@ -165,7 +165,7 @@ def main() -> int:
         peers = json.loads(resp.read()).get("peers", [])
     found = any(p.get("pubkey_hex") == kp.pub_hex for p in peers)
     if found:
-        print(f"[5] verified: this operator now appears in the peer roster")
+        print("[5] verified: this operator now appears in the peer roster")
         return 0
     print(f"[5] WARNING: pubkey {kp.pub_hex} not in peer roster after announce")
     return 1

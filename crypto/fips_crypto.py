@@ -34,7 +34,7 @@ def fips_random(length: int = 32) -> bytes:
     return token_bytes(length)
 
 # ── PBKDF2-HMAC-SHA256 (FIPS 140-2) ──────────────────────────────────
-def derive_key(password: str, salt: bytes = None) -> tuple[bytes, bytes]:
+def derive_key(password: str, salt: bytes | None = None) -> tuple[bytes, bytes]:
     """Derive AES-256 key from password using PBKDF2-HMAC-SHA256.
     Returns (key, salt)."""
     if salt is None:
@@ -235,7 +235,7 @@ def fips_self_test() -> bool:
     """Run FIPS 140-2 required self-tests. Returns True on pass."""
     # AES-GCM known-answer test
     key = bytes.fromhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
-    nonce = bytes.fromhex("000102030405060708090a0b")
+    bytes.fromhex("000102030405060708090a0b")
     plain = b"FIPS 140-2 self-test"
     enc = encrypt_aes_gcm(key, plain)
     dec = decrypt_aes_gcm(key, enc["nonce"], enc["ciphertext"])

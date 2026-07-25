@@ -135,7 +135,7 @@ def main() -> int:
             encryption_algorithm=serialization.NoEncryption(),
         ), pub
 
-    sender_priv, sender_pub = kp()
+    _sender_priv, sender_pub = kp()
     recip_priv, recip_pub = kp()
 
     shared_root = os.urandom(32)

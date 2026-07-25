@@ -60,7 +60,7 @@ def _H(*parts: bytes) -> bytes:
     return h.digest()
 
 
-def _i2osp(x: int, n: int = None) -> bytes:
+def _i2osp(x: int, n: int | None = None) -> bytes:
     if n is None:
         n = (x.bit_length() + 7) // 8
     return x.to_bytes(n, "big")
@@ -84,7 +84,7 @@ def _x(salt: bytes, username: str, password: str) -> int:
 
 
 # ── Registration ──────────────────────────────────────────────────
-def make_verifier(username: str, password: str, salt: bytes = None) -> Tuple[bytes, int]:
+def make_verifier(username: str, password: str, salt: bytes | None = None) -> Tuple[bytes, int]:
     """Compute (salt, verifier). Run client-side once; server stores both."""
     if salt is None:
         salt = secrets.token_bytes(16)
@@ -197,4 +197,4 @@ def self_test() -> bool:
 if __name__ == "__main__":
     print("SRP-6a self-test:", "PASSED" if self_test() else "FAILED")
     print(f"  Group: RFC 5054 {N.bit_length()}-bit")
-    print(f"  H: SHA-512")
+    print("  H: SHA-512")

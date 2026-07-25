@@ -100,7 +100,6 @@ class TreeKEM:
 
     def _recompute_internal(self):
         """Recompute every internal node's secret from its children."""
-        slots = 1 << self.depth
         for level in range(self.depth - 1, -1, -1):
             for col in range(1 << level):
                 idx = (1 << level) - 1 + col

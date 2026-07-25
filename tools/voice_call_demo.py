@@ -207,7 +207,7 @@ async def run_caller(relay_url: str, my_id: dict, contact: dict,
         print("caller: timed out waiting for answer")
         return
 
-    print(f"caller: got answer, setting remote description")
+    print("caller: got answer, setting remote description")
     answer_desc = RTCSessionDescription(sdp=answer_obj.sdp, type="answer")
     await pc.setRemoteDescription(answer_desc)
     sess.accept()

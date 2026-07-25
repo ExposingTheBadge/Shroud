@@ -184,7 +184,7 @@ def _self_test() -> None:
     # Remove
     ledger.apply(parse_reaction(build_reaction(pid, "👍", action="remove")), alice_pk)
     summary = ledger.for_parent(pid)
-    thumbs = [s for s in summary if s.emoji == "👍"][0]
+    thumbs = next(s for s in summary if s.emoji == "👍")
     assert thumbs.count == 1
     assert alice_pk not in thumbs.reactor_pubkey_hexes
 

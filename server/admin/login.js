@@ -119,6 +119,19 @@
           d.failCount + ' of 3 attempts used — ' + (3 - d.failCount) + ' remaining';
         document.getElementById('fpStatus').style.color = 'var(--danger)';
       }
+      // Fingerprints minted before the server actually verified passwords
+      // carry an empty hash and still authenticate on the fingerprint
+      // alone. Say so plainly instead of implying two factors are in play.
+      if (d.passwordlessAdmins > 0 && !d.needsSetup) {
+        const s = document.getElementById('fpStatus');
+        s.innerHTML =
+          '<span style="color:var(--danger);font-weight:700">' +
+          d.passwordlessAdmins + ' admin credential' +
+          (d.passwordlessAdmins === 1 ? '' : 's') + ' ha' +
+          (d.passwordlessAdmins === 1 ? 's' : 've') + ' no password.</span><br>' +
+          '<span style="font-size:11px">Sign in, then POST /api/v1/admin/set-password ' +
+          'to require one. Until then the fingerprint alone grants full access.</span>';
+      }
       if (d.needsSetup) {
         document.getElementById('fpLabel').textContent =
           'First run — set admin password to generate fingerprint';

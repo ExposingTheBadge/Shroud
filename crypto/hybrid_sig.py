@@ -222,7 +222,7 @@ def self_test() -> bool:
 
 
 if __name__ == "__main__":
-    print(f"triple-sig self-test:", "PASSED" if self_test() else "FAILED")
+    print("triple-sig self-test:", "PASSED" if self_test() else "FAILED")
     pk, sk = keygen()
     msg = b"x" * 256
     s = sign(msg, sk)

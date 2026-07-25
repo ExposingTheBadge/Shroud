@@ -3,7 +3,7 @@ SHROUD Secure Messaging Server — FIPS 140-2 Compliant
 Port 58443 | TLS 1.3 | E2E Encryption | Device Registration
 """
 
-import os, sys, json, time, sqlite3, uuid, struct, hashlib, collections, shutil, secrets
+import os, sys, json, time, sqlite3, uuid, struct, hashlib, collections, shutil, secrets, hmac
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -244,7 +244,7 @@ DATA_KEY = None
 if AT_REST_AVAILABLE:
     try:
         DATA_KEY = at_rest.load_or_create_data_key(DATA_KEY_PATH)
-        print(f"[SHROUD] At-rest data key loaded (AES-256-GCM)")
+        print("[SHROUD] At-rest data key loaded (AES-256-GCM)")
     except Exception as _dk_e:
         print(f"[SHROUD] WARN: at-rest data key unavailable: {_dk_e}")
         DATA_KEY = None
@@ -401,7 +401,7 @@ async def lifespan(ap):
     # Startup
     if not fips_self_test():
         raise RuntimeError("FIPS 140-2 self-test FAILED — server cannot start")
-    print(f"[SHROUD] FIPS 140-2 self-test: PASSED")
+    print("[SHROUD] FIPS 140-2 self-test: PASSED")
     print(f"[SHROUD] PQ hybrid (ECDH-P384 + ML-KEM-1024): {'READY' if PQ_AVAILABLE else 'unavailable'}")
     print(f"[SHROUD] Server starting on port {PORT}")
     expired = db.execute(
@@ -1321,7 +1321,7 @@ async def srp_challenge(request: Request):
     salt = row[0]
     verifier = int.from_bytes(row[1], "big")
     sess = srp6a.ServerSession(username, salt, verifier)
-    s, B = sess.challenge()
+    _s, B = sess.challenge()
     sid = uuid.uuid4().hex
     with SRP_SESSION_LOCK:
         SRP_SESSIONS[sid] = {"sess": sess, "A": A, "ts": time.time()}
@@ -1392,7 +1392,7 @@ def _wipe_user_cascade(user_id: str, reason: str) -> dict:
     files_removed = 0
     if devs:
         ph = ",".join("?" * len(devs))
-        for fid, name in db.execute(
+        for _fid, name in db.execute(
             f"SELECT id, storage_name FROM file_transfers WHERE sender_device_id IN ({ph}) OR recipient_device_id IN ({ph})",
             devs * 2
         ).fetchall():
@@ -2101,7 +2101,7 @@ async def encrypted_auth(request: Request):
 
     device_id = _reuse_or_create_device(user[0], existing_did, device_name, platform, pub_key_bytes)
 
-    server_priv, server_pub = generate_keypair()
+    _server_priv, server_pub = generate_keypair()
     return {"device_id": device_id, "server_public_key": serialize_public_key(server_pub).hex(),
             "user_id": user[0], "registered": True}
 
@@ -2234,7 +2234,7 @@ async def register_device(req: RegisterDeviceRequest):
     print(f"[DEVICE REG] SUCCESS: {req.username} device={device_id} platform={req.platform}")
 
     # Generate server-side ephemeral keypair for this device's ECDH
-    server_priv, server_pub = generate_keypair()
+    _server_priv, server_pub = generate_keypair()
     server_pub_hex = serialize_public_key(server_pub).hex()
 
     return {
@@ -2837,6 +2837,17 @@ def _apply_state_event(kind: str, payload: dict) -> None:
                 (payload["fingerprint_id"], payload.get("password_hash", ""),
                  payload.get("password_salt", ""), payload.get("hwid", ""),
                  payload.get("label", "Admin")),
+            )
+        elif kind == "admin_fingerprint.password_set":
+            # Rotating the admin password has to reach every relay, or
+            # the operator ends up with a password that works on one and
+            # a still-passwordless credential on the other three.
+            db.execute(
+                "UPDATE admin_fingerprints SET password_hash = ?, "
+                "password_salt = ? WHERE fingerprint_id = ?",
+                (payload.get("password_hash", ""),
+                 payload.get("password_salt", ""),
+                 payload["fingerprint_id"]),
             )
         elif kind == "admin_fingerprint.removed":
             db.execute(
@@ -3733,7 +3744,7 @@ async def upload_file(request: Request):
     sender_id = request.headers.get("X-Device-ID", "")
     recipient_id = request.headers.get("X-Recipient-ID", "")
     encrypted_metadata = request.headers.get("X-File-Metadata", "{}")
-    content_type = request.headers.get("X-Content-Type", "application/octet-stream")
+    request.headers.get("X-Content-Type", "application/octet-stream")
 
     if not sender_id or not recipient_id:
         raise HTTPException(400, "Missing device or recipient ID")
@@ -4203,14 +4214,45 @@ async def admin_login_page():
 @app.get("/api/v1/admin/login-status")
 async def admin_login_status(request: Request):
     ip, _ = get_client_info(request)
-    hwid = request.query_params.get("hwid", "")
+    request.query_params.get("hwid", "")
     banned = is_ip_banned(ip)
     count = db.execute(
         "SELECT COUNT(*) FROM login_attempts WHERE ip=? AND success=0 AND attempted_at > datetime('now', ?)",
         (ip, f'-{BAN_WINDOW_SEC} seconds')
     ).fetchone()[0]
     existing = db.execute("SELECT COUNT(*) FROM admin_fingerprints").fetchone()[0]
-    return {"banned": banned, "failCount": count, "maxAttempts": MAX_FAILED_ATTEMPTS, "needsSetup": existing == 0}
+    # Fingerprints minted before passwords were actually verified carry an
+    # empty hash and still authenticate on the fingerprint alone. Surface
+    # that so the panel can nag rather than leaving it silent.
+    passwordless = db.execute(
+        "SELECT COUNT(*) FROM admin_fingerprints "
+        "WHERE password_hash IS NULL OR password_hash = ''"
+    ).fetchone()[0]
+    return {"banned": banned, "failCount": count,
+            "maxAttempts": MAX_FAILED_ATTEMPTS, "needsSetup": existing == 0,
+            "passwordlessAdmins": passwordless}
+
+ADMIN_MIN_PASSWORD_LEN = 12
+
+
+def _admin_pw_store(password: str) -> tuple[str, bytes]:
+    """Hash an admin password for storage. Same KDF as user accounts."""
+    key, salt = derive_key(password)
+    return key.hex(), salt
+
+
+def _admin_pw_matches(password: str, stored_hash: str, stored_salt) -> bool:
+    """Constant-time check of an admin password against its stored hash."""
+    if not stored_hash or stored_salt in (None, "", b""):
+        return False
+    try:
+        salt = stored_salt if isinstance(stored_salt, (bytes, bytearray)) \
+            else bytes.fromhex(str(stored_salt))
+        derived, _ = derive_key(password, bytes(salt))
+    except Exception:                                        # noqa: BLE001
+        return False
+    return hmac.compare_digest(derived.hex(), stored_hash)
+
 
 @app.post("/api/v1/admin/fingerprint-login")
 async def admin_fingerprint_login(request: Request):
@@ -4227,10 +4269,35 @@ async def admin_fingerprint_login(request: Request):
         db.commit()
         raise HTTPException(403, "IP banned — too many failed attempts")
 
-    # Verify fingerprint exists
+    # Verify fingerprint exists AND the password matches.
+    #
+    # The password was previously read into `pw` and then never looked
+    # at: login.html renders a password box, login.js enforces "12+
+    # chars" client-side and posts it, and the server discarded it.
+    # password_hash / password_salt were written as "" at setup and
+    # enroll, so nothing could have been verified anyway. Admin auth was
+    # single-factor on the fingerprint alone while the UI — down to the
+    # "Invalid fingerprint or password" error — claimed otherwise.
+    #
+    # Records created before this fix carry an empty hash. Those still
+    # authenticate on the fingerprint alone rather than locking the
+    # operator out of a live relay, but every such login logs a warning
+    # and login-status reports password_set=false so the panel can
+    # prompt. Set one via POST /api/v1/admin/set-password.
     row = db.execute(
-        "SELECT id FROM admin_fingerprints WHERE fingerprint_id=?", (fp,)
+        "SELECT id, password_hash, password_salt FROM admin_fingerprints "
+        "WHERE fingerprint_id=?", (fp,)
     ).fetchone()
+
+    if row and row[1]:
+        if not _admin_pw_matches(pw, row[1], row[2]):
+            row = None                    # fall into the failure path below
+    elif row:
+        print(f"[SHROUD] ADMIN LOGIN WITHOUT PASSWORD — fingerprint "
+              f"{fp[:8]}… has no password set (ip={ip}). "
+              f"POST /api/v1/admin/set-password to close this.",
+              file=sys.stderr, flush=True)
+        audit_log(ip, "ADMIN_LOGIN_NO_PASSWORD", f"fp={fp[:16]}...")
 
     if not row:
         audit_log(ip, "AUTH_FAIL", f"fp={fp[:16]}... hwid={hwid[:32]}...")
@@ -4276,18 +4343,29 @@ async def admin_initial_setup(request: Request):
     if is_ip_banned(ip):
         raise HTTPException(403, "IP banned")
 
+    # login.js already collects and length-checks a password here; it was
+    # simply thrown away server-side. Store it so the second factor is real.
+    try:
+        password = (await request.json()).get("password", "") or ""
+    except Exception:                                        # noqa: BLE001
+        password = ""
+    if len(password) < ADMIN_MIN_PASSWORD_LEN:
+        raise HTTPException(
+            400, f"Admin password must be at least {ADMIN_MIN_PASSWORD_LEN} characters")
+    pw_hash, pw_salt = _admin_pw_store(password)
+
     fp_id = ''.join(uuid.uuid4().hex for _ in range(8))  # 8×32 = 256 hex chars
     db.execute(
         "INSERT INTO admin_fingerprints (fingerprint_id, password_hash, password_salt, hwid, label) VALUES (?,?,?,?,?)",
-        (fp_id, "", "", "", "Primary Admin")
+        (fp_id, pw_hash, pw_salt, "", "Primary Admin")
     )
     # Federate the new admin credential across all peers so the operator
     # can log into ANY relay with this fingerprint — Rule 0 (no single
     # point of failure) extended to admin auth.
     _federation_outbox_state_event("admin_fingerprint.added", {
         "fingerprint_id": fp_id,
-        "password_hash":  "",
-        "password_salt":  "",
+        "password_hash":  pw_hash,
+        "password_salt":  pw_salt.hex(),
         "hwid":           "",
         "label":          "Primary Admin",
     })
@@ -4296,22 +4374,70 @@ async def admin_initial_setup(request: Request):
 
 @app.post("/api/v1/admin/fingerprint-enroll")
 async def admin_fingerprint_enroll(request: Request, session=Depends(require_admin_csrf)):
-    """Generate a new fingerprint."""
-    label = (await request.json()).get("label", "Admin")
+    """Generate a new fingerprint. Requires the password it will use."""
+    body = await request.json()
+    label = body.get("label", "Admin")
+    password = body.get("password", "") or ""
+    if len(password) < ADMIN_MIN_PASSWORD_LEN:
+        raise HTTPException(
+            400, f"Admin password must be at least {ADMIN_MIN_PASSWORD_LEN} characters")
+    pw_hash, pw_salt = _admin_pw_store(password)
+
     fp_id = ''.join(uuid.uuid4().hex for _ in range(8))
     db.execute(
         "INSERT INTO admin_fingerprints (fingerprint_id, password_hash, password_salt, hwid, label) VALUES (?,?,?,?,?)",
-        (fp_id, "", "", "", label)
+        (fp_id, pw_hash, pw_salt, "", label)
     )
     db.commit()
     _federation_outbox_state_event("admin_fingerprint.added", {
         "fingerprint_id": fp_id,
-        "password_hash":  "",
-        "password_salt":  "",
+        "password_hash":  pw_hash,
+        "password_salt":  pw_salt.hex(),
         "hwid":           "",
         "label":          label,
     })
     return {"ok": True, "fingerprint_id": fp_id}
+
+
+class AdminSetPasswordIn(BaseModel):
+    fingerprint_id: str
+    new_password: str
+
+
+@app.post("/api/v1/admin/set-password")
+async def admin_set_password(body: AdminSetPasswordIn,
+                             session=Depends(require_admin_csrf)):
+    """Set or rotate the password on an admin fingerprint.
+
+    Needed because every fingerprint minted before the login fix carries
+    an empty password_hash and therefore authenticates on the fingerprint
+    alone. Requires an existing admin session, so it cannot be used to
+    take over an account you can't already reach.
+    """
+    if len(body.new_password) < ADMIN_MIN_PASSWORD_LEN:
+        raise HTTPException(
+            400, f"Admin password must be at least {ADMIN_MIN_PASSWORD_LEN} characters")
+    row = db.execute(
+        "SELECT id FROM admin_fingerprints WHERE fingerprint_id=?",
+        (body.fingerprint_id.strip(),),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "No such fingerprint")
+
+    pw_hash, pw_salt = _admin_pw_store(body.new_password)
+    db.execute(
+        "UPDATE admin_fingerprints SET password_hash=?, password_salt=? WHERE id=?",
+        (pw_hash, pw_salt, row[0]),
+    )
+    db.commit()
+    _federation_outbox_state_event("admin_fingerprint.password_set", {
+        "fingerprint_id": body.fingerprint_id.strip(),
+        "password_hash":  pw_hash,
+        "password_salt":  pw_salt.hex(),
+    })
+    audit_log(_admin_session_ip(session), "ADMIN_PASSWORD_SET",
+              f"fp={body.fingerprint_id[:16]}...")
+    return {"ok": True}
 
 @app.post("/api/v1/admin/logout")
 async def admin_logout(session=Depends(get_admin_session)):
@@ -6097,7 +6223,7 @@ if __name__ == "__main__":
     )
     args = ap.parse_args()
     init_db()
-    print(f"[SHROUD] Database initialized")
+    print("[SHROUD] Database initialized")
     use_tls = bool(args.ssl_keyfile and args.ssl_certfile)
     scheme  = "https" if use_tls else "http"
     print(f"[SHROUD] Listening on {scheme}://{args.bind}:{args.port}")
@@ -6106,8 +6232,8 @@ if __name__ == "__main__":
               f"Point clients at http://{args.bind}:{args.port} — using https:// will "
               f"surface as 'SSL handshake failed: internal token invalid' on Windows.")
     if args.bind == "0.0.0.0":
-        print(f"[SHROUD] WARNING: binding to all interfaces. For onion-only "
-              f"deployments pass --bind 127.0.0.1 and let Tor handle external traffic.")
+        print("[SHROUD] WARNING: binding to all interfaces. For onion-only "
+              "deployments pass --bind 127.0.0.1 and let Tor handle external traffic.")
     kwargs = dict(host=args.bind, port=args.port, log_level="info")
     if use_tls:
         kwargs["ssl_keyfile"]  = args.ssl_keyfile

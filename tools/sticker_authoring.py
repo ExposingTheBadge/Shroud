@@ -97,7 +97,7 @@ def cmd_build(args) -> int:
     print("Next steps:")
     print(f"  1. Upload all of {cdn_dir}/* to your CDN bucket as /stickers/<hash>")
     print(f"  2. Publish {manifest_path} at the manifest URL clients fetch from")
-    print(f"  3. Add the manifest URL to the operator manifest (crypto/operator_manifest.py)")
+    print("  3. Add the manifest URL to the operator manifest (crypto/operator_manifest.py)")
     return 0
 
 
