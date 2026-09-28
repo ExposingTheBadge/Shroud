@@ -765,96 +765,233 @@ private:
     auto *w = new QWidget;
     auto *lay = new QVBoxLayout(w);
     lay->setAlignment(Qt::AlignCenter);
+    lay->setContentsMargins(24, 24, 24, 24);
 
     auto *card = new QWidget;
-    card->setFixedWidth(400);
+    card->setObjectName("card");
+    card->setAttribute(Qt::WA_StyledBackground, true);
+    card->setFixedWidth(430);
     auto *cl = new QVBoxLayout(card);
-    cl->setSpacing(12);
+    cl->setContentsMargins(32, 28, 32, 24);
+    cl->setSpacing(6);
 
-    auto *title = new QLabel("<h2>SHROUD</h2>"); title->setAlignment(Qt::AlignCenter);
+    auto *logo = new QLabel;
+    logo->setPixmap(QIcon(":/shroud.png").pixmap(64, 64));
+    logo->setAlignment(Qt::AlignCenter);
+    cl->addWidget(logo);
+
+    auto *title = new QLabel("Welcome back");
+    title->setObjectName("heading");
+    title->setAlignment(Qt::AlignCenter);
     cl->addWidget(title);
 
-    /* Shared fields */
-    auto *uname = new QLineEdit; uname->setPlaceholderText("Username");
-    cl->addWidget(uname);
+    auto *subtitle = new QLabel("Sign in to pick up your encrypted conversations.");
+    subtitle->setObjectName("muted");
+    subtitle->setAlignment(Qt::AlignCenter);
+    subtitle->setWordWrap(true);
+    cl->addWidget(subtitle);
+    cl->addSpacing(14);
 
-    auto *pass = new QLineEdit; pass->setPlaceholderText("Password (12+ chars)"); pass->setEchoMode(QLineEdit::Password);
+    auto fieldLabel = [cl](const QString &t) {
+        auto *l = new QLabel(t);
+        l->setStyleSheet("font-weight: 600;");
+        cl->addWidget(l);
+        return l;
+    };
+    auto hintLabel = [cl](const QString &t) {
+        auto *l = new QLabel(t);
+        l->setObjectName("hint");
+        l->setWordWrap(true);
+        cl->addWidget(l);
+        return l;
+    };
+
+    /* Shared fields */
+    fieldLabel("Username");
+    auto *uname = new QLineEdit; uname->setPlaceholderText("e.g. nightowl");
+    uname->setMaxLength(64);
+    cl->addWidget(uname);
+    auto *unameHint = hintLabel("At least 3 characters. This is how friends find you, so pick something that doesn't reveal who you are.");
+    unameHint->hide();
+    cl->addSpacing(6);
+
+    fieldLabel("Password");
+    auto *pass = new QLineEdit; pass->setPlaceholderText("At least 12 characters"); pass->setEchoMode(QLineEdit::Password);
     attachPasswordReveal(pass);
     cl->addWidget(pass);
+
+    /* Strength meter — register mode only. */
+    auto *strengthBar = new QProgressBar;
+    strengthBar->setRange(0, 4);
+    strengthBar->setTextVisible(false);
+    strengthBar->setFixedHeight(6);
+    strengthBar->hide();
+    cl->addWidget(strengthBar);
+    auto *strengthLbl = hintLabel("");
+    strengthLbl->hide();
 
     /* Caps Lock warning chip — appears below the password field whenever
      * VK_CAPITAL is on and the password field has focus. Saves a lot of
      * "decryption failed" support tickets. */
-    auto *capsWarn = new QLabel("⚠ Caps Lock is ON");
-    capsWarn->setAlignment(Qt::AlignCenter);
-    capsWarn->setStyleSheet(
-        "QLabel { color: #ffb74d; background: #2a1f0d; border: 1px solid #5a3a0a;"
-        " border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: 600; }"
-    );
+    auto *capsWarn = new QLabel(QString::fromUtf8("\xE2\x9A\xA0  Caps Lock is on"));
+    capsWarn->setProperty("state", "warn");
     capsWarn->hide();
     cl->addWidget(capsWarn);
+
+    /* Register-only fields */
+    auto *confirmLbl = fieldLabel("Confirm password");
+    auto *confirm = new QLineEdit; confirm->setPlaceholderText("Type it again"); confirm->setEchoMode(QLineEdit::Password);
+    attachPasswordReveal(confirm);
+    cl->addWidget(confirm);
+    auto *confirmHint = hintLabel("There is no password reset: SHROUD never learns your password. Keep it somewhere safe.");
+    confirmLbl->hide(); confirm->hide(); confirmHint->hide();
+
+    auto *dnameLbl = fieldLabel("Device name");
+    auto *dname = new QLineEdit; dname->setPlaceholderText("Device Name"); dname->setText("Windows-PC");
+    cl->addWidget(dname);
+    auto *dnameHint = hintLabel("Helps you tell your devices apart when you link more than one.");
+    dnameLbl->hide(); dname->hide(); dnameHint->hide();
 
     // Poll caps-lock state on a short cadence so toggling it outside the
     // field reflects within a few hundred ms. Keep it cheap — Win32
     // GetKeyState is a no-op syscall.
     auto *capsTimer = new QTimer(pass);
     capsTimer->setInterval(200);
-    QObject::connect(capsTimer, &QTimer::timeout, [pass, capsWarn]() {
+    QObject::connect(capsTimer, &QTimer::timeout, [pass, confirm, capsWarn]() {
         bool on = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
-        capsWarn->setVisible(on && pass->hasFocus());
+        capsWarn->setVisible(on && (pass->hasFocus() || confirm->hasFocus()));
     });
     capsTimer->start();
 
-    /* Register-only field */
-    auto *dname = new QLineEdit; dname->setPlaceholderText("Device Name"); dname->setText("Windows-PC");
-    cl->addWidget(dname);
-    dname->hide();
-
-    auto *remChk = new QCheckBox("Remember username"); cl->addWidget(remChk);
+    cl->addSpacing(4);
+    auto *remChk = new QCheckBox("Remember my username on this PC"); cl->addWidget(remChk);
 
     DeviceConfig sc;
+    ZeroMemory(&sc, sizeof(sc));
     if (storage_load_config(&sc) && sc.username[0]) {
         uname->setText(sc.username);
         remChk->setChecked(true);
     }
 
     auto *status = new QLabel; status->setAlignment(Qt::AlignCenter);
+    status->setWordWrap(true);
+    status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    cl->addSpacing(4);
     cl->addWidget(status);
 
-    auto *actionBtn = new QPushButton("Login");
+    auto *actionBtn = new QPushButton("Sign in");
+    actionBtn->setObjectName("primary");
+    actionBtn->setMinimumHeight(40);
+    actionBtn->setCursor(Qt::PointingHandCursor);
     cl->addWidget(actionBtn);
 
-    auto *toggleLink = new QPushButton("Don't have an account? Register");
-    toggleLink->setFlat(true);
-    toggleLink->setStyleSheet("QPushButton { color: #ff8c1e; border: none; background: transparent; }");
-    cl->addWidget(toggleLink);
+    auto *toggleLink = new QPushButton("New to SHROUD? Create an account");
+    toggleLink->setObjectName("link");
+    toggleLink->setCursor(Qt::PointingHandCursor);
+    cl->addWidget(toggleLink, 0, Qt::AlignCenter);
+
+    auto *footer = new QLabel(QString::fromUtf8("\xF0\x9F\x94\x92  End-to-end encrypted  \xC2\xB7  No phone number  \xC2\xB7  No email"));
+    footer->setObjectName("hint");
+    footer->setAlignment(Qt::AlignCenter);
+    cl->addSpacing(6);
+    cl->addWidget(footer);
 
     lay->addWidget(card);
     m_stack->addWidget(w);
+    if (uname->text().isEmpty()) uname->setFocus(); else pass->setFocus();
 
     /* Mode flag lives on the button so it outlives this stack frame.
        Capturing a stack-local bool by reference would dangle once
        buildRegisterUI() returns. */
     actionBtn->setProperty("registerMode", false);
 
-    auto updateMode = [actionBtn, toggleLink, dname]() {
+    auto updateStrength = [pass, strengthBar, strengthLbl]() {
+        const QString p = pass->text();
+        int classes = 0;
+        if (p.contains(QRegularExpression("[a-z]"))) classes++;
+        if (p.contains(QRegularExpression("[A-Z]"))) classes++;
+        if (p.contains(QRegularExpression("[0-9]"))) classes++;
+        if (p.contains(QRegularExpression("[^A-Za-z0-9]"))) classes++;
+        int score, level; QString text;
+        if (p.isEmpty())          { score = 0; level = 3; }
+        else if (p.length() < 12) {
+            int need = 12 - (int)p.length();
+            score = 1; level = 2;
+            text = QString("Too short: %1 more character%2 needed").arg(need).arg(need == 1 ? "" : "s");
+        }
+        else if (p.length() < 16 && classes < 3) { score = 2; level = 1; text = "Okay. A longer passphrase would be stronger."; }
+        else if (p.length() < 20 && classes < 3) { score = 3; level = 0; text = "Good"; }
+        else                                     { score = 4; level = 0; text = "Strong"; }
+        strengthBar->setValue(score);
+        QColor c = level == 3 ? gTheme.border : statusColor(gTheme, level);
+        strengthBar->setStyleSheet(QString("QProgressBar::chunk { background-color: %1; border-radius: 3px; }").arg(cN(c)));
+        strengthLbl->setText(text);
+    };
+    QObject::connect(pass, &QLineEdit::textChanged, updateStrength);
+
+    auto updateMode = [=]() {
         bool reg = actionBtn->property("registerMode").toBool();
-        dname->setVisible(reg);
-        actionBtn->setText(reg ? "Create Account" : "Login");
-        toggleLink->setText(reg ? "Already registered? Login" : "Don't have an account? Register");
+        for (QWidget *x : {(QWidget*)dname, (QWidget*)dnameLbl, (QWidget*)dnameHint,
+                           (QWidget*)confirm, (QWidget*)confirmLbl, (QWidget*)confirmHint,
+                           (QWidget*)strengthBar, (QWidget*)strengthLbl, (QWidget*)unameHint})
+            x->setVisible(reg);
+        title->setText(reg ? "Create your account" : "Welcome back");
+        subtitle->setText(reg
+            ? "No email, no phone number. Just a username and a password only you know."
+            : "Sign in to pick up your encrypted conversations.");
+        actionBtn->setText(reg ? "Create account" : "Sign in");
+        toggleLink->setText(reg ? "Already have an account? Sign in" : "New to SHROUD? Create an account");
+        setStatusLabel(status, "", "info");
+        setInvalid(uname, false); setInvalid(pass, false); setInvalid(confirm, false);
+        updateStrength();
     };
 
     QObject::connect(toggleLink, &QPushButton::clicked, [actionBtn, updateMode]() {
         actionBtn->setProperty("registerMode", !actionBtn->property("registerMode").toBool());
         updateMode();
     });
+    /* Clear the red border as soon as the user starts fixing a field. */
+    QObject::connect(uname, &QLineEdit::textChanged, [uname]() { setInvalid(uname, false); });
+    QObject::connect(pass, &QLineEdit::textChanged, [pass]() { setInvalid(pass, false); });
+    QObject::connect(confirm, &QLineEdit::textChanged, [confirm]() { setInvalid(confirm, false); });
 
     auto doAction = [=]() {
         bool showRegister = actionBtn->property("registerMode").toBool();
+        if (!actionBtn->isEnabled()) return;   /* already working */
         QString u = uname->text().trimmed();
         QString p = pass->text();
         QString d = dname->text().trimmed();
-        if (u.length() < 3 || p.length() < 12) { status->setText("Username 3+ chars, password 12+ chars"); return; }
+        if (d.isEmpty()) d = "Windows-PC";
+        if (u.length() < 3) {
+            setInvalid(uname, true); uname->setFocus();
+            setStatusLabel(status, u.isEmpty() ? "Enter your username." : "Usernames are at least 3 characters.", "err");
+            return;
+        }
+        if (p.length() < 12) {
+            setInvalid(pass, true); pass->setFocus();
+            setStatusLabel(status, p.isEmpty() ? "Enter your password." : "Passwords are at least 12 characters.", "err");
+            return;
+        }
+        if (showRegister && confirm->text() != p) {
+            setInvalid(confirm, true); confirm->setFocus();
+            setStatusLabel(status, "The two passwords don't match.", "err");
+            return;
+        }
+
+        /* Lock the form while the (synchronous) handshake runs and put it
+         * back on every exit path, success or failure. */
+        struct Busy {
+            QPointer<QPushButton> b; QString text;
+            Busy(QPushButton *btn, const QString &busyText) : b(btn), text(btn->text()) {
+                b->setEnabled(false); b->setText(busyText);
+                QApplication::setOverrideCursor(Qt::WaitCursor);
+            }
+            ~Busy() {
+                if (b) { b->setEnabled(true); b->setText(text); }
+                QApplication::restoreOverrideCursor();
+            }
+        } busy(actionBtn, showRegister ? QString::fromUtf8("Creating account\xE2\x80\xA6")
+                                       : QString::fromUtf8("Signing in\xE2\x80\xA6"));
 
         if (remChk->isChecked()) {
             DeviceConfig sc2; memcpy(&sc2, &sc, sizeof(sc2));
@@ -862,8 +999,18 @@ private:
             storage_save_config(&sc2);
         }
 
-        status->setText("Verifying server identity...");
+        setStatusLabel(status, QString::fromUtf8("Checking the relay's identity\xE2\x80\xA6"), "info");
         QApplication::processEvents();
+
+        /* Plain-English message for "we never got an answer". */
+        auto unreachable = [&]() {
+            setStatusLabel(status,
+                gTransport == Transport::Tor
+                    ? "Can't reach the SHROUD relay through Tor. Make sure Tor is running "
+                      "(Settings > Network), then try again."
+                    : "Can't reach the SHROUD relay. Check your internet connection and try again.",
+                "err");
+        };
 
         /* 0. Server identity check (TOFU pin). Triple-hybrid signature
               suite Ed25519 + ML-DSA-87 + SPHINCS+-256s. If the server's
@@ -880,20 +1027,29 @@ private:
                 "  • Someone is impersonating the server (MITM attack).\n\n"
                 "Refusing to authenticate. If the change is legitimate, delete\n"
                 + serverPinPath() + " and try again.");
-            status->setText("Server identity mismatch — refusing");
+            setStatusLabel(status, "Stopped: this relay's identity has changed since you last connected. "
+                                   "See the warning for what to do.", "err");
+            return;
+        }
+        if (idStatus == -2 && httpGet("/health").isEmpty()) {
+            unreachable();
             return;
         }
         if (idStatus == 1) {
-            status->setText("First connect: pinned server fingerprint " + serverFp.left(8) + "...");
+            setStatusLabel(status, "First connection to this relay: remembered its fingerprint "
+                                   + serverFp.left(8) + QString::fromUtf8("\xE2\x80\xA6"), "info");
             QApplication::processEvents();
         }
 
-        status->setText("Exchanging keys...");
+        setStatusLabel(status, QString::fromUtf8("Setting up a secure channel\xE2\x80\xA6"), "info");
         QApplication::processEvents();
 
         /* Generate our ECDH keypair — used by both v1 and v2 paths. */
         KeyPair kp = crypto_generate_keypair();
-        if (!kp.handle) { status->setText("Key generation FAILED"); return; }
+        if (!kp.handle) {
+            setStatusLabel(status, "Couldn't generate encryption keys on this PC. Try restarting SHROUD.", "err");
+            return;
+        }
         char *ourPubHex = crypto_hex_encode(kp.pub.data, kp.pub.len);
         QString pubHex = QString::fromUtf8(ourPubHex); free(ourPubHex);
 
@@ -983,14 +1139,16 @@ private:
             QString sessionId = jsonStr(keyResp, "session_id");
             QString serverPubBlobHex = jsonStr(keyResp, "server_public_key_blob");
             if (sessionId.isEmpty() || serverPubBlobHex.isEmpty()) {
-                status->setText("Key exchange failed"); crypto_free_keypair(&kp); return;
+                unreachable(); crypto_free_keypair(&kp); return;
             }
             BYTE serverBlob[512]; DWORD blobLen = 0;
             QByteArray blobHex = serverPubBlobHex.toUtf8();
             crypto_hex_decode(blobHex.constData(), serverBlob, &blobLen);
             BYTE authKey[32];
             if (!crypto_auth_derive_key(kp.handle, serverBlob, blobLen, authKey)) {
-                status->setText("Key derivation failed"); crypto_free_keypair(&kp); return;
+                setStatusLabel(status, "Setting up the secure channel failed (key derivation). "
+                                       "Please try again.", "err");
+                crypto_free_keypair(&kp); return;
             }
             /* v2.4.6 — pass existing device_id on login so the server
                reuses our row instead of issuing a new one every login. */
@@ -1070,21 +1228,23 @@ private:
                     }
                 }
             }
-            QString shown;
-            if (!errCode.isEmpty()) {
-                shown = "[" + errCode + "] " + (title.isEmpty() ? detailTxt : title);
-                if (!detailTxt.isEmpty() && !title.isEmpty()) shown += " — " + detailTxt;
-            } else if (!detailTxt.isEmpty()) {
-                shown = "Error: " + detailTxt;
-            } else {
-                shown = "Server rejected (no detail)";
-            }
-            status->setText(shown);
+            if (resp.isEmpty()) { unreachable(); return; }
+            QString shown = title.isEmpty() ? detailTxt : title;
+            if (!detailTxt.isEmpty() && !title.isEmpty() && detailTxt != title)
+                shown += QString::fromUtf8(" \xE2\x80\x94 ") + detailTxt;
+            if (shown.isEmpty()) shown = "the relay turned the request down without saying why.";
+            shown = (showRegister ? "Couldn't create the account: " : "Couldn't sign in: ") + shown;
+            /* Keep the stable code so a support request can quote it. */
+            if (!errCode.isEmpty()) shown += QString(" (code %1)").arg(errCode);
+            setStatusLabel(status, shown, "err");
         }
     };
 
     QObject::connect(actionBtn, &QPushButton::clicked, doAction);
     QObject::connect(pass, &QLineEdit::returnPressed, doAction);
+    QObject::connect(uname, &QLineEdit::returnPressed, [pass]() { pass->setFocus(); });
+    QObject::connect(confirm, &QLineEdit::returnPressed, doAction);
+    QObject::connect(dname, &QLineEdit::returnPressed, doAction);
     }
 
     /* ===============================================================
