@@ -2446,7 +2446,7 @@ private:
 
         QByteArray jb = jsonBody({
             {"sender_device_id", m_deviceId}, {"recipient_device_id", m_selectedRecip},
-            {"envelope", env}
+            {"envelope", envelopeString(env)}
         });
         QByteArray sendResp = httpPost("/api/v1/messages/send", jb, expHdr);
         /* Fast-path: server gates sends behind setting_get("maintenance_mode")
@@ -2462,6 +2462,16 @@ private:
         m_chatLog->append(QString("<b>[%1]</b> %2")
             .arg(m_username.toHtmlEscaped(), mdToHtml(body)));
         m_msgInput->clear();
+    }
+
+    /* /messages/send takes the envelope as a JSON *string* (the relay
+     * json.loads() it, and Android sends env.toString()). Posting it as
+     * a nested object made the relay answer 400 "Invalid message
+     * envelope format" to every legacy send, while the UI showed the
+     * message as sent. */
+    static QString envelopeString(const QVariantMap &env) {
+        return QString::fromUtf8(QJsonDocument(QJsonObject::fromVariantMap(env))
+                                 .toJson(QJsonDocument::Compact));
     }
 
     /* Fetch a sender device's public-key blob (hex) and derive the symmetric
@@ -2693,7 +2703,7 @@ private:
 
         QByteArray jb = jsonBody({
             {"sender_device_id", m_deviceId}, {"recipient_device_id", m_selectedRecip},
-            {"envelope", env}
+            {"envelope", envelopeString(env)}
         });
         QByteArray expHdr2;
         if (gDisappearEnabled && gDisappearSeconds > 0) {
