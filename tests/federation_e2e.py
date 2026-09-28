@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -87,6 +88,91 @@ def _wait_healthy(port: int, deadline_seconds: float = 30) -> bool:
         except Exception:
             time.sleep(0.5)
     return False
+
+
+def _write_operator_key(workdir: str, priv: Ed25519PrivateKey) -> str:
+    """Drop the relay's operator keypair where server.py looks for it
+    (next to its DB). Peers reject unsigned federation requests, so a
+    relay without one cannot gossip at all."""
+    pub_hex = priv.public_key().public_bytes_raw().hex()
+    with open(os.path.join(workdir, "operator_ed25519.json"), "w") as f:
+        json.dump({"priv_hex": priv.private_bytes_raw().hex(),
+                   "pub_hex": pub_hex}, f)
+    return pub_hex
+
+
+def _post_status(url: str, body: dict, headers: dict | None = None) -> int:
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json", **(headers or {})},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def _get_status(url: str) -> int:
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def _check_peer_auth(url: str, stranger: Ed25519PrivateKey) -> None:
+    """Unsigned, and signed-by-an-unpinned-key, federation calls must be
+    refused. state-event used to apply anything it was handed — an
+    admin_fingerprint.added with no password was a free admin login."""
+    evil = {"type": "shroud.fed.state-event", "event_id": "evil-" + os.urandom(4).hex(),
+            "ts": int(time.time()), "event_kind": "admin_fingerprint.added",
+            "payload": {"fingerprint_id": "evil"}}
+    st = _post_status(f"{url}/api/v1/federation/state-event", evil)
+    assert st == 401, f"unsigned state-event accepted: HTTP {st}"
+
+    from server.server import _federation_canonical
+    body = json.dumps(evil).encode()
+    ts = str(int(time.time()))
+    path = "/api/v1/federation/state-event"
+    sig = stranger.sign(_federation_canonical(b"req", "POST", path, ts, body))
+    req = urllib.request.Request(
+        url + path, data=body, method="POST",
+        headers={"Content-Type": "application/json",
+                 "X-Shroud-Fed-Key": stranger.public_key().public_bytes_raw().hex(),
+                 "X-Shroud-Fed-Ts": ts, "X-Shroud-Fed-Sig": sig.hex()})
+    try:
+        st = urllib.request.urlopen(req, timeout=10).status
+    except urllib.error.HTTPError as e:
+        st = e.code
+    assert st == 401, f"state-event signed by unpinned key accepted: HTTP {st}"
+
+    st = _get_status(f"{url}/api/v1/federation/state-events/since?since_ts=0")
+    assert st == 401, f"state-event export (password hashes) served unsigned: HTTP {st}"
+    st = _post_status(f"{url}/api/v1/federation/delete",
+                      {"type": "shroud.fed.delete", "message_id": "x"})
+    assert st == 401, f"unsigned delete accepted: HTTP {st}"
+
+
+def _check_signed_pull(url: str, puller: Ed25519PrivateKey, server_pub_hex: str) -> None:
+    """A pinned peer's signed pull is served, and the response carries a
+    signature by the serving relay's own key."""
+    from server.server import _federation_canonical
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    path = "/api/v1/federation/state-events/since?since_ts=0&limit=2000"
+    ts = str(int(time.time()))
+    sig = puller.sign(_federation_canonical(b"req", "GET", path, ts, b""))
+    req = urllib.request.Request(url + path, headers={
+        "X-Shroud-Fed-Key": puller.public_key().public_bytes_raw().hex(),
+        "X-Shroud-Fed-Ts": ts, "X-Shroud-Fed-Sig": sig.hex()})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = resp.read()
+        assert resp.headers["X-Shroud-Fed-Key"] == server_pub_hex
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(server_pub_hex)).verify(
+            bytes.fromhex(resp.headers["X-Shroud-Fed-Sig"]),
+            _federation_canonical(b"resp", "GET", path,
+                                  resp.headers["X-Shroud-Fed-Ts"], body))
+    json.loads(body)
 
 
 def _pre_approve_peer(workdir: str, peer_pubkey_hex: str) -> None:
@@ -178,6 +264,9 @@ def main() -> int:
     privB = Ed25519PrivateKey.generate()
     pubB_hex = privB.public_key().public_bytes_raw().hex()
 
+    _write_operator_key(tmpA, privA)
+    _write_operator_key(tmpB, privB)
+
     procA = procB = None
     try:
         print(f"booting relay A at {urlA} (cwd={tmpA})")
@@ -209,6 +298,12 @@ def main() -> int:
         assert any(p["pubkey_hex"] == pubB_hex for p in rosterA), "B not in A's roster"
         assert any(p["pubkey_hex"] == pubA_hex for p in rosterB), "A not in B's roster"
         print("peer rosters verified")
+
+        _check_peer_auth(urlA, Ed25519PrivateKey.generate())
+        print("unsigned / unpinned federation calls refused")
+
+        _check_signed_pull(urlA, privB, pubA_hex)
+        print("signed state-event pull verified against A's pinned key")
 
         # Send a message to relay A, addressed to a tag we'll poll on B
         recipient_priv = X25519PrivateKey.generate()

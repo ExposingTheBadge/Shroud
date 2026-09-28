@@ -1358,6 +1358,7 @@ async def srp_register(request: Request):
     username = norm_user(body.get("username") or "")
     if not username or len(username) < 3:
         raise HTTPException(400, "Username too short")
+    _enforce_ban(username, action="BAN_BLOCK_REGISTER")
     try:
         salt = bytes.fromhex(body["salt_hex"])
         verifier = int(body["verifier_hex"], 16)
@@ -1389,8 +1390,16 @@ async def srp_challenge(request: Request):
     row = db.execute("SELECT srp_salt, srp_verifier FROM users WHERE username=?", (username,)).fetchone()
     if not row or not row[0] or not row[1]:
         # Always return a synthetic challenge so an attacker can't enumerate users
+        # Same shape as a real challenge: an empty session_id here told
+        # anyone which usernames exist.
         salt = hashlib.sha256(b"SHROUD-decoy|" + username.encode()).digest()[:16]
-        return {"session_id": "", "salt_hex": salt.hex(), "B_hex": format(secrets.randbelow(srp6a.N), "x")}
+        sid = uuid.uuid4().hex
+        with SRP_SESSION_LOCK:
+            SRP_SESSIONS[sid] = {"decoy": True, "ts": time.time()}
+            if len(SRP_SESSIONS) > 500:
+                for k in sorted(SRP_SESSIONS, key=lambda k: SRP_SESSIONS[k]["ts"])[:200]:
+                    del SRP_SESSIONS[k]
+        return {"session_id": sid, "salt_hex": salt.hex(), "B_hex": format(secrets.randbelow(srp6a.N), "x")}
     salt = row[0]
     verifier = int.from_bytes(row[1], "big")
     sess = srp6a.ServerSession(username, salt, verifier)
@@ -1408,38 +1417,55 @@ async def srp_prove(request: Request):
     """Round 2: client posts { session_id, M1_hex }; server replies with
     { M2_hex } on success, 401 otherwise.
 
-    Self-destruct: SELF_DESTRUCT_THRESHOLD consecutive failed proofs
-    against the same user purges that user's entire account (devices,
-    messages, files, prekeys, friendships). A successful proof resets
-    the counter."""
+    Lockout: SELF_DESTRUCT_THRESHOLD consecutive failed proofs against
+    the same user lock SRP login for that user for SRP_LOCKOUT_SEC. A
+    successful proof resets the counter.
+
+    This used to wipe the account instead. A proof attempt needs only the
+    username, so anyone could erase any SRP account — on every relay, via
+    user.deleted — with five requests. Erasing an account is what
+    /api/v1/panic is for; failed guesses by strangers must not do it."""
     if not SRP_AVAILABLE:
         raise HTTPException(503, "SRP-6a unavailable")
     body = await request.json()
     sid = body.get("session_id", "")
     with SRP_SESSION_LOCK:
-        entry = SRP_SESSIONS.pop(sid, None)
+        # "__key__" rows hold derived session keys, not challenges.
+        entry = (SRP_SESSIONS.pop(sid, None)
+                 if sid and not sid.startswith("__key__") else None)
     if not entry:
         raise HTTPException(401, "Invalid or expired SRP session")
     try:
         M1 = bytes.fromhex(body["M1_hex"])
     except Exception:
         raise HTTPException(400, "Invalid M1_hex")
+    if entry.get("decoy"):
+        raise HTTPException(401, "SRP proof failed")
+    u = db.execute("SELECT id FROM users WHERE username=?", (entry["sess"].I,)).fetchone()
+    fail_key = f"srp_fail:{u[0]}" if u else ""
+    lock_key = f"srp_lock:{u[0]}" if u else ""
+    if u and float(setting_get(lock_key, "0") or 0) > time.time():
+        raise HTTPException(429, "Too many failed attempts; try again later")
     try:
         M2 = entry["sess"].derive_and_verify(entry["A"], M1)
     except ValueError:
-        username = entry["sess"].I
-        u = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
         if u:
-            setting_set(f"srp_fail:{u[0]}", str(int(setting_get(f"srp_fail:{u[0]}", "0")) + 1))
-            fails = int(setting_get(f"srp_fail:{u[0]}", "0"))
+            db.execute(
+                "INSERT INTO server_settings (key, value, updated_at) "
+                "VALUES (?, '1', datetime('now')) ON CONFLICT(key) DO UPDATE "
+                "SET value = CAST(value AS INTEGER) + 1, updated_at = datetime('now')",
+                (fail_key,))
+            db.commit()
+            fails = int(setting_get(fail_key, "0"))
             if fails >= SELF_DESTRUCT_THRESHOLD:
-                _wipe_user_cascade(u[0], reason=f"self_destruct@{fails}_fails")
-                setting_set(f"srp_fail:{u[0]}", "0")
+                setting_set(lock_key, str(time.time() + SRP_LOCKOUT_SEC))
+                setting_set(fail_key, "0")
+                audit_admin("srp", "srp_lockout", u[0], f"fails={fails}")
         raise HTTPException(401, "SRP proof failed")
+    _enforce_ban(entry["sess"].I)
     # Successful proof — reset the fail counter.
-    u = db.execute("SELECT id FROM users WHERE username=?", (entry["sess"].I,)).fetchone()
     if u:
-        setting_set(f"srp_fail:{u[0]}", "0")
+        setting_set(fail_key, "0")
     with SRP_SESSION_LOCK:
         SRP_SESSIONS["__key__" + sid] = {"K": entry["sess"].K, "ts": time.time()}
     return {"M2_hex": M2.hex(), "session_key_handle": sid}
@@ -1459,6 +1485,7 @@ async def srp_prove(request: Request):
 #     and the same hwid reaching SELF_DESTRUCT_THRESHOLD failures, the
 #     server purges every device matching that hwid.
 SELF_DESTRUCT_THRESHOLD = 5
+SRP_LOCKOUT_SEC = 15 * 60
 
 def _wipe_user_cascade(user_id: str, reason: str) -> dict:
     devs = [r[0] for r in db.execute("SELECT id FROM devices WHERE user_id=?", (user_id,)).fetchall()]
@@ -1620,6 +1647,20 @@ async def device_link_payload_get(link_id: str):
 # Stores only PUBLIC tree state per group: current epoch, member list,
 # and the public X25519 keys along the tree. Private path material lives
 # only on each member's device — the server is metadata-only.
+def _envelope_version(request: Request) -> int:
+    try:
+        return int(request.headers.get("X-Envelope-Version", "2") or 2)
+    except ValueError:
+        raise HTTPException(400, "X-Envelope-Version must be an integer")
+
+
+def _int_field(body: dict, key: str, default: int) -> int:
+    try:
+        return int(body.get(key, default))
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{key} must be an integer")
+
+
 @app.post("/api/v1/groups/{group_id}/treekem/init")
 async def treekem_init(group_id: str, request: Request):
     """Creator initializes a fresh tree state for the group. Body:
@@ -1627,17 +1668,27 @@ async def treekem_init(group_id: str, request: Request):
     if not TREEKEM_AVAILABLE:
         raise HTTPException(503, "TreeKEM unavailable")
     body = await request.json()
-    auth_by_device(body.get("device_id", ""))
-    if not db.execute("SELECT id FROM group_chats WHERE id=?", (group_id,)).fetchone():
+    device_id = body.get("device_id", "")
+    auth_by_device(device_id)
+    grp = db.execute("SELECT creator_device_id FROM group_chats WHERE id=?", (group_id,)).fetchone()
+    if not grp:
         raise HTTPException(404, "Group not found")
+    # Only the creator initializes, and only once. INSERT OR REPLACE from
+    # any device let a non-member swap in their own tree, or reset the
+    # epoch backwards and so sidestep commit's monotonic-epoch rule.
+    if device_id != grp[0]:
+        raise HTTPException(403, "Only the group creator can initialize the tree")
+    if db.execute("SELECT 1 FROM treekem_state WHERE group_id=?", (group_id,)).fetchone():
+        raise HTTPException(409, "Tree already initialized; use commit")
+    epoch, depth = _int_field(body, "epoch", 0), _int_field(body, "depth", 1)
     db.execute(
-        "INSERT OR REPLACE INTO treekem_state (group_id, epoch, depth, members_json, public_path_json) "
+        "INSERT INTO treekem_state (group_id, epoch, depth, members_json, public_path_json) "
         "VALUES (?,?,?,?,?)",
-        (group_id, int(body.get("epoch", 0)), int(body.get("depth", 1)),
+        (group_id, epoch, depth,
          json.dumps(body.get("members", [])), json.dumps(body.get("public_path", []))),
     )
     db.commit()
-    return {"ok": True, "epoch": body.get("epoch", 0)}
+    return {"ok": True, "epoch": epoch}
 
 
 @app.get("/api/v1/groups/{group_id}/treekem/state")
@@ -1667,16 +1718,21 @@ async def treekem_commit(group_id: str, request: Request):
     if not TREEKEM_AVAILABLE:
         raise HTTPException(503, "TreeKEM unavailable")
     body = await request.json()
-    auth_by_device(body.get("device_id", ""))
+    device_id = body.get("device_id", "")
+    auth_by_device(device_id)
+    if not _is_group_member(group_id, device_id):
+        raise HTTPException(403, "Not a member of this group")
     row = db.execute("SELECT epoch FROM treekem_state WHERE group_id=?", (group_id,)).fetchone()
-    cur_epoch = row[0] if row else -1
-    new_epoch = int(body.get("new_epoch", cur_epoch + 1))
+    if not row:
+        raise HTTPException(404, "No tree state for that group")
+    cur_epoch = row[0]
+    new_epoch = _int_field(body, "new_epoch", cur_epoch + 1)
     if new_epoch <= cur_epoch:
         raise HTTPException(409, f"Stale commit: new_epoch={new_epoch} cur_epoch={cur_epoch}")
     db.execute(
         "INSERT OR REPLACE INTO treekem_state (group_id, epoch, depth, members_json, public_path_json, updated_at) "
         "VALUES (?,?,?,?,?,datetime('now'))",
-        (group_id, new_epoch, int(body.get("depth", 1)),
+        (group_id, new_epoch, _int_field(body, "depth", 1),
          json.dumps(body.get("members", [])), json.dumps(body.get("public_path", []))),
     )
     db.commit()
@@ -1804,6 +1860,16 @@ async def encrypted_auth_v2(request: Request):
     is_register = payload.get("register", False)
     pub_key_hex = payload.get("public_key", "")
     existing_did = (payload.get("existing_device_id", "") or "").strip()
+    hwid_in = (payload.get("hwid", "") or "").strip()
+
+    _enforce_ban(username, hwid_in)
+    if platform not in ('windows','ios','android'):
+        raise HTTPException(400, "Invalid platform")
+    try:
+        pub_key_bytes = bytes.fromhex(pub_key_hex)
+        deserialize_public_key(pub_key_bytes)
+    except Exception:
+        raise HTTPException(400, "Invalid public key format")
 
     if is_register:
         if setting_get("registration_enabled", "1") != "1":
@@ -1830,13 +1896,6 @@ async def encrypted_auth_v2(request: Request):
         if not hmac.compare_digest(derived.hex(), user[1]): _raise_bad_credentials(username, "password mismatch", _auth_pw_shape(password))
 
     user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
-    if platform not in ('windows','ios','android'):
-        raise HTTPException(400, "Invalid platform")
-    try:
-        pub_key_bytes = bytes.fromhex(pub_key_hex)
-        deserialize_public_key(pub_key_bytes)
-    except Exception:
-        raise HTTPException(400, "Invalid public key format")
 
     will_reuse = False
     if existing_did and not is_register:
@@ -2025,12 +2084,12 @@ async def change_password(req: ChangePasswordRequest):
         (norm,)
     ).fetchone()
     if not user:
-        _raise_bad_credentials(username, "password mismatch", _auth_pw_shape(password))
+        _raise_bad_credentials(norm, "no such user")
 
     # Verify old password
     derived, _ = derive_key(req.old_password, user[2])
     if not hmac.compare_digest(derived.hex(), user[1]):
-        raise HTTPException(401, "Current password is incorrect")
+        _raise_bad_credentials(norm, "password mismatch", _auth_pw_shape(req.old_password))
 
     # Hash new password and update
     new_key, new_salt = derive_key(req.new_password)
@@ -2115,15 +2174,18 @@ async def encrypted_auth(request: Request):
     # v2.6.0: ban enforcement first, before any password / lookup work.
     # The ban's `reason` field is surfaced to the user when the admin
     # sets one; without a reason the response carries the catalogued title.
-    from crypto.errors import errors, raise_http
-    ban = _ban_lookup(username=username, hwid=hwid_in)
-    if ban:
-        audit_log(username, "BAN_BLOCK_AUTH",
-                  f"kind={ban['kind']} value={ban['value'][:16]} reason={ban.get('reason','')[:80]}")
-        err = (errors.B002_BANNED_HWID if ban["kind"] == "hwid"
-               else errors.B003_BANNED_IP if ban["kind"] == "ip"
-               else errors.B001_BANNED_USERNAME)
-        raise_http(err, extra={"reason": ban.get("reason") or ""})
+    _enforce_ban(username, hwid_in)
+
+    # Validate the device fields before creating anything: failing these
+    # after the INSERT left an account with no device, and the client's
+    # retry then got "username taken".
+    if platform not in ('windows','ios','android'):
+        raise HTTPException(400, "Invalid platform")
+    try:
+        pub_key_bytes = bytes.fromhex(pub_key_hex)
+        deserialize_public_key(pub_key_bytes)
+    except Exception:
+        raise HTTPException(400, "Invalid public key format")
 
     # Register user if new account
     if is_register:
@@ -2155,14 +2217,6 @@ async def encrypted_auth(request: Request):
 
     # Register / reuse device
     user = db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
-    if platform not in ('windows','ios','android'):
-        raise HTTPException(400, "Invalid platform")
-
-    try:
-        pub_key_bytes = bytes.fromhex(pub_key_hex)
-        deserialize_public_key(pub_key_bytes)
-    except Exception:
-        raise HTTPException(400, "Invalid public key format")
 
     # Only block on the per-user device cap when we're actually about to
     # create a new row. Reusing an existing device shouldn't trip it.
@@ -2187,7 +2241,10 @@ async def encrypted_auth(request: Request):
 @app.post("/api/v1/register")
 async def register_user(req: RegisterUserRequest):
     """Register a new user. Returns user ID."""
+    if setting_get("registration_enabled", "1") != "1":
+        raise HTTPException(403, "Registration is currently disabled")
     norm = norm_user(req.username)
+    _enforce_ban(norm, action="BAN_BLOCK_REGISTER")
     existing = db.execute("SELECT id FROM users WHERE username = ?", (norm,)).fetchone()
     if existing:
         _raise_username_taken()
@@ -2219,28 +2276,20 @@ async def register_device(req: RegisterDeviceRequest):
     # even probe whether their old password is still valid. The ban's
     # `reason` field is surfaced to the user when the admin sets one;
     # without a reason the response carries the generic catalogued title.
-    from crypto.errors import errors, raise_http
-    ban = _ban_lookup(username=norm, hwid=req.hwid or "")
-    if ban:
-        audit_log(req.username, "BAN_BLOCK_REGISTER",
-                  f"kind={ban['kind']} value={ban['value'][:16]} reason={ban.get('reason','')[:80]}")
-        err = (errors.B002_BANNED_HWID if ban["kind"] == "hwid"
-               else errors.B003_BANNED_IP if ban["kind"] == "ip"
-               else errors.B001_BANNED_USERNAME)
-        raise_http(err, extra={"reason": ban.get("reason") or ""})
+    _enforce_ban(norm, req.hwid or "", "BAN_BLOCK_REGISTER")
     user = db.execute(
         "SELECT id, password_hash, password_salt FROM users WHERE username = ?",
         (norm,)
     ).fetchone()
     if not user:
         print(f"[DEVICE REG] FAIL: username '{norm}' not found")
-        _raise_bad_credentials(username, "no such user")
+        _raise_bad_credentials(norm, "no such user")
 
     # Verify password
     derived, _ = derive_key(req.password, user[2])
     if not hmac.compare_digest(derived.hex(), user[1]):
         print(f"[DEVICE REG] FAIL: password mismatch for '{req.username}' (pw_len={len(req.password)})")
-        _raise_bad_credentials(username, "password mismatch", _auth_pw_shape(password))
+        _raise_bad_credentials(norm, "password mismatch", _auth_pw_shape(req.password))
 
     # Check platform
     if req.platform not in ('windows', 'ios', 'android'):
@@ -2368,12 +2417,17 @@ async def send_message(request: Request):
 
     try:
         envelope = json.loads(envelope_str)
+        # A JSON array satisfies `k in envelope` for string elements and
+        # then crashed on .get() below with a 500.
+        if not isinstance(envelope, dict):
+            raise ValueError("envelope must be an object")
         for k in ("nonce", "ciphertext", "sig", "sender", "ts"):
-            assert k in envelope
+            if k not in envelope:
+                raise ValueError(f"missing {k}")
+        env_ver = int(envelope.get("v", env_ver_hdr) or 1)
     except Exception:
         raise HTTPException(400, "Invalid message envelope format")
 
-    env_ver = int(envelope.get("v", env_ver_hdr) or 1)
     padded_size = 0
     if env_ver >= 2:
         try:
@@ -2529,7 +2583,7 @@ async def send_sealed_message(request: Request):
     _guard_maintenance()
     recipient_id = request.headers.get("X-Recipient-ID", "")
     expires_in = request.headers.get("X-Expires-In", "")
-    env_ver = int(request.headers.get("X-Envelope-Version", "2") or 2)
+    env_ver = _envelope_version(request)
 
     if not recipient_id:
         raise HTTPException(400, "Missing X-Recipient-ID")
@@ -2627,7 +2681,7 @@ async def send_anon_message(request: Request):
     if not sealed:
         raise HTTPException(400, "Empty sealed envelope")
 
-    env_ver = int(request.headers.get("X-Envelope-Version", "2") or 2)
+    env_ver = _envelope_version(request)
     if env_ver >= 2 and not is_valid_padded_size(len(sealed)):
         raise HTTPException(400, f"v2 envelope must hit padding bucket {PAD_BUCKETS}")
 
@@ -2790,6 +2844,49 @@ def _ensure_federation_schema() -> None:
 _ensure_federation_schema()
 
 
+def _scrub_leaked_admin_sessions() -> None:
+    """Earlier builds stored str(admin_session_row) as banned_by, putting
+    live shroud_sid values in the bans table and in ban.added state events.
+    Replace those strings in place, and log out every session that
+    leaked. Idempotent; a no-op once nothing matches."""
+    import re
+    leaked = set()
+    for (bb,) in db.execute(
+            "SELECT DISTINCT banned_by FROM bans WHERE banned_by LIKE '(%'"):
+        leaked.add(bb)
+    rows = db.execute(
+        "SELECT event_id, payload FROM federation_state_events "
+        "WHERE kind = 'ban.added' AND payload LIKE '%\"banned_by\":\"(%'").fetchall()
+    for event_id, payload in rows:
+        try:
+            p = json.loads(payload)
+        except ValueError:
+            continue
+        leaked.add(p.get("banned_by", ""))
+        p["banned_by"] = "admin"
+        db.execute("UPDATE federation_state_events SET payload = ? WHERE event_id = ?",
+                   (json.dumps(p, sort_keys=True, separators=(",", ":")), event_id))
+    if not leaked:
+        return
+    db.execute("UPDATE bans SET banned_by = 'admin' WHERE banned_by LIKE '(%'")
+    killed = 0
+    for bb in leaked:
+        m = re.match(r"\('([^']+)'", bb or "")
+        if m:
+            killed += db.execute(
+                "UPDATE admin_sessions SET logged_out = 1 WHERE id = ?",
+                (m.group(1),)).rowcount
+    db.commit()
+    print(f"[SHROUD] Scrubbed {len(leaked)} leaked admin session id(s) from "
+          f"bans / state events; logged out {killed} session(s)")
+
+
+try:
+    _scrub_leaked_admin_sessions()
+except sqlite3.Error as e:
+    print(f"[SHROUD] admin-session scrub skipped: {e}")
+
+
 def _federation_active_peers() -> list[dict]:
     """Return peer rows whose TTL hasn't elapsed."""
     now = int(time.time())
@@ -2945,8 +3042,8 @@ def _apply_state_event(kind: str, payload: dict) -> None:
         elif kind == "setting.changed":
             # Defense in depth: even if an older relay broadcast a
             # per-deployment setting, we silently drop it on receive.
-            _NEVER_MIRROR_KEYS = ("onion_only",)
-            if payload["key"] in _NEVER_MIRROR_KEYS:
+            # Only the toggles setting_set() itself gossips are accepted.
+            if payload["key"] not in ("registration_enabled", "maintenance_mode"):
                 return
             db.execute(
                 "INSERT INTO server_settings (key, value, updated_at) "
@@ -2959,6 +3056,7 @@ def _apply_state_event(kind: str, payload: dict) -> None:
             return
         db.commit()
     except Exception as e:
+        db.rollback()
         print(f"[FED] apply {kind} failed: {e}")
 
 
@@ -3017,6 +3115,151 @@ def _federation_outbox_delete(msg_id: str) -> None:
             })
 
 
+# ── Peer authentication ──────────────────────────────────────────────
+#
+# /announce was the only federation endpoint that checked anything. The
+# rest (broadcast, delete, state-event, state-events/since) answered
+# anyone who could reach the port, and state-event applies whatever it
+# is handed: admin_fingerprint.added with an empty password hash is a
+# passwordless admin login, password.changed takes over any account,
+# user.deleted erases one on every relay. /state-events/since meanwhile
+# handed out every user's password hash and salt to any caller.
+#
+# Every peer-to-peer request is now signed with the sending relay's
+# operator Ed25519 key, and the receiver accepts it only if that key is
+# already pinned in federation_peers — the same operator vetting that
+# gates /announce. The signature covers method, path+query, a timestamp
+# and the SHA-256 of the body; the timestamp bounds replay to a short
+# window, and every mutating endpoint is idempotent inside it (dedup by
+# message_id / event_id). /state-events/since responses are signed too,
+# so a MITM on the unverified TLS hop cannot splice events into a pull.
+
+FEDERATION_SIG_WINDOW = 300  # seconds of clock skew / replay we tolerate
+
+_FED_KEY: dict = {"loaded": False, "sk": None, "pub_hex": None}
+_FED_KEY_LOCK = threading.Lock()
+
+
+def _federation_key_path() -> str:
+    return os.path.join(
+        os.environ.get("SHROUD_DATA_DIR", os.path.dirname(DB_PATH)),
+        "operator_ed25519.json")
+
+
+def _federation_operator_key():
+    """(Ed25519PrivateKey, pub_hex) for this relay, or (None, None) if the
+    keypair is missing. Loaded once; the failure is logged once."""
+    with _FED_KEY_LOCK:
+        if not _FED_KEY["loaded"]:
+            _FED_KEY["loaded"] = True
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            path = _federation_key_path()
+            try:
+                with open(path) as f:
+                    kp = json.load(f)
+                _FED_KEY["sk"] = Ed25519PrivateKey.from_private_bytes(
+                    bytes.fromhex(kp["priv_hex"]))
+                _FED_KEY["pub_hex"] = kp["pub_hex"]
+            except (OSError, KeyError, ValueError) as e:
+                print(f"[SHROUD] Federation: cannot load operator key "
+                      f"{path} ({e}); peers will reject this relay's requests")
+        return _FED_KEY["sk"], _FED_KEY["pub_hex"]
+
+
+def _federation_canonical(kind: bytes, method: str, path_qs: str,
+                          ts: str, body: bytes) -> bytes:
+    return b"\n".join([
+        b"shroud.fed.v1", kind, method.upper().encode(), path_qs.encode(),
+        ts.encode(), hashlib.sha256(body).hexdigest().encode(),
+    ])
+
+
+def _federation_sign(kind: bytes, method: str, path_qs: str, body: bytes) -> dict:
+    sk, pub_hex = _federation_operator_key()
+    if sk is None:
+        return {}
+    ts = str(int(time.time()))
+    sig = sk.sign(_federation_canonical(kind, method, path_qs, ts, body))
+    return {"X-Shroud-Fed-Key": pub_hex, "X-Shroud-Fed-Ts": ts,
+            "X-Shroud-Fed-Sig": sig.hex()}
+
+
+def _federation_verify(headers, kind: bytes, method: str, path_qs: str,
+                       body: bytes, expect_pub_hex: str | None = None) -> str | None:
+    """Return the signer's pubkey hex if the signature is valid, fresh and
+    made by a pinned peer (or by expect_pub_hex exactly, when given)."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    pub_hex = (headers.get("X-Shroud-Fed-Key") or "").lower()
+    ts = headers.get("X-Shroud-Fed-Ts") or ""
+    sig_hex = headers.get("X-Shroud-Fed-Sig") or ""
+    try:
+        if abs(time.time() - int(ts)) > FEDERATION_SIG_WINDOW:
+            return None
+        if expect_pub_hex is not None:
+            if not hmac.compare_digest(pub_hex, expect_pub_hex.lower()):
+                return None
+        elif not db.execute("SELECT 1 FROM federation_peers WHERE pubkey_hex = ?",
+                            (pub_hex,)).fetchone():
+            return None
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_hex)).verify(
+            bytes.fromhex(sig_hex),
+            _federation_canonical(kind, method, path_qs, ts, body))
+    except Exception:
+        return None
+    return pub_hex
+
+
+def _path_qs(url) -> str:
+    return url.path + (("?" + url.query) if url.query else "")
+
+
+async def require_federation_peer(request: Request) -> str:
+    """FastAPI dependency: the caller must be a pinned, signing peer."""
+    if not FEDERATION_ENABLED:
+        raise HTTPException(404, "Not Found")
+    body = await request.body()
+    peer = _federation_verify(request.headers, b"req", request.method,
+                              _path_qs(request.url), body)
+    if peer is None:
+        raise HTTPException(401, "federation peer signature required")
+    return peer
+
+
+async def _federation_post(client, peer_endpoint: str, path: str, payload: dict):
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    headers = {"Content-Type": "application/json"}
+    headers.update(_federation_sign(b"req", "POST", path, body))
+    return await client.post(peer_endpoint.rstrip("/") + path,
+                             content=body, headers=headers)
+
+
+async def _federation_pull_state_events(client, peer: dict, since_ts: int) -> int:
+    """Pull and apply every state event `peer` has newer than since_ts.
+    Both the request and the response are signed; a response not signed
+    by that peer's pinned key is discarded. Returns the number applied;
+    raises on transport or verification failure."""
+    path = (f"/api/v1/federation/state-events/since"
+            f"?since_ts={since_ts}&limit=2000")
+    headers = _federation_sign(b"req", "GET", path, b"")
+    r = await client.get(peer["endpoint"].rstrip("/") + path, headers=headers)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    if _federation_verify(r.headers, b"resp", "GET", path, r.content,
+                          expect_pub_hex=peer["pubkey_hex"]) is None:
+        raise RuntimeError("response not signed by the pinned peer key")
+    applied = 0
+    for ev in r.json().get("events", []):
+        if _seen_state_event(ev["event_id"]):
+            continue
+        _apply_state_event(ev["event_kind"], ev["payload"])
+        _federation_outbox_state_event(
+            ev["event_kind"], ev["payload"],
+            event_id=ev["event_id"], ts=ev["ts"],
+        )
+        applied += 1
+    return applied
+
+
 async def _federation_state_sync_loop() -> None:
     """Pull state events from every peer at startup + every hour. Asks
     each peer for events newer than the latest origin_ts we already
@@ -3040,23 +3283,11 @@ async def _federation_state_sync_loop() -> None:
             async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
                 for p in peers:
                     try:
-                        r = await client.get(
-                            p["endpoint"].rstrip("/")
-                            + f"/api/v1/federation/state-events/since?since_ts={since_ts}&limit=2000"
-                        )
-                        if r.status_code != 200:
-                            continue
-                        body = r.json()
-                        for ev in body.get("events", []):
-                            if _seen_state_event(ev["event_id"]):
-                                continue
-                            _apply_state_event(ev["event_kind"], ev["payload"])
-                            _federation_outbox_state_event(
-                                ev["event_kind"], ev["payload"],
-                                event_id=ev["event_id"], ts=ev["ts"],
-                            )
-                            applied_total += 1
-                    except Exception:
+                        applied_total += await _federation_pull_state_events(
+                            client, p, since_ts)
+                    except Exception as e:                   # noqa: BLE001
+                        print(f"[SHROUD] Federation state-sync from "
+                              f"{p['endpoint']} failed: {e}")
                         continue
             if applied_total:
                 print(f"[SHROUD] Federation state-sync: applied {applied_total} new event(s)")
@@ -3098,7 +3329,6 @@ async def _federation_announce_loop() -> None:
     missing rather than looping uselessly.
     """
     import httpx
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     endpoint = os.environ.get("SHROUD_PUBLIC_ENDPOINT", "").strip().rstrip("/")
     if not endpoint:
@@ -3106,17 +3336,9 @@ async def _federation_announce_loop() -> None:
               "SHROUD_PUBLIC_ENDPOINT to this relay's public URL")
         return
 
-    key_path = os.path.join(
-        os.environ.get("SHROUD_DATA_DIR", os.path.dirname(DB_PATH)),
-        "operator_ed25519.json")
-    try:
-        with open(key_path) as f:
-            kp = json.load(f)
-        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(kp["priv_hex"]))
-        pub_hex = kp["pub_hex"]
-    except (OSError, KeyError, ValueError) as e:
-        print(f"[SHROUD] Federation keepalive disabled: cannot load "
-              f"{key_path} ({e})")
+    sk, pub_hex = _federation_operator_key()
+    if sk is None:
+        print("[SHROUD] Federation keepalive disabled: no operator key")
         return
 
     operator = os.environ.get("SHROUD_OPERATOR", "").strip() or endpoint
@@ -3199,7 +3421,7 @@ async def _federation_loop() -> None:
                 peer = item["peer"].rstrip("/")
                 path = _FEDERATION_PATHS.get(item["kind"], _FEDERATION_DEFAULT_PATH)
                 try:
-                    r = await client.post(peer + path, json=item["body"])
+                    r = await _federation_post(client, peer, path, item["body"])
                     if 200 <= r.status_code < 300:
                         continue
                     why = f"HTTP {r.status_code}"
@@ -3283,7 +3505,7 @@ class FedBroadcastIn(BaseModel):
 
 
 @app.post("/api/v1/federation/broadcast")
-async def federation_broadcast(req: FedBroadcastIn):
+async def federation_broadcast(req: FedBroadcastIn, _peer: str = Depends(require_federation_peer)):
     """Receive a gossipped envelope from a peer. Dedupe via
     federation_seen_ids; insert into anon_messages if new."""
     if req.type != "shroud.fed.broadcast":
@@ -3321,7 +3543,7 @@ class FedDeleteIn(BaseModel):
 
 
 @app.post("/api/v1/federation/delete")
-async def federation_delete(req: FedDeleteIn):
+async def federation_delete(req: FedDeleteIn, _peer: str = Depends(require_federation_peer)):
     """Receive a delete-on-deliver notice from a peer. Drop the row
     from our local anon_messages if present."""
     if req.type != "shroud.fed.delete":
@@ -3340,7 +3562,7 @@ class FedStateEventIn(BaseModel):
 
 
 @app.post("/api/v1/federation/state-event")
-async def federation_state_event(req: FedStateEventIn):
+async def federation_state_event(req: FedStateEventIn, _peer: str = Depends(require_federation_peer)):
     """Receive a state-event from a peer (user.created, ban.added,
     setting.changed, etc.). Dedup by event_id, apply locally, then
     re-broadcast to OUR peers so the event floods across the whole
@@ -3359,17 +3581,22 @@ async def federation_state_event(req: FedStateEventIn):
 
 
 @app.get("/api/v1/federation/state-events/since")
-async def federation_state_events_since(since_ts: int = 0, limit: int = 1000):
+async def federation_state_events_since(request: Request, since_ts: int = 0,
+                                        limit: int = 1000,
+                                        _peer: str = Depends(require_federation_peer)):
     """Bulk-export endpoint — a peer joining (or recovering from
     extended downtime) GETs this to replay everything it missed.
     Returns up to `limit` events ordered by origin_ts. The receiver
-    feeds each entry into POST /federation/state-event."""
+    feeds each entry into POST /federation/state-event.
+
+    Peer-only: the events carry password hashes and admin credentials.
+    The response is signed so the puller can check it came from us."""
     rows = db.execute(
         "SELECT event_id, origin_ts, kind, payload FROM federation_state_events "
         "WHERE origin_ts > ? ORDER BY origin_ts ASC LIMIT ?",
         (since_ts, max(1, min(limit, 5000))),
     ).fetchall()
-    return {
+    body = json.dumps({
         "count": len(rows),
         "events": [
             {
@@ -3380,7 +3607,9 @@ async def federation_state_events_since(since_ts: int = 0, limit: int = 1000):
             }
             for r in rows
         ],
-    }
+    }, separators=(",", ":")).encode()
+    headers = _federation_sign(b"resp", "GET", _path_qs(request.url), body)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 # ── Anonymous diagnostics reporting ──────────────────────────────────
@@ -3587,7 +3816,12 @@ async def get_contact_devices(req: ContactDevRequest):
     auth_by_device(req.device_id)
     contact = db.execute("SELECT id FROM users WHERE username=?", (norm_user(req.contact_username),)).fetchone()
     if not contact: raise HTTPException(404, "User not found")
-    devices = db.execute("SELECT id, device_name, platform, public_key FROM devices WHERE user_id=?",
+    # Most recently active device first. The Windows client sends to
+    # devices[0]; without an ORDER BY that was whichever row SQLite
+    # returned first -- usually the oldest -- so after a reinstall or a
+    # fresh sign-in, friends kept sending to a device nobody reads.
+    devices = db.execute("SELECT id, device_name, platform, public_key FROM devices WHERE user_id=? "
+                         "ORDER BY last_seen DESC, registered_at DESC",
                          (contact[0],)).fetchall()
     return {"devices": [{"id": d[0], "name": d[1], "platform": d[2], "public_key": d[3].hex()} for d in devices]}
 
@@ -3674,33 +3908,92 @@ async def friends_respond(request: Request):
     return {"status": new_status}
 
 # ── Group Chat ───────────────────────────────────────────────────────
+def _is_group_member(group_id: str, device_id: str) -> bool:
+    return db.execute("SELECT 1 FROM group_members WHERE group_id=? AND device_id=?",
+                      (group_id, device_id)).fetchone() is not None
+
+
+async def _json_object(request: Request) -> dict:
+    try:
+        body = json.loads(await request.body())
+    except ValueError:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected a JSON object")
+    return body
+
+
 @app.post("/api/v1/groups/create")
 async def create_group(request: Request):
-    body = json.loads(await request.body()); members = body["members"]
-    db.execute("INSERT INTO group_chats (id, name, creator_device_id) VALUES (?,?,?)", (uuid.uuid4().hex, body.get("group_name","Group Chat"), body["creator_device_id"]))
-    gid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
-    for m in members: db.execute("INSERT INTO group_members (group_id, device_id, encrypted_group_key) VALUES (?,?,?)", (gid, m["device_id"], m["encrypted_group_key"]))
-    db.commit()
+    body = await _json_object(request)
+    creator = body.get("creator_device_id", "")
+    auth_by_device(creator)
+    members = body.get("members") or []
+    if not isinstance(members, list) or not all(
+            isinstance(m, dict) and m.get("device_id") for m in members):
+        raise HTTPException(400, "members must be a list of {device_id, encrypted_group_key}")
+    # The group id is the uuid we insert. It used to be read back with
+    # last_insert_rowid() — an integer rowid, not the id — so the member
+    # inserts failed their foreign key and every create returned 500.
+    gid = uuid.uuid4().hex
+    try:
+        db.execute("INSERT INTO group_chats (id, name, creator_device_id) VALUES (?,?,?)",
+                   (gid, body.get("group_name", "Group Chat"), creator))
+        for m in members:
+            db.execute("INSERT OR IGNORE INTO group_members (group_id, device_id, encrypted_group_key) "
+                       "VALUES (?,?,?)", (gid, m["device_id"], m.get("encrypted_group_key", "")))
+        if not any(m["device_id"] == creator for m in members):
+            db.execute("INSERT OR IGNORE INTO group_members (group_id, device_id, encrypted_group_key) "
+                       "VALUES (?,?,?)", (gid, creator, ""))
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        raise HTTPException(400, "Unknown member device")
     return {"group_id": gid, "members": len(members)}
 
 @app.post("/api/v1/groups/send")
 async def send_group_message(request: Request):
-    body = json.loads(await request.body())
-    members = db.execute("SELECT device_id FROM group_members WHERE group_id=? AND device_id!=?", (body["group_id"], body["sender_device_id"])).fetchall()
-    mid = uuid.uuid4().hex; env = json.dumps(body["envelope"])
-    for m in members: db.execute("INSERT INTO messages (id, sender_device_id, recipient_device_id, envelope) VALUES (?,?,?,?)", (mid, body["sender_device_id"], m[0], env))
+    body = await _json_object(request)
+    sender = body.get("sender_device_id", "")
+    group_id = body.get("group_id", "")
+    auth_by_device(sender)
+    if not _is_group_member(group_id, sender):
+        raise HTTPException(403, "Not a member of this group")
+    members = db.execute("SELECT device_id FROM group_members WHERE group_id=? AND device_id!=?", (group_id, sender)).fetchall()
+    env = json.dumps(body.get("envelope"))
+    # One row per recipient, each with its own id: messages.id is the
+    # primary key, so sharing one id failed as soon as there were two.
+    for m in members:
+        db.execute("INSERT INTO messages (id, sender_device_id, recipient_device_id, envelope) VALUES (?,?,?,?)",
+                   (uuid.uuid4().hex, sender, m[0], env))
     db.commit()
     return {"delivered_to": len(members)}
 
 @app.post("/api/v1/groups/add")
 async def add_group_member(request: Request):
-    body = json.loads(await request.body())
-    if db.execute("SELECT 1 FROM group_members WHERE group_id=? AND device_id=?", (body["group_id"], body["device_id"])).fetchone(): raise HTTPException(409)
-    db.execute("INSERT INTO group_members (group_id, device_id, encrypted_group_key) VALUES (?,?,?)", (body["group_id"], body["device_id"], body["encrypted_group_key"])); db.commit()
+    """Add a device to a group. The caller (requester_device_id) must
+    already be a member; anyone could previously add themselves to any
+    group and start receiving its messages."""
+    body = await _json_object(request)
+    requester = body.get("requester_device_id", "")
+    group_id = body.get("group_id", "")
+    auth_by_device(requester)
+    if not _is_group_member(group_id, requester):
+        raise HTTPException(403, "Not a member of this group")
+    if _is_group_member(group_id, body.get("device_id", "")):
+        raise HTTPException(409)
+    try:
+        db.execute("INSERT INTO group_members (group_id, device_id, encrypted_group_key) VALUES (?,?,?)",
+                   (group_id, body.get("device_id", ""), body.get("encrypted_group_key", "")))
+        db.commit()
+    except sqlite3.IntegrityError:
+        db.rollback()
+        raise HTTPException(400, "Unknown device")
     return {"added": True}
 
 @app.get("/api/v1/groups/{device_id}")
 async def list_groups(device_id: str):
+    auth_by_device(device_id)
     g = db.execute("SELECT g.id, g.name, g.created_at FROM group_chats g JOIN group_members gm ON g.id=gm.group_id WHERE gm.device_id=?", (device_id,)).fetchall()
     return {"groups": [{"id": r[0], "name": r[1], "created_at": r[2]} for r in g]}
 
@@ -3881,7 +4174,9 @@ async def download_file(file_id: str, device_id: str = Header(default="", alias=
     if not row:
         raise HTTPException(404, "File not found")
 
-    if device_id and device_id not in (row[1], row[2]):
+    # A missing header used to skip this check entirely, so anyone with
+    # a file id could download the blob. Every client sends X-Device-ID.
+    if not device_id or device_id not in (row[1], row[2]):
         raise HTTPException(403, "Not authorized for this file")
 
     storage_path = os.path.join(FILE_DIR, row[0])
@@ -3938,14 +4233,17 @@ async def device_pubkey(device_id: str):
     return {"device_id": device_id, "public_key": row[0].hex() if isinstance(row[0], (bytes, bytearray)) else row[0]}
 
 @app.get("/api/v1/files/{file_id}/info")
-async def file_info(file_id: str):
-    """Get file metadata including exact expiry timestamp for countdown."""
+async def file_info(file_id: str, device_id: str = Header(default="", alias="X-Device-ID")):
+    """Get file metadata including exact expiry timestamp for countdown.
+    Same authorization as the download: only the sender or recipient."""
     row = db.execute(
         "SELECT id, sender_device_id, recipient_device_id, encrypted_metadata, original_size, encrypted_size, server_ts, downloaded, expires_at FROM file_transfers WHERE id=?",
         (file_id,)
     ).fetchone()
     if not row:
         raise HTTPException(404, "File not found")
+    if not device_id or device_id not in (row[1], row[2]):
+        raise HTTPException(403, "Not authorized for this file")
     return {
         "file_id": row[0],
         "sender_device_id": row[1],
@@ -4005,29 +4303,49 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # Rate limiting middleware (in-memory, per-IP)
 rate_limits = {}
+_RATE_LIMIT_PRUNE_AT = 50_000
+# 32-hex ids, uuids and other long hex/base64-ish path segments. Keying
+# on the raw path gave every /files/{id} and /devices/{id}/... its own
+# bucket, so the table grew without bound.
+import re as _re_rl
+_RL_ID_SEGMENT = _re_rl.compile(r"/[0-9A-Za-z_-]{16,}(?=/|$)")
+
+
+def _rate_limit_for(path: str, method: str) -> tuple[str, int, int]:
+    """(bucket, max_requests, window_seconds) for a request."""
+    if path == "/api/v1/admin/fingerprint-login":
+        return "admin-login", 6, 3600          # 6 attempts per hour
+    # Account / device creation only. This used to be a substring test,
+    # which put /devices/list, /devices/link/* and every other /devices
+    # route on the 20-per-hour registration budget.
+    if method == "POST" and path in ("/api/v1/register", "/api/v1/devices"):
+        return "register", 20, 3600
+    if path.startswith("/api/v1/files/upload"):
+        return "upload", 100, 3600
+    if path.startswith("/api/v1/messages/send"):
+        return "send", 500, 3600
+    return _RL_ID_SEGMENT.sub("/:id", path), 1000, 3600
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         ip = request.client.host if request.client else "unknown"
-        path = request.url.path
         now = time.time()
-        # Define limits per endpoint
-        if "/api/v1/admin/fingerprint-login" in path:
-            max_req, window = 6, 3600  # 6 attempts per hour
-        elif "/api/v1/register" in path or "/api/v1/devices" in path:
-            max_req, window = 20, 3600  # 20 registrations per hour
-        elif "/api/v1/files/upload" in path:
-            max_req, window = 100, 3600  # 100 uploads per hour
-        elif "/api/v1/messages/send" in path:
-            max_req, window = 500, 3600  # 500 messages per hour
-        else:
-            max_req, window = 1000, 3600  # default
-        key = f"{ip}:{path}"
-        entries = rate_limits.get(key, [])
-        entries = [t for t in entries if now - t < window]
+        bucket, max_req, window = _rate_limit_for(request.url.path, request.method)
+        key = f"{ip}:{bucket}"
+        entries = [t for t in rate_limits.get(key, ()) if now - t < window]
         if len(entries) >= max_req:
-            raise HTTPException(429, "Rate limit exceeded. Try again later.")
+            rate_limits[key] = entries
+            # An HTTPException raised from BaseHTTPMiddleware bypasses
+            # FastAPI's handler and surfaced as a 500, so clients could
+            # not tell a rate limit from a server fault.
+            return JSONResponse({"detail": "Rate limit exceeded. Try again later."},
+                                status_code=429, headers={"Retry-After": str(window)})
         entries.append(now)
         rate_limits[key] = entries
+        if len(rate_limits) > _RATE_LIMIT_PRUNE_AT:
+            for k in [k for k, v in rate_limits.items() if not v or now - v[-1] >= 3600]:
+                del rate_limits[k]
         return await call_next(request)
 
 app.add_middleware(RateLimitMiddleware)
@@ -4132,6 +4450,23 @@ class OnionOnlyMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 app.add_middleware(OnionOnlyMiddleware)
+
+
+@app.middleware("http")
+async def _rollback_on_unhandled_error(request, call_next):
+    """Handlers share one SQLite connection per thread and none of them
+    roll back on failure. A handler that wrote and then raised left its
+    transaction open, and the next unrelated request's commit() saved the
+    half-finished writes. Roll back whatever an unhandled exception left
+    behind on this thread before it is reported as a 500."""
+    try:
+        return await call_next(request)
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
 
 # ── Server settings (toggles) ────────────────────────────────────────
 # v2.4.5 — username normalization. The clients lowercase before submission,
@@ -4293,6 +4628,20 @@ def _admin_session_ip(session) -> str:
         return str(session[1] or "?")
     except (TypeError, IndexError, KeyError):
         return "?"
+
+def _admin_actor(session) -> str:
+    """Non-secret label for the admin behind a require_admin session.
+
+    banned_by used to be str(session): the whole admin_sessions row,
+    live shroud_sid cookie value included. That string went into the bans
+    table, the audit log and the ban.added state event, which is gossiped
+    to every peer. A one-way digest still tells two sessions apart in the
+    audit trail without being usable as a cookie."""
+    try:
+        sid = str(session[0])
+    except (TypeError, IndexError, KeyError):
+        return "admin"
+    return "admin:" + hashlib.sha256(sid.encode()).hexdigest()[:12]
 
 # v2.4.0 — CSRF gate for state-changing admin endpoints. Uses the cookie
 # pair set at login (shroud_csrf double-submit token). Admin GET routes
@@ -4754,6 +5103,23 @@ def _ban_lookup(username: str = "", hwid: str = "", ip: str = "") -> dict | None
     }
 
 
+def _enforce_ban(username: str = "", hwid: str = "", action: str = "BAN_BLOCK_AUTH") -> None:
+    """Refuse the request with the catalogued B00x error if the username
+    or hwid is banned. Every path that creates an account or a session
+    has to call this: /auth-v2, /register and /srp/* used to skip it, so
+    a banned user simply logged in through one of those."""
+    from crypto.errors import errors, raise_http
+    ban = _ban_lookup(username=username, hwid=hwid)
+    if not ban:
+        return
+    audit_log(username, action,
+              f"kind={ban['kind']} value={ban['value'][:16]} reason={ban.get('reason','')[:80]}")
+    err = (errors.B002_BANNED_HWID if ban["kind"] == "hwid"
+           else errors.B003_BANNED_IP if ban["kind"] == "ip"
+           else errors.B001_BANNED_USERNAME)
+    raise_http(err, extra={"reason": ban.get("reason") or ""})
+
+
 def _ban_username_and_hardware(username: str, reason: str, banned_by: str) -> dict:
     """Ban a username AND every HWID we've seen on devices linked to that
     user. Idempotent — INSERT OR IGNORE means re-banning is harmless."""
@@ -4815,7 +5181,7 @@ async def admin_bans_list(session=Depends(require_admin)):
 
 
 @app.post("/api/v1/admin/bans")
-async def admin_bans_add(request: Request, session=Depends(require_admin)):
+async def admin_bans_add(request: Request, session=Depends(require_admin_csrf)):
     """Add a ban. Body:
        { "username": "...", "reason": "...", "kind": "username" | "hwid" | "ip" }
        When kind=username (default), cascades the ban to every HWID seen
@@ -4828,7 +5194,7 @@ async def admin_bans_add(request: Request, session=Depends(require_admin)):
     reason = (body.get("reason") or "")[:500]
     if not value:
         raise HTTPException(400, "value (or username) is required")
-    banned_by = session.get("admin_id", "") if isinstance(session, dict) else str(session)
+    banned_by = _admin_actor(session)
 
     if kind == "username":
         result = _ban_username_and_hardware(value, reason, banned_by)
@@ -4930,7 +5296,7 @@ async def admin_backups_list(session=Depends(require_admin)):
 
 
 @app.post("/api/v1/admin/backups")
-async def admin_backups_take(request: Request, session=Depends(require_admin)):
+async def admin_backups_take(request: Request, session=Depends(require_admin_csrf)):
     """Take a fresh SQLite backup, encrypt with the supplied passphrase,
     catalog it. Body: { "passphrase": "...", "note": "..." }.
     Returns: { "id", "size_bytes" }."""
@@ -5005,7 +5371,7 @@ async def admin_backups_download(backup_id: str, session=Depends(require_admin))
 
 
 @app.delete("/api/v1/admin/backups/{backup_id}")
-async def admin_backups_delete(backup_id: str, session=Depends(require_admin)):
+async def admin_backups_delete(backup_id: str, session=Depends(require_admin_csrf)):
     row = db.execute(
         "SELECT file_name FROM relay_backups WHERE id=?", (backup_id,)
     ).fetchone()
@@ -5021,7 +5387,7 @@ async def admin_backups_delete(backup_id: str, session=Depends(require_admin)):
 
 
 @app.post("/api/v1/admin/backups/{backup_id}/restore")
-async def admin_backups_restore(backup_id: str, request: Request, session=Depends(require_admin)):
+async def admin_backups_restore(backup_id: str, request: Request, session=Depends(require_admin_csrf)):
     """Decrypt + stage. The relay's supervisor (systemd unit / docker
     wrapper) is responsible for noticing the staging file and performing
     the swap+restart. We do NOT replace the running shroud.db while
@@ -5073,7 +5439,7 @@ async def admin_backups_restore(backup_id: str, request: Request, session=Depend
 
 
 @app.delete("/api/v1/admin/bans/{ban_id}")
-async def admin_bans_remove(ban_id: int, session=Depends(require_admin)):
+async def admin_bans_remove(ban_id: int, session=Depends(require_admin_csrf)):
     """Lift a single ban row by id."""
     row = db.execute("SELECT kind, value FROM bans WHERE id=?", (ban_id,)).fetchone()
     if not row:
@@ -5083,13 +5449,13 @@ async def admin_bans_remove(ban_id: int, session=Depends(require_admin)):
     _federation_outbox_state_event("ban.removed", {
         "kind": row[0], "value": row[1],
     })
-    banned_by = session.get("admin_id", "") if isinstance(session, dict) else str(session)
+    banned_by = _admin_actor(session)
     audit_log(banned_by, "BAN_REMOVE", f"{row[0]}={row[1][:32]}")
     return {"ok": True, "id": ban_id}
 
 
 @app.post("/api/v1/admin/bans/lift-user")
-async def admin_bans_lift_user(request: Request, session=Depends(require_admin)):
+async def admin_bans_lift_user(request: Request, session=Depends(require_admin_csrf)):
     """Lift every ban row tied to a given origin_user — the inverse of the
     username-ban cascade. Removes the username row AND every HWID row that
     was banned because of that user."""
@@ -5111,13 +5477,13 @@ async def admin_bans_lift_user(request: Request, session=Depends(require_admin))
     db.commit()
     for kind, value in rows:
         _federation_outbox_state_event("ban.removed", {"kind": kind, "value": value})
-    banned_by = session.get("admin_id", "") if isinstance(session, dict) else str(session)
+    banned_by = _admin_actor(session)
     audit_log(banned_by, "BAN_LIFT_USER", f"username={username} rows={deleted}")
     return {"ok": True, "deleted": deleted, "username": username}
 
 
 @app.post("/api/v1/admin/federation/sync-now")
-async def admin_federation_force_sync(session=Depends(require_admin)):
+async def admin_federation_force_sync(session=Depends(require_admin_csrf)):
     """Force an immediate state-event pull from every peer instead of
     waiting for the hourly timer. Returns the per-peer applied counts
     so the dashboard can show progress."""
@@ -5134,23 +5500,7 @@ async def admin_federation_force_sync(session=Depends(require_admin)):
             applied = 0
             err = ""
             try:
-                r = await client.get(
-                    p["endpoint"].rstrip("/")
-                    + f"/api/v1/federation/state-events/since?since_ts={since_ts}&limit=2000"
-                )
-                if r.status_code == 200:
-                    body = r.json()
-                    for ev in body.get("events", []):
-                        if _seen_state_event(ev["event_id"]):
-                            continue
-                        _apply_state_event(ev["event_kind"], ev["payload"])
-                        _federation_outbox_state_event(
-                            ev["event_kind"], ev["payload"],
-                            event_id=ev["event_id"], ts=ev["ts"],
-                        )
-                        applied += 1
-                else:
-                    err = f"HTTP {r.status_code}"
+                applied = await _federation_pull_state_events(client, p, since_ts)
             except Exception as e:
                 err = str(e)[:200]
             out.append({"endpoint": p["endpoint"], "applied": applied, "error": err})

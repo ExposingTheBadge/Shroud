@@ -1,0 +1,103 @@
+name: Client builds
+
+# Compile the user-facing clients on every PR that touches them. The
+# signed release workflow only runs on manual dispatch, so a change that
+# broke the Windows or Android build used to go unnoticed until release
+# day. These jobs build unsigned artifacts that reviewers can download
+# and try; nothing here is signed or published.
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "clients/windows/**"
+      - "clients/android/**"
+      - "VERSION"
+      - ".github/workflows/client-builds.yml"
+  push:
+    branches: [master]
+    paths:
+      - "clients/windows/**"
+      - "clients/android/**"
+      - "VERSION"
+      - ".github/workflows/client-builds.yml"
+  workflow_dispatch:
+
+env:
+  QT_VERSION: 6.9.2
+
+jobs:
+  windows:
+    name: Windows client (unsigned)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: ""
+          cache: true
+
+      - name: Configure CMake
+        shell: pwsh
+        working-directory: clients/windows
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build shroud.exe
+        shell: pwsh
+        working-directory: clients/windows
+        run: cmake --build build --config Release
+
+      - name: Bundle Qt runtime
+        shell: pwsh
+        working-directory: clients/windows
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          Copy-Item "build/shroud.exe" "dist/shroud.exe"
+          windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw "dist/shroud.exe"
+
+      - name: Upload unsigned build
+        uses: actions/upload-artifact@v4
+        with:
+          name: shroud-windows-unsigned
+          path: clients/windows/dist
+          retention-days: 14
+
+  android:
+    name: Android client (debug)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build debug APK and run JVM unit tests
+        working-directory: clients/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug testDebugUnitTest
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: shroud-android-debug
+          path: clients/android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14

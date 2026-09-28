@@ -171,6 +171,10 @@ class TreeKEM:
         self.nodes = new_nodes
         self.members = self.members + [None] * slots
         self.depth = new_depth
+        # The copied leaves sit under blank internal nodes. Rebuild them
+        # before adding: otherwise the new left-subtree root stayed empty
+        # and the root secret depended on the new member alone.
+        self._recompute_internal()
         return self.add_member(member_id)
 
     def remove_member(self, member_id: str) -> bool:
@@ -214,6 +218,15 @@ def self_test() -> bool:
     tk.remove_member(alice)
     r3 = tk.root_secret()
     if r3 == r2: return False
+
+    # Growing a full tree must keep the existing members in the root:
+    # the rebuilt left subtree used to stay blank, leaving the root
+    # secret a function of the new member's leaf alone.
+    g = TreeKEM.init_group(["a", "b"])
+    g.add_member("c")
+    c_leaf = g.nodes[(1 << g.depth) - 1 + g.members.index("c")].secret
+    if g.nodes[1].secret is None: return False
+    if g.root_secret() == c_leaf: return False
 
     # grow past initial depth
     big = TreeKEM.init_group(["m0"])

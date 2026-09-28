@@ -277,7 +277,13 @@ static BOOL skip_message_keys(RatchetState *st, DWORD until) {
     if (!st->has_ckr) return TRUE;
     if (st->nr + RATCHET_MAX_SKIP < until) return FALSE;
     while (st->nr < until) {
-        if (st->skipped_count >= RATCHET_MAX_SKIP) return FALSE;
+        /* Full cache: evict the oldest key rather than refusing, which
+         * wedged the session for good once 256 keys had piled up. */
+        if (st->skipped_count >= RATCHET_MAX_SKIP) {
+            memmove(&st->skipped[0], &st->skipped[1],
+                    (RATCHET_MAX_SKIP - 1) * sizeof(st->skipped[0]));
+            st->skipped_count--;
+        }
         BYTE mk[32]; BYTE new_ckr[32];
         if (!kdf_ck(st->ckr, new_ckr, mk)) return FALSE;
         memcpy(st->ckr, new_ckr, 32);
@@ -365,21 +371,32 @@ BOOL ratchet_decrypt(RatchetState *st,
         }
     }
 
-    if (!st->has_dhr || memcmp(st->dhr_pub, dh_pub, 32) != 0) {
-        if (st->has_ckr) {
-            if (!skip_message_keys(st, pn)) { free(full_aad); return FALSE; }
-        }
-        if (!dh_ratchet_step(st, dh_pub)) { free(full_aad); return FALSE; }
-    }
-
-    if (!skip_message_keys(st, n)) { free(full_aad); return FALSE; }
-
+    /* Nothing may touch *st until the tag verifies: the header is not
+     * authenticated before then, so a replayed or forged envelope used to
+     * advance the chain or ratchet onto an attacker's DH key and break
+     * the session for every genuine message after it. Work on a copy
+     * and commit it only on success. Wire format is unchanged. */
+    RatchetState *w = (RatchetState*)malloc(sizeof(*w));
+    if (!w) { free(full_aad); return FALSE; }
+    memcpy(w, st, sizeof(*w));
+    BOOL ok = FALSE;
     BYTE mk[32]; BYTE new_ckr[32];
-    if (!kdf_ck(st->ckr, new_ckr, mk)) { free(full_aad); return FALSE; }
-    memcpy(st->ckr, new_ckr, 32);
-    st->nr++;
 
-    BOOL ok = aes_gcm_decrypt(mk, nonce, full_aad, full_aad_len, ct, ct_len, plain);
+    if (!w->has_dhr || memcmp(w->dhr_pub, dh_pub, 32) != 0) {
+        if (w->has_ckr && !skip_message_keys(w, pn)) goto done;
+        if (!dh_ratchet_step(w, dh_pub)) goto done;
+    }
+    if (!skip_message_keys(w, n)) goto done;
+    if (!kdf_ck(w->ckr, new_ckr, mk)) goto done;
+    memcpy(w->ckr, new_ckr, 32);
+    w->nr++;
+
+    ok = aes_gcm_decrypt(mk, nonce, full_aad, full_aad_len, ct, ct_len, plain);
+    if (ok) memcpy(st, w, sizeof(*st));
+done:
+    SecureZeroMemory(w, sizeof(*w));
+    SecureZeroMemory(mk, sizeof(mk));
+    free(w);
     free(full_aad);
     if (!ok) return FALSE;
     *plain_len_io = plain_len;

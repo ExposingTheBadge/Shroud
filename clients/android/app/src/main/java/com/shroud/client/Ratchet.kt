@@ -56,6 +56,16 @@ object Ratchet {
         var pn: Int = 0
         val skipped: MutableList<SkippedKey> = mutableListOf()
 
+        /** Working copy for decrypt; see [decrypt]. */
+        fun copy(): State = State().also { it.assignFrom(this) }
+
+        fun assignFrom(o: State) {
+            rk = o.rk; cks = o.cks; ckr = o.ckr
+            dhsPriv = o.dhsPriv; dhsPub = o.dhsPub; dhrPub = o.dhrPub
+            ns = o.ns; nr = o.nr; pn = o.pn
+            if (skipped !== o.skipped) { skipped.clear(); skipped.addAll(o.skipped) }
+        }
+
         /** Versioned blob layout for on-disk persistence. JSON-encoded for
          *  forward-compatibility — the Windows port uses fixed-size struct
          *  layout but Kotlin doesn't have that natural memcpy path, and JSON
@@ -273,6 +283,8 @@ object Ratchet {
             st.skipped += SkippedKey(st.dhrPub!!.copyOf(), st.nr, mk)
             st.nr += 1
         }
+        // Oldest first; bounds the cache however many chains are skipped.
+        while (st.skipped.size > 2 * MAX_SKIP) st.skipped.removeAt(0)
     }
 
     private fun dhRatchetStep(st: State, newDhrPub: ByteArray) {
@@ -298,23 +310,33 @@ object Ratchet {
         val header = envelope.copyOfRange(0, HEADER_LEN)
         val fullAad = header + aad
 
-        // Skipped-key cache
+        // Skipped-key cache. Remove the key only once it has decrypted:
+        // popping it first let a tampered copy of a delayed message
+        // destroy the key the genuine one needed.
         val skIx = st.skipped.indexOfFirst { it.n == n && it.dhrPub.contentEquals(dhPub) }
         if (skIx >= 0) {
-            val sk = st.skipped.removeAt(skIx)
-            return aesGcmDecrypt(sk.mk, nonce, fullAad, ct)
+            val pt = aesGcmDecrypt(st.skipped[skIx].mk, nonce, fullAad, ct)
+            st.skipped.removeAt(skIx)
+            return pt
         }
 
-        if (st.dhrPub == null || !st.dhrPub.contentEquals(dhPub)) {
-            if (st.ckr != null) skipMessageKeys(st, pn)
-            dhRatchetStep(st, dhPub)
+        // Nothing may change `st` until the tag verifies. The header is
+        // unauthenticated until then, so a replayed or forged envelope
+        // used to advance the chain or ratchet onto an attacker's DH key,
+        // breaking the session for every genuine message after it.
+        val w = st.copy()
+        if (w.dhrPub == null || !w.dhrPub.contentEquals(dhPub)) {
+            if (w.ckr != null) skipMessageKeys(w, pn)
+            dhRatchetStep(w, dhPub)
         }
-        skipMessageKeys(st, n)
+        skipMessageKeys(w, n)
 
-        val (newCkr, mk) = kdfCk(st.ckr!!)
-        st.ckr = newCkr
-        st.nr += 1
-        return aesGcmDecrypt(mk, nonce, fullAad, ct)
+        val (newCkr, mk) = kdfCk(w.ckr!!)
+        w.ckr = newCkr
+        w.nr += 1
+        val pt = aesGcmDecrypt(mk, nonce, fullAad, ct)
+        st.assignFrom(w)
+        return pt
     }
 }
 

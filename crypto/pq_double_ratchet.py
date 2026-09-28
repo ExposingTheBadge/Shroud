@@ -82,9 +82,11 @@ closed when oqs is missing.
 """
 from __future__ import annotations
 
+import copy
 import hmac
 import hashlib
 import os
+import struct
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Tuple
 
@@ -224,6 +226,15 @@ class PQRatchetState:
     pn: int = 0                                # prev-chain length
     skipped: Dict[Tuple[bytes, int], bytes] = field(default_factory=dict)
     # skipped[(dh_r_pub, idx)] = message_key cached for out-of-order
+    pending_kem_ct: bytes = b""
+    # KEM ciphertext for the peer that seeds our current sending chain.
+    # Sent in EVERY message of the chain, not only the first: if the
+    # first message was lost, the peer could not take the ratchet step,
+    # and the session broke permanently.
+
+
+MAX_SKIP = 1000           # max keys skipped within one chain
+MAX_SKIPPED_TOTAL = 2000  # absolute cap on the skipped-key cache
 
 
 @dataclass
@@ -273,7 +284,7 @@ def init_alice(root_key: bytes, bob_dh_pub: bytes, bob_kem_pub: bytes) -> PQRatc
         kem_r_pk=bob_kem_pub,
         ck_s=ck_s,
     )
-    st._first_kem_ct = kem_ct  # type: ignore[attr-defined]
+    st.pending_kem_ct = kem_ct
     return st
 
 
@@ -322,7 +333,7 @@ def _ratchet_step_recv(st: PQRatchetState, header: MessageHeader) -> None:
     kem_ct, ss = KEM.encap(st.kem_r_pk)
     okm = _hkdf(st.rk, shared_dh + ss, ROOT_INFO, 64)
     st.rk, st.ck_s = okm[:32], okm[32:]
-    st._pending_kem_ct = kem_ct  # type: ignore[attr-defined]
+    st.pending_kem_ct = kem_ct
 
 
 # ── Chain step + per-message AEAD ────────────────────────────────────
@@ -342,28 +353,45 @@ def encrypt(st: PQRatchetState, plaintext: bytes) -> Message:
     if st.ck_s is None:
         raise RuntimeError("ratchet not initialized for sending")
 
-    kem_ct = getattr(st, "_first_kem_ct", None) or getattr(st, "_pending_kem_ct", b"")
-    if hasattr(st, "_first_kem_ct"):
-        del st._first_kem_ct  # type: ignore[attr-defined]
-    if hasattr(st, "_pending_kem_ct"):
-        del st._pending_kem_ct  # type: ignore[attr-defined]
-
     st.ck_s, mk = _chain_step(st.ck_s)
-
-    nonce = os.urandom(12)
-    aead = AESGCM(mk)
-    ct_and_tag = aead.encrypt(nonce, plaintext, None)
-    ct, tag = ct_and_tag[:-16], ct_and_tag[-16:]
 
     header = MessageHeader(
         dh_pub=st.dh_s_pub,
         kem_pub=st.kem_s_pk,
-        kem_ct=kem_ct,
+        kem_ct=st.pending_kem_ct,
         pn=st.pn,
         n=st.n_s,
     )
+    nonce = os.urandom(12)
+    aead = AESGCM(mk)
+    ct_and_tag = aead.encrypt(nonce, plaintext, _header_ad(header))
+    ct, tag = ct_and_tag[:-16], ct_and_tag[-16:]
     st.n_s += 1
     return Message(header=header, ciphertext=ct, nonce=nonce, tag=tag)
+
+
+def _header_ad(h: MessageHeader) -> bytes:
+    """Canonical header encoding, bound into the AEAD as associated data.
+    Without it the header was unauthenticated: an attacker could swap
+    kem_pub for their own key, the receiver would encapsulate its next
+    chain to it, and the ML-KEM half of the ratchet was gone."""
+    def lp(b: bytes) -> bytes:
+        return struct.pack(">I", len(b)) + b
+    return (b"shroud-pq-hdr-v1" + lp(h.dh_pub) + lp(h.kem_pub) + lp(h.kem_ct)
+            + struct.pack(">II", h.pn, h.n))
+
+
+def _skip(st: PQRatchetState, until: int) -> None:
+    if st.ck_r is None:
+        return
+    if until - st.n_r > MAX_SKIP:
+        raise ValueError("too many skipped messages")
+    while st.n_r < until:
+        st.ck_r, mk = _chain_step(st.ck_r)
+        st.skipped[(st.dh_r_pub, st.n_r)] = mk
+        st.n_r += 1
+    while len(st.skipped) > MAX_SKIPPED_TOTAL:
+        del st.skipped[next(iter(st.skipped))]
 
 
 def decrypt(st: PQRatchetState, msg: Message) -> bytes:
@@ -371,25 +399,38 @@ def decrypt(st: PQRatchetState, msg: Message) -> bytes:
     first if the header advertises a new DH+KEM pair."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    if st.dh_r_pub is None or msg.header.dh_pub != st.dh_r_pub:
-        # New ratchet — advance.
-        _ratchet_step_recv(st, msg.header)
+    h = msg.header
+    ad = _header_ad(h)
 
-    if st.ck_r is None:
+    # Out-of-order delivery: a key cached when a later message arrived.
+    mk = st.skipped.get((h.dh_pub, h.n))
+    if mk is not None:
+        pt = AESGCM(mk).decrypt(msg.nonce, msg.ciphertext + msg.tag, ad)
+        del st.skipped[(h.dh_pub, h.n)]
+        return pt
+
+    # Everything below runs on a copy committed only once the tag has
+    # verified. The header is unauthenticated until then, so a forged or
+    # replayed message used to ratchet or advance the live state and
+    # break the session for every genuine message after it.
+    work = copy.copy(st)
+    work.skipped = dict(st.skipped)
+    if work.dh_r_pub is None or h.dh_pub != work.dh_r_pub:
+        # New ratchet: cache what is left of the old chain, then advance.
+        _skip(work, h.pn)
+        _ratchet_step_recv(work, h)
+
+    if work.ck_r is None:
         raise RuntimeError("ratchet not initialized for receiving")
+    if h.n < work.n_r:
+        raise ValueError("duplicate or expired message")
+    _skip(work, h.n)
+    work.ck_r, mk = _chain_step(work.ck_r)
+    work.n_r += 1
 
-    # Walk the receiving chain to the message index.
-    while st.n_r <= msg.header.n:
-        st.ck_r, mk = _chain_step(st.ck_r)
-        if st.n_r == msg.header.n:
-            break
-        st.n_r += 1
-    else:
-        raise RuntimeError("chain walk overflow")
-    st.n_r += 1
-
-    aead = AESGCM(mk)
-    return aead.decrypt(msg.nonce, msg.ciphertext + msg.tag, None)
+    pt = AESGCM(mk).decrypt(msg.nonce, msg.ciphertext + msg.tag, ad)
+    st.__dict__.update(work.__dict__)
+    return pt
 
 
 # ── Self-test ────────────────────────────────────────────────────────
@@ -428,6 +469,47 @@ def _self_test() -> None:
     # must have been distinct.
     assert m1.ciphertext != m2.ciphertext
     assert m2.ciphertext != m3.ciphertext
+
+    # The header is authenticated: swapping kem_pub for an attacker's key
+    # (which would strip the ML-KEM half of Bob's next chain) is refused,
+    # and the rejected message leaves the session untouched.
+    from dataclasses import replace
+    from cryptography.exceptions import InvalidTag
+    m4 = encrypt(bob, b"four")
+    evil_pk, _evil_sk = KEM.keygen()
+    forged = Message(header=replace(m4.header, kem_pub=evil_pk),
+                     ciphertext=m4.ciphertext, nonce=m4.nonce, tag=m4.tag)
+    try:
+        decrypt(alice, forged)
+        raise AssertionError("forged kem_pub accepted")
+    except InvalidTag:
+        pass
+    assert decrypt(alice, m4) == b"four"
+    try:                                     # replay
+        decrypt(alice, m4)
+        raise AssertionError("replay accepted")
+    except (InvalidTag, ValueError):
+        pass
+
+    # Out of order, and the first message of a new chain lost entirely:
+    # every message in the chain carries the KEM ciphertext.
+    m5 = encrypt(alice, b"five (lost)")
+    m6 = encrypt(alice, b"six")
+    m7 = encrypt(alice, b"seven")
+    assert m5.header.kem_ct and m6.header.kem_ct == m5.header.kem_ct
+    assert decrypt(bob, m7) == b"seven"
+    assert decrypt(bob, m6) == b"six"
+    assert decrypt(alice, encrypt(bob, b"still in sync")) == b"still in sync"
+
+    # A forged huge n must not walk the chain for hours.
+    m8 = encrypt(alice, b"eight")
+    try:
+        decrypt(bob, Message(header=replace(m8.header, n=2**32 - 1),
+                             ciphertext=m8.ciphertext, nonce=m8.nonce, tag=m8.tag))
+        raise AssertionError("forged n accepted")
+    except ValueError:
+        pass
+    assert decrypt(bob, m8) == b"eight"
 
     using_kem = "OqsKEM" if KEM is not _MockKEM else "MockKEM (DEV ONLY)"
     print(f"pq_double_ratchet self-tests passed (kem={using_kem}).")

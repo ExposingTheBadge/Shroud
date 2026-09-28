@@ -112,6 +112,19 @@ is a two-step manual ceremony:
        --keyfile ~/.config/shroud/operator.ed25519.json
    ```
 
+Every relay-to-relay request (`broadcast`, `delete`, `state-event`,
+`state-events/since`) is signed with the sending relay's operator key
+(`operator_ed25519.json` next to the DB, or in `SHROUD_DATA_DIR`) and is
+refused with 401 unless that key is pinned in the receiver's
+`federation_peers`. A relay without its operator key cannot gossip.
+The signed headers are `X-Shroud-Fed-Key`, `X-Shroud-Fed-Ts` and
+`X-Shroud-Fed-Sig`: Ed25519 over method, path+query, timestamp and the
+SHA-256 of the body, accepted within ±300 s. `state-events/since`
+responses are signed the same way and discarded by the puller if they
+are not signed by the peer's pinned key. Relays running older code send
+unsigned requests, so upgrade the whole federation together; the hourly
+state pull catches up anything dropped during the rollout.
+
 Until step 2 is complete on the existing relays, the new peer's
 `POST /federation/announce` returns 403. This is **intentional** — it
 prevents a hostile new operator from quietly attaching to the federation

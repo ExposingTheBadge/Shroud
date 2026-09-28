@@ -62,7 +62,7 @@ async function load() {
   const sib = d.siblings || [];
   $('siblingCountPill').textContent = sib.length;
   $('devSiblings').innerHTML = sib.map(s =>
-    '<tr class="clickable" onclick="location=\'/admin/device/' + esc(s.id) + '\'">' +
+    '<tr class="clickable" data-href="/admin/device/' + encodeURIComponent(s.id) + '">' +
     '<td>' + esc(s.id.substring(0, 16)) + '</td>' +
     '<td>' + esc(s.platform) + '</td>' +
     '<td>' + esc(s.name) + '</td>' +

@@ -1,5 +1,53 @@
 # SHROUD Changelog
 
+## Unreleased — security fixes
+
+**Upgrade every relay in the federation together.** Relay-to-relay
+calls are now signed, and relays running older code are refused.
+
+**Server / federation**
+
+- **Critical:** `/api/v1/federation/state-event` applied any event
+  from anyone. One unauthenticated POST could add a passwordless admin
+  login, reset any user's password, or delete any account on every
+  relay. `/state-events/since` served every user's password hash, and
+  `/broadcast` and `/delete` let anyone inject or drop queued
+  envelopes. Every peer call is now Ed25519-signed with the relay's
+  operator key and accepted only from pinned peers; pull responses are
+  signed too.
+- **Critical:** ban actions stored the admin's live session cookie in
+  `banned_by`, which was also gossiped in `ban.added` events. On
+  startup, leaked values are scrubbed and those sessions logged out.
+- Five failed SRP proofs, which need only the username, used to wipe
+  the account. They now lock SRP login for 15 minutes.
+- Bans are enforced on every login and register path
+  (`/auth-v2`, `/register` and `/srp/*` skipped them). `/register`
+  honours *registration disabled*.
+- The group endpoints work again: create always returned 500 and send
+  failed with more than one recipient. They, and TreeKEM init/commit,
+  now check membership.
+- File download and `/info` require the sender's or recipient's
+  `X-Device-ID`.
+- Various 500s are now the right 4xx: rate limits return 429, failed
+  `/devices` and `/change-password` credentials return EA003, and
+  malformed envelopes return 400. A failed request no longer leaves a
+  half-written transaction for the next request to commit.
+- Bans, backups and federation sync-now now require the CSRF token.
+
+**Crypto / clients**
+
+- Double Ratchet (Python, Android, Windows): a replayed or forged
+  message no longer breaks the session, because state is committed only
+  after the tag verifies. The wire format is unchanged.
+- PQ Double Ratchet: the header is authenticated, so the ML-KEM half
+  can no longer be stripped by swapping `kem_pub`. It tolerates lost
+  and reordered messages and bounds forged counters.
+- File transfer: file sizes whose hash trailer straddles two chunks
+  can now be received.
+- TreeKEM: growing a full tree keeps existing members in the root
+  secret.
+- Backup restore range-checks the KDF parameters stored in the file.
+
 ## v2.6 — Tor-default, federation dashboard, MSI, operator manifest v2
 
 **Windows**

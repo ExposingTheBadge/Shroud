@@ -2,5 +2,7 @@
   <qresource prefix="/">
     <file>shroud.png</file>
     <file>shroud.ico</file>
+    <file>check-light.png</file>
+    <file>check-dark.png</file>
   </qresource>
 </RCC>

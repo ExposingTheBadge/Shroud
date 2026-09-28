@@ -43,15 +43,14 @@ async function load() {
   const devs = d.devices || [];
   $('devCountPill').textContent = devs.length;
   $('userDevices').innerHTML = devs.map(dv =>
-    '<tr>' +
-    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' + esc(dv.id.substring(0, 16)) + '</td>' +
-    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' + esc(dv.platform) + '</td>' +
-    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' + esc(dv.name) + '</td>' +
-    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' + esc(dv.registered) + '</td>' +
-    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'">' + esc(dv.last_seen) + '</td>' +
-    '<td class="clickable" onclick="location=\'/admin/device/' + esc(dv.id) + '\'"><span class="tag ' + (dv.prekeys < 5 ? 'danger' : 'ok') + '">' +
-    dv.prekeys + '</span></td>' +
-    '<td><button class="danger" onclick="deleteDevice(\'' + esc(dv.id) + '\', \'' + esc(dv.name) + '\')">Delete</button></td>' +
+    '<tr class="clickable" data-href="/admin/device/' + encodeURIComponent(dv.id) + '">' +
+    '<td>' + esc(dv.id.substring(0, 16)) + '</td>' +
+    '<td>' + esc(dv.platform) + '</td>' +
+    '<td>' + esc(dv.name) + '</td>' +
+    '<td>' + esc(dv.registered) + '</td>' +
+    '<td>' + esc(dv.last_seen) + '</td>' +
+    '<td><span class="tag ' + (dv.prekeys < 5 ? 'danger' : 'ok') + '">' + dv.prekeys + '</span></td>' +
+    '<td><button class="danger" data-act="deleteDevice" data-args="' + esc(JSON.stringify([dv.id, dv.name])) + '">Delete</button></td>' +
     '</tr>'
   ).join('') || '<tr><td colspan="7" class="empty">no devices</td></tr>';
 
@@ -59,7 +58,7 @@ async function load() {
   const friends = d.friendships || [];
   $('friendCountPill').textContent = friends.length;
   $('userFriends').innerHTML = friends.map(f =>
-    '<tr class="clickable" onclick="location=\'/admin/user/' + esc(f.user_id) + '\'">' +
+    '<tr class="clickable" data-href="/admin/user/' + encodeURIComponent(f.user_id) + '">' +
     '<td>' + esc(f.username) + '</td>' +
     '<td>' + esc(f.direction) + '</td>' +
     '<td>' + esc(f.established) + '</td></tr>'
