@@ -3816,7 +3816,12 @@ async def get_contact_devices(req: ContactDevRequest):
     auth_by_device(req.device_id)
     contact = db.execute("SELECT id FROM users WHERE username=?", (norm_user(req.contact_username),)).fetchone()
     if not contact: raise HTTPException(404, "User not found")
-    devices = db.execute("SELECT id, device_name, platform, public_key FROM devices WHERE user_id=?",
+    # Most recently active device first. The Windows client sends to
+    # devices[0]; without an ORDER BY that was whichever row SQLite
+    # returned first -- usually the oldest -- so after a reinstall or a
+    # fresh sign-in, friends kept sending to a device nobody reads.
+    devices = db.execute("SELECT id, device_name, platform, public_key FROM devices WHERE user_id=? "
+                         "ORDER BY last_seen DESC, registered_at DESC",
                          (contact[0],)).fetchall()
     return {"devices": [{"id": d[0], "name": d[1], "platform": d[2], "public_key": d[3].hex()} for d in devices]}
 
