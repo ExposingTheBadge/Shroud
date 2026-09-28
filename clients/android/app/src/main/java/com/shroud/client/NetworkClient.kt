@@ -10,14 +10,93 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 object NetworkClient {
-    private const val ENC = "2f 3c 3b 23 6e 63 66 7f 7e 77 66 7e 6a 61 62 78 7f 7f 69 79 77 66 6e 79 71 7a 7f 74"
-    private val BASE: String by lazy { decode(ENC) }
-    private fun decode(hex: String): String {
-        val key = "SHROUD"
-        val bytes = hex.split(" ").map { it.toInt(16) }.toIntArray()
-        for (i in bytes.indices) bytes[i] = bytes[i] xor key[i % key.length].code
-        return String(bytes.map { it.toChar() }.toCharArray())
+    /** The relay every request goes to.
+     *
+     *  This used to be an XOR-scrambled string decoded with the key
+     *  "SHROUD". The bytes had been scrambled with the project's old name,
+     *  GHOSTLINK, so after the rename they decoded to garbage: every
+     *  request failed with a malformed URL and the app could not reach
+     *  any server. Even correctly decoded they pointed at a long-retired
+     *  host over plain HTTP. A plain constant can't silently rot like that. */
+    const val RELAY = "https://173.245.244.180:58443"
+    private val BASE: String get() = RELAY
+
+    /* ── TLS: system trust, else trust-on-first-use pinning ──────────
+     * The relay serves a self-signed certificate, which the platform
+     * trust store rejects. A certificate that the system trusts is
+     * accepted as normal. Otherwise the first certificate seen for a
+     * host:port is pinned (SHA-256 of its DER encoding), and any later
+     * certificate for that host:port that differs is refused, the same
+     * trust-on-first-use model ServerPin applies to the relay's signing
+     * identity. */
+    private var pinDir: java.io.File? = null
+
+    /** Called once from MainActivity.onCreate so pins persist. */
+    fun init(ctx: android.content.Context) {
+        pinDir = java.io.File(ctx.filesDir, "tls_pins").apply { mkdirs() }
     }
+
+    class CertificateChangedException(hostPort: String) : java.security.cert.CertificateException(
+        "The relay at $hostPort is presenting a different TLS certificate than before. " +
+        "This can mean someone is intercepting the connection. Refusing to connect.")
+
+    private fun pinFile(hostPort: String): java.io.File? =
+        pinDir?.let { java.io.File(it, hostPort.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".pin") }
+
+    private val systemTrust: javax.net.ssl.X509TrustManager by lazy {
+        val tmf = javax.net.ssl.TrustManagerFactory.getInstance(javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm())
+        tmf.init(null as java.security.KeyStore?)
+        tmf.trustManagers.filterIsInstance<javax.net.ssl.X509TrustManager>().first()
+    }
+
+    private class PinningTrustManager(private val hostPort: String) : javax.net.ssl.X509TrustManager {
+        var pinnedMatch = false
+        override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {
+            throw java.security.cert.CertificateException("client certificates are not used")
+        }
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+        override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {
+            try { systemTrust.checkServerTrusted(chain, authType); return } catch (_: java.security.cert.CertificateException) {}
+            val fp = java.security.MessageDigest.getInstance("SHA-256").digest(chain[0].encoded)
+                .joinToString("") { "%02x".format(it) }
+            val f = pinFile(hostPort) ?: throw java.security.cert.CertificateException("TLS pin store not initialised")
+            val pinned = if (f.exists()) f.readText().trim() else ""
+            if (pinned.isEmpty()) f.writeText(fp)
+            else if (pinned != fp) throw CertificateChangedException(hostPort)
+            pinnedMatch = true
+        }
+    }
+
+    /** Open a connection with the TLS policy above applied. */
+    fun open(url: URL): HttpURLConnection {
+        val conn = url.openConnection() as HttpURLConnection
+        if (conn is javax.net.ssl.HttpsURLConnection) {
+            val hostPort = url.host + ":" + (if (url.port > 0) url.port else url.defaultPort)
+            val tm = PinningTrustManager(hostPort)
+            val ctx = javax.net.ssl.SSLContext.getInstance("TLS")
+            ctx.init(null, arrayOf<javax.net.ssl.TrustManager>(tm), java.security.SecureRandom())
+            conn.sslSocketFactory = ctx.socketFactory
+            val defaultVerifier = javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier()
+            // A pinned self-signed certificate rarely names the IP it is
+            // served from; the pin already binds it to this host:port.
+            conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { host, session ->
+                tm.pinnedMatch || defaultVerifier.verify(host, session)
+            }
+        }
+        return conn
+    }
+
+    /** A readable reason for a failed request, for the UI. */
+    fun describe(e: Throwable): String = when {
+        generateSequence(e) { it.cause }.any { it is CertificateChangedException } ->
+            generateSequence(e) { it.cause }.first { it is CertificateChangedException }.message ?: "Certificate changed"
+        e is java.net.UnknownHostException || e is java.net.ConnectException || e is java.net.NoRouteToHostException ->
+            "Can't reach the relay. Check your internet connection."
+        e is java.net.SocketTimeoutException -> "The relay took too long to answer. Try again."
+        e is javax.net.ssl.SSLException -> "Couldn't set up a secure connection to the relay."
+        else -> e.message ?: "Something went wrong"
+    }
+
     private const val TIMEOUT = 10_000
 
     suspend fun post(path: String, body: JSONObject): JSONObject =
@@ -28,7 +107,7 @@ object NetworkClient {
     suspend fun post(path: String, body: JSONObject,
                      headers: Map<String, String>): JSONObject = withContext(Dispatchers.IO) {
         val url = URL(BASE + path)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = open(url).apply {
             requestMethod = "POST"
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Connection", "close")
@@ -55,7 +134,7 @@ object NetworkClient {
 
     suspend fun get(path: String): JSONObject = withContext(Dispatchers.IO) {
         val url = URL(BASE + path)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = open(url).apply {
             requestMethod = "GET"
             connectTimeout = TIMEOUT
             readTimeout = TIMEOUT
@@ -74,7 +153,7 @@ object NetworkClient {
         metadataJson: String,
     ): JSONObject = withContext(Dispatchers.IO) {
         val url = URL(BASE + path)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = open(url).apply {
             requestMethod = "POST"
             setRequestProperty("Content-Type", "application/octet-stream")
             setRequestProperty("X-Device-ID", senderId)
@@ -99,7 +178,7 @@ object NetworkClient {
     suspend fun postBytes(path: String, bytes: ByteArray,
                           contentType: String = "application/octet-stream"): JSONObject = withContext(Dispatchers.IO) {
         val url = URL(BASE + path)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = open(url).apply {
             requestMethod = "POST"
             setRequestProperty("Content-Type", contentType)
             connectTimeout = TIMEOUT
@@ -122,7 +201,7 @@ object NetworkClient {
      *  requires X-Device-ID so the server can authorize the download. */
     suspend fun getBytes(path: String, headers: Map<String, String>): ByteArray? = withContext(Dispatchers.IO) {
         val url = URL(BASE + path)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = open(url).apply {
             requestMethod = "GET"
             for ((k, v) in headers) setRequestProperty(k, v)
             connectTimeout = TIMEOUT
@@ -142,7 +221,7 @@ object NetworkClient {
     /** DELETE a file by id. Server requires X-Device-ID for authorization. */
     suspend fun deleteFile(path: String, deviceId: String): Boolean = withContext(Dispatchers.IO) {
         val url = URL(BASE + path)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = open(url).apply {
             requestMethod = "DELETE"
             setRequestProperty("X-Device-ID", deviceId)
             connectTimeout = TIMEOUT
@@ -192,7 +271,7 @@ object NetworkClient {
         System.arraycopy(sealed, 0, padded, 0, sealed.size)
 
         val url = URL(BASE + "/api/v1/messages/send-anon")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = open(url).apply {
             requestMethod = "POST"
             setRequestProperty("Content-Type", "application/octet-stream")
             setRequestProperty("X-Routing-Tag", tag.joinToString("") { "%02x".format(it) })
@@ -234,7 +313,7 @@ object NetworkClient {
             val payload = JSONObject().apply { put("tags", tagsHex) }.toString().toByteArray()
 
             val url = URL(BASE + "/api/v1/messages/fetch-anon")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
+            val conn = open(url).apply {
                 requestMethod = "POST"
                 setRequestProperty("Content-Type", "application/json")
                 connectTimeout = TIMEOUT
