@@ -3017,6 +3017,151 @@ def _federation_outbox_delete(msg_id: str) -> None:
             })
 
 
+# ── Peer authentication ──────────────────────────────────────────────
+#
+# /announce was the only federation endpoint that checked anything. The
+# rest (broadcast, delete, state-event, state-events/since) answered
+# anyone who could reach the port, and state-event applies whatever it
+# is handed: admin_fingerprint.added with an empty password hash is a
+# passwordless admin login, password.changed takes over any account,
+# user.deleted erases one on every relay. /state-events/since meanwhile
+# handed out every user's password hash and salt to any caller.
+#
+# Every peer-to-peer request is now signed with the sending relay's
+# operator Ed25519 key, and the receiver accepts it only if that key is
+# already pinned in federation_peers — the same operator vetting that
+# gates /announce. The signature covers method, path+query, a timestamp
+# and the SHA-256 of the body; the timestamp bounds replay to a short
+# window, and every mutating endpoint is idempotent inside it (dedup by
+# message_id / event_id). /state-events/since responses are signed too,
+# so a MITM on the unverified TLS hop cannot splice events into a pull.
+
+FEDERATION_SIG_WINDOW = 300  # seconds of clock skew / replay we tolerate
+
+_FED_KEY: dict = {"loaded": False, "sk": None, "pub_hex": None}
+_FED_KEY_LOCK = threading.Lock()
+
+
+def _federation_key_path() -> str:
+    return os.path.join(
+        os.environ.get("SHROUD_DATA_DIR", os.path.dirname(DB_PATH)),
+        "operator_ed25519.json")
+
+
+def _federation_operator_key():
+    """(Ed25519PrivateKey, pub_hex) for this relay, or (None, None) if the
+    keypair is missing. Loaded once; the failure is logged once."""
+    with _FED_KEY_LOCK:
+        if not _FED_KEY["loaded"]:
+            _FED_KEY["loaded"] = True
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            path = _federation_key_path()
+            try:
+                with open(path) as f:
+                    kp = json.load(f)
+                _FED_KEY["sk"] = Ed25519PrivateKey.from_private_bytes(
+                    bytes.fromhex(kp["priv_hex"]))
+                _FED_KEY["pub_hex"] = kp["pub_hex"]
+            except (OSError, KeyError, ValueError) as e:
+                print(f"[SHROUD] Federation: cannot load operator key "
+                      f"{path} ({e}); peers will reject this relay's requests")
+        return _FED_KEY["sk"], _FED_KEY["pub_hex"]
+
+
+def _federation_canonical(kind: bytes, method: str, path_qs: str,
+                          ts: str, body: bytes) -> bytes:
+    return b"\n".join([
+        b"shroud.fed.v1", kind, method.upper().encode(), path_qs.encode(),
+        ts.encode(), hashlib.sha256(body).hexdigest().encode(),
+    ])
+
+
+def _federation_sign(kind: bytes, method: str, path_qs: str, body: bytes) -> dict:
+    sk, pub_hex = _federation_operator_key()
+    if sk is None:
+        return {}
+    ts = str(int(time.time()))
+    sig = sk.sign(_federation_canonical(kind, method, path_qs, ts, body))
+    return {"X-Shroud-Fed-Key": pub_hex, "X-Shroud-Fed-Ts": ts,
+            "X-Shroud-Fed-Sig": sig.hex()}
+
+
+def _federation_verify(headers, kind: bytes, method: str, path_qs: str,
+                       body: bytes, expect_pub_hex: str | None = None) -> str | None:
+    """Return the signer's pubkey hex if the signature is valid, fresh and
+    made by a pinned peer (or by expect_pub_hex exactly, when given)."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    pub_hex = (headers.get("X-Shroud-Fed-Key") or "").lower()
+    ts = headers.get("X-Shroud-Fed-Ts") or ""
+    sig_hex = headers.get("X-Shroud-Fed-Sig") or ""
+    try:
+        if abs(time.time() - int(ts)) > FEDERATION_SIG_WINDOW:
+            return None
+        if expect_pub_hex is not None:
+            if not hmac.compare_digest(pub_hex, expect_pub_hex.lower()):
+                return None
+        elif not db.execute("SELECT 1 FROM federation_peers WHERE pubkey_hex = ?",
+                            (pub_hex,)).fetchone():
+            return None
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_hex)).verify(
+            bytes.fromhex(sig_hex),
+            _federation_canonical(kind, method, path_qs, ts, body))
+    except Exception:
+        return None
+    return pub_hex
+
+
+def _path_qs(url) -> str:
+    return url.path + (("?" + url.query) if url.query else "")
+
+
+async def require_federation_peer(request: Request) -> str:
+    """FastAPI dependency: the caller must be a pinned, signing peer."""
+    if not FEDERATION_ENABLED:
+        raise HTTPException(404, "Not Found")
+    body = await request.body()
+    peer = _federation_verify(request.headers, b"req", request.method,
+                              _path_qs(request.url), body)
+    if peer is None:
+        raise HTTPException(401, "federation peer signature required")
+    return peer
+
+
+async def _federation_post(client, peer_endpoint: str, path: str, payload: dict):
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    headers = {"Content-Type": "application/json"}
+    headers.update(_federation_sign(b"req", "POST", path, body))
+    return await client.post(peer_endpoint.rstrip("/") + path,
+                             content=body, headers=headers)
+
+
+async def _federation_pull_state_events(client, peer: dict, since_ts: int) -> int:
+    """Pull and apply every state event `peer` has newer than since_ts.
+    Both the request and the response are signed; a response not signed
+    by that peer's pinned key is discarded. Returns the number applied;
+    raises on transport or verification failure."""
+    path = (f"/api/v1/federation/state-events/since"
+            f"?since_ts={since_ts}&limit=2000")
+    headers = _federation_sign(b"req", "GET", path, b"")
+    r = await client.get(peer["endpoint"].rstrip("/") + path, headers=headers)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    if _federation_verify(r.headers, b"resp", "GET", path, r.content,
+                          expect_pub_hex=peer["pubkey_hex"]) is None:
+        raise RuntimeError("response not signed by the pinned peer key")
+    applied = 0
+    for ev in r.json().get("events", []):
+        if _seen_state_event(ev["event_id"]):
+            continue
+        _apply_state_event(ev["event_kind"], ev["payload"])
+        _federation_outbox_state_event(
+            ev["event_kind"], ev["payload"],
+            event_id=ev["event_id"], ts=ev["ts"],
+        )
+        applied += 1
+    return applied
+
+
 async def _federation_state_sync_loop() -> None:
     """Pull state events from every peer at startup + every hour. Asks
     each peer for events newer than the latest origin_ts we already
@@ -3040,23 +3185,11 @@ async def _federation_state_sync_loop() -> None:
             async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
                 for p in peers:
                     try:
-                        r = await client.get(
-                            p["endpoint"].rstrip("/")
-                            + f"/api/v1/federation/state-events/since?since_ts={since_ts}&limit=2000"
-                        )
-                        if r.status_code != 200:
-                            continue
-                        body = r.json()
-                        for ev in body.get("events", []):
-                            if _seen_state_event(ev["event_id"]):
-                                continue
-                            _apply_state_event(ev["event_kind"], ev["payload"])
-                            _federation_outbox_state_event(
-                                ev["event_kind"], ev["payload"],
-                                event_id=ev["event_id"], ts=ev["ts"],
-                            )
-                            applied_total += 1
-                    except Exception:
+                        applied_total += await _federation_pull_state_events(
+                            client, p, since_ts)
+                    except Exception as e:                   # noqa: BLE001
+                        print(f"[SHROUD] Federation state-sync from "
+                              f"{p['endpoint']} failed: {e}")
                         continue
             if applied_total:
                 print(f"[SHROUD] Federation state-sync: applied {applied_total} new event(s)")
@@ -3098,7 +3231,6 @@ async def _federation_announce_loop() -> None:
     missing rather than looping uselessly.
     """
     import httpx
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     endpoint = os.environ.get("SHROUD_PUBLIC_ENDPOINT", "").strip().rstrip("/")
     if not endpoint:
@@ -3106,17 +3238,9 @@ async def _federation_announce_loop() -> None:
               "SHROUD_PUBLIC_ENDPOINT to this relay's public URL")
         return
 
-    key_path = os.path.join(
-        os.environ.get("SHROUD_DATA_DIR", os.path.dirname(DB_PATH)),
-        "operator_ed25519.json")
-    try:
-        with open(key_path) as f:
-            kp = json.load(f)
-        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(kp["priv_hex"]))
-        pub_hex = kp["pub_hex"]
-    except (OSError, KeyError, ValueError) as e:
-        print(f"[SHROUD] Federation keepalive disabled: cannot load "
-              f"{key_path} ({e})")
+    sk, pub_hex = _federation_operator_key()
+    if sk is None:
+        print("[SHROUD] Federation keepalive disabled: no operator key")
         return
 
     operator = os.environ.get("SHROUD_OPERATOR", "").strip() or endpoint
@@ -3199,7 +3323,7 @@ async def _federation_loop() -> None:
                 peer = item["peer"].rstrip("/")
                 path = _FEDERATION_PATHS.get(item["kind"], _FEDERATION_DEFAULT_PATH)
                 try:
-                    r = await client.post(peer + path, json=item["body"])
+                    r = await _federation_post(client, peer, path, item["body"])
                     if 200 <= r.status_code < 300:
                         continue
                     why = f"HTTP {r.status_code}"
@@ -3283,7 +3407,7 @@ class FedBroadcastIn(BaseModel):
 
 
 @app.post("/api/v1/federation/broadcast")
-async def federation_broadcast(req: FedBroadcastIn):
+async def federation_broadcast(req: FedBroadcastIn, _peer: str = Depends(require_federation_peer)):
     """Receive a gossipped envelope from a peer. Dedupe via
     federation_seen_ids; insert into anon_messages if new."""
     if req.type != "shroud.fed.broadcast":
@@ -3321,7 +3445,7 @@ class FedDeleteIn(BaseModel):
 
 
 @app.post("/api/v1/federation/delete")
-async def federation_delete(req: FedDeleteIn):
+async def federation_delete(req: FedDeleteIn, _peer: str = Depends(require_federation_peer)):
     """Receive a delete-on-deliver notice from a peer. Drop the row
     from our local anon_messages if present."""
     if req.type != "shroud.fed.delete":
@@ -3340,7 +3464,7 @@ class FedStateEventIn(BaseModel):
 
 
 @app.post("/api/v1/federation/state-event")
-async def federation_state_event(req: FedStateEventIn):
+async def federation_state_event(req: FedStateEventIn, _peer: str = Depends(require_federation_peer)):
     """Receive a state-event from a peer (user.created, ban.added,
     setting.changed, etc.). Dedup by event_id, apply locally, then
     re-broadcast to OUR peers so the event floods across the whole
@@ -3359,17 +3483,22 @@ async def federation_state_event(req: FedStateEventIn):
 
 
 @app.get("/api/v1/federation/state-events/since")
-async def federation_state_events_since(since_ts: int = 0, limit: int = 1000):
+async def federation_state_events_since(request: Request, since_ts: int = 0,
+                                        limit: int = 1000,
+                                        _peer: str = Depends(require_federation_peer)):
     """Bulk-export endpoint — a peer joining (or recovering from
     extended downtime) GETs this to replay everything it missed.
     Returns up to `limit` events ordered by origin_ts. The receiver
-    feeds each entry into POST /federation/state-event."""
+    feeds each entry into POST /federation/state-event.
+
+    Peer-only: the events carry password hashes and admin credentials.
+    The response is signed so the puller can check it came from us."""
     rows = db.execute(
         "SELECT event_id, origin_ts, kind, payload FROM federation_state_events "
         "WHERE origin_ts > ? ORDER BY origin_ts ASC LIMIT ?",
         (since_ts, max(1, min(limit, 5000))),
     ).fetchall()
-    return {
+    body = json.dumps({
         "count": len(rows),
         "events": [
             {
@@ -3380,7 +3509,9 @@ async def federation_state_events_since(since_ts: int = 0, limit: int = 1000):
             }
             for r in rows
         ],
-    }
+    }, separators=(",", ":")).encode()
+    headers = _federation_sign(b"resp", "GET", _path_qs(request.url), body)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 # ── Anonymous diagnostics reporting ──────────────────────────────────
@@ -5134,23 +5265,7 @@ async def admin_federation_force_sync(session=Depends(require_admin)):
             applied = 0
             err = ""
             try:
-                r = await client.get(
-                    p["endpoint"].rstrip("/")
-                    + f"/api/v1/federation/state-events/since?since_ts={since_ts}&limit=2000"
-                )
-                if r.status_code == 200:
-                    body = r.json()
-                    for ev in body.get("events", []):
-                        if _seen_state_event(ev["event_id"]):
-                            continue
-                        _apply_state_event(ev["event_kind"], ev["payload"])
-                        _federation_outbox_state_event(
-                            ev["event_kind"], ev["payload"],
-                            event_id=ev["event_id"], ts=ev["ts"],
-                        )
-                        applied += 1
-                else:
-                    err = f"HTTP {r.status_code}"
+                applied = await _federation_pull_state_events(client, p, since_ts)
             except Exception as e:
                 err = str(e)[:200]
             out.append({"endpoint": p["endpoint"], "applied": applied, "error": err})

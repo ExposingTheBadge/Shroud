@@ -35,6 +35,11 @@ jobs:
       - name: Admin dashboard / API contract
         run: python -m tests.admin_api_contract
 
+      # Two in-process relays: gossip moves a sealed envelope A -> B, and
+      # unsigned / unpinned federation calls are refused.
+      - name: Two-relay federation
+        run: python -m tests.federation_e2e
+
   cross-client-vectors:
     name: Cross-client protocol vectors
     runs-on: ubuntu-latest
