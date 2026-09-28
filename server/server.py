@@ -5507,271 +5507,6 @@ async def admin_federation_force_sync(session=Depends(require_admin_csrf)):
     return {"since_ts": since_ts, "peers": out}
 
 
-# AWS EC2 inventory — surfaced in the Federation dashboard so the operator
-# can see every instance in their account alongside the federation peers,
-# without leaving the admin panel. Cached for 30s to avoid hammering EC2.
-#
-# Everything in this section is *blocking* (boto3 is synchronous), so every
-# entry point is wrapped in asyncio.to_thread() before a request handler
-# touches it. A multi-region EC2 scan takes seconds; running it on the event
-# loop would stall message routing for every user on the relay while the
-# operator has the Federation tab open (it polls every 10s). Rule 0 —
-# the relay does not stop serving, ever.
-_AWS_INV_CACHE: dict = {"ts": 0, "data": None}
-_AWS_INV_TTL = 30
-_AWS_INV_LOCK = threading.Lock()
-
-# The relay's own EC2 instance id, so the UI can grey out "stop this box"
-# and the action endpoint can hard-refuse it. Empty when not on EC2.
-_AWS_SELF_ID_CACHE: dict = {"ts": 0, "id": None}
-_AWS_SELF_ID_TTL = 3600
-
-
-def _aws_boto_config():
-    """Bounded timeouts + retries. Without this botocore defaults to a
-    60s connect timeout and 4 retries per call, so one wedged region
-    would hold a worker thread for minutes."""
-    from botocore.config import Config
-    return Config(connect_timeout=4, read_timeout=8,
-                  retries={"max_attempts": 2, "mode": "standard"})
-
-
-def _aws_self_instance_id() -> str:
-    """Instance id of the EC2 box this relay runs on, via IMDSv2.
-
-    Returns "" when we're not on EC2 or IMDS is unreachable. Cached for an
-    hour, including the negative result — an instance's own id never
-    changes, and off-EC2 the metadata endpoint just eats the timeout.
-    """
-    now = int(time.time())
-    if (_AWS_SELF_ID_CACHE["id"] is not None
-            and now - _AWS_SELF_ID_CACHE["ts"] < _AWS_SELF_ID_TTL):
-        return _AWS_SELF_ID_CACHE["id"]
-    ident = ""
-    try:
-        import urllib.request
-        tok_req = urllib.request.Request(
-            "http://169.254.169.254/latest/api/token", method="PUT",
-            headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"})
-        with urllib.request.urlopen(tok_req, timeout=1) as r:
-            token = r.read().decode()
-        id_req = urllib.request.Request(
-            "http://169.254.169.254/latest/meta-data/instance-id",
-            headers={"X-aws-ec2-metadata-token": token})
-        with urllib.request.urlopen(id_req, timeout=1) as r:
-            ident = r.read().decode().strip()
-    except Exception:
-        ident = ""
-    _AWS_SELF_ID_CACHE.update(ts=now, id=ident)
-    return ident
-
-
-def _aws_inventory() -> dict:
-    """BLOCKING. Call via _aws_inventory_async() from request handlers."""
-    now = int(time.time())
-    cached = _AWS_INV_CACHE.get("data")
-    if cached is not None and now - _AWS_INV_CACHE.get("ts", 0) < _AWS_INV_TTL:
-        return cached
-
-    # Serialise cold-cache scans: without this, N concurrent admin pollers
-    # each kick off a full all-region sweep.
-    with _AWS_INV_LOCK:
-        now = int(time.time())
-        cached = _AWS_INV_CACHE.get("data")
-        if cached is not None and now - _AWS_INV_CACHE.get("ts", 0) < _AWS_INV_TTL:
-            return cached
-        return _aws_inventory_locked(now)
-
-
-def _aws_inventory_locked(now: int) -> dict:
-    base = {
-        "available": False,
-        "error": None,
-        "regions": {},
-        "summary": {"total": 0, "running": 0, "stopped": 0, "other": 0,
-                    "regions_with_assets": 0},
-    }
-
-    try:
-        import boto3
-        from botocore.exceptions import (BotoCoreError, ClientError,
-                                          NoCredentialsError)
-    except ImportError:
-        base["error"] = ("boto3 not installed on this relay — "
-                         "`pip install boto3` to enable AWS inventory")
-        _AWS_INV_CACHE.update(ts=now, data=base)
-        return base
-
-    cfg = _aws_boto_config()
-    self_id = _aws_self_instance_id()
-
-    try:
-        meta = boto3.session.Session().client(
-            "ec2", region_name="us-east-1", config=cfg)
-        regions = [r["RegionName"] for r in meta.describe_regions()["Regions"]]
-    except NoCredentialsError:
-        base["error"] = ("relay has no AWS credentials — attach an IAM "
-                         "instance role with ec2:DescribeInstances + "
-                         "ec2:DescribeRegions")
-        _AWS_INV_CACHE.update(ts=now, data=base)
-        return base
-    except (ClientError, BotoCoreError) as e:
-        base["error"] = f"AWS API error: {str(e)[:200]}"
-        _AWS_INV_CACHE.update(ts=now, data=base)
-        return base
-
-    import concurrent.futures as _cf
-
-    def _fetch(rg: str):
-        try:
-            # A fresh Session per thread: boto3's module-level default
-            # session is not thread-safe to create clients from.
-            c = boto3.session.Session().client("ec2", region_name=rg, config=cfg)
-            out = []
-            # Paginate — describe_instances caps at 1000 per page and
-            # silently truncates otherwise.
-            for page in c.get_paginator("describe_instances").paginate():
-                for rv in page.get("Reservations", []):
-                    for inst in rv.get("Instances", []):
-                        name = ""
-                        for t in inst.get("Tags", []) or []:
-                            if t.get("Key") == "Name":
-                                name = t.get("Value", ""); break
-                        lt = inst.get("LaunchTime")
-                        iid = inst.get("InstanceId", "")
-                        out.append({
-                            "id":        iid,
-                            "name":      name,
-                            "state":     (inst.get("State") or {}).get("Name", ""),
-                            "type":      inst.get("InstanceType", ""),
-                            "az":        (inst.get("Placement") or {}).get("AvailabilityZone", ""),
-                            "pub_ip":    inst.get("PublicIpAddress", "") or "",
-                            "priv_ip":   inst.get("PrivateIpAddress", "") or "",
-                            "platform":  inst.get("PlatformDetails", "Linux/UNIX"),
-                            "launched":  lt.isoformat() if lt else "",
-                            "is_self":   bool(self_id) and iid == self_id,
-                        })
-            return rg, out, None
-        except Exception as e:
-            return rg, [], str(e)[:160]
-
-    base["available"] = True
-    base["self_instance_id"] = self_id
-    with _cf.ThreadPoolExecutor(max_workers=12) as ex:
-        for rg, items, err in ex.map(_fetch, regions):
-            if not items and not err:
-                continue
-            base["regions"][rg] = {"instances": items, "error": err}
-            if items:
-                base["summary"]["regions_with_assets"] += 1
-                base["summary"]["total"] += len(items)
-                for i in items:
-                    st = i["state"]
-                    if st == "running":   base["summary"]["running"] += 1
-                    elif st == "stopped": base["summary"]["stopped"] += 1
-                    else:                 base["summary"]["other"]   += 1
-
-    _AWS_INV_CACHE.update(ts=now, data=base)
-    return base
-
-
-async def _aws_inventory_async() -> dict:
-    """Event-loop-safe wrapper around the blocking EC2 sweep."""
-    return await asyncio.to_thread(_aws_inventory)
-
-
-@app.get("/api/v1/admin/aws/inventory")
-async def admin_aws_inventory(session=Depends(require_admin)):
-    """EC2 inventory across all regions for the AWS account this relay
-    is running under. Surfaced in the Federation tab so the operator
-    can see relay infra + sibling assets in one place."""
-    return await _aws_inventory_async()
-
-
-def _aws_instance_action(action: str, instance_id: str, region: str) -> dict:
-    """BLOCKING. Start, stop, or reboot an EC2 instance. Returns
-    {ok, instance_id, region, action, prev_state, curr_state, error}."""
-    if action not in ("start", "stop", "reboot"):
-        return {"ok": False, "error": f"unknown action: {action}"}
-    if not instance_id or not region:
-        return {"ok": False, "error": "instance_id and region are required"}
-
-    # Rule 0: the relay does not take itself down. Stopping or rebooting
-    # the box serving this very request kills the admin session mid-flight
-    # and drops a federation member — do it from the AWS console or
-    # another relay's dashboard if you genuinely mean it.
-    if action in ("stop", "reboot"):
-        self_id = _aws_self_instance_id()
-        if self_id and instance_id == self_id:
-            return {"ok": False, "error": (
-                f"refusing to {action} {instance_id} — that is the instance "
-                "this relay is running on. Use another relay's admin panel "
-                "or the AWS console.")}
-
-    try:
-        import boto3
-        from botocore.exceptions import (BotoCoreError, ClientError,
-                                          NoCredentialsError)
-    except ImportError:
-        return {"ok": False, "error": "boto3 not installed on this relay"}
-
-    try:
-        c = boto3.session.Session().client(
-            "ec2", region_name=region, config=_aws_boto_config())
-        if action == "start":
-            r = c.start_instances(InstanceIds=[instance_id])
-            chg = (r.get("StartingInstances") or [{}])[0]
-        elif action == "stop":
-            r = c.stop_instances(InstanceIds=[instance_id])
-            chg = (r.get("StoppingInstances") or [{}])[0]
-        else:  # reboot
-            c.reboot_instances(InstanceIds=[instance_id])
-            chg = {"PreviousState": {"Name": "running"},
-                   "CurrentState": {"Name": "rebooting"}}
-    except NoCredentialsError:
-        return {"ok": False, "error": "relay has no AWS credentials"}
-    except (ClientError, BotoCoreError) as e:
-        return {"ok": False, "error": f"AWS API error: {str(e)[:240]}"}
-
-    _AWS_INV_CACHE["data"] = None  # invalidate cache so next refresh is fresh
-    return {
-        "ok":          True,
-        "instance_id": instance_id,
-        "region":      region,
-        "action":      action,
-        "prev_state":  (chg.get("PreviousState") or {}).get("Name", ""),
-        "curr_state":  (chg.get("CurrentState")  or {}).get("Name", ""),
-    }
-
-
-class AwsInstanceActionIn(BaseModel):
-    instance_id: str
-    region:      str
-    action:      str  # start | stop | reboot
-
-
-@app.post("/api/v1/admin/aws/instance/action")
-async def admin_aws_instance_action(
-    body: AwsInstanceActionIn,
-    session=Depends(require_admin_csrf),
-):
-    """Start / stop / reboot an EC2 instance. Requires admin + CSRF.
-    The relay needs an IAM instance role with ec2:StartInstances,
-    ec2:StopInstances, and ec2:RebootInstances for the action to
-    succeed."""
-    res = await asyncio.to_thread(
-        _aws_instance_action, body.action, body.instance_id, body.region)
-    audit_log(
-        _admin_session_ip(session),
-        "AWS_INSTANCE_ACTION",
-        f"action={body.action} id={body.instance_id} region={body.region} "
-        f"ok={res.get('ok')} err={res.get('error','')}",
-    )
-    if not res.get("ok"):
-        raise HTTPException(502, res.get("error", "AWS action failed"))
-    return res
-
-
 @app.get("/api/v1/admin/federation")
 async def admin_federation_health(session=Depends(require_admin)):
     """Aggregated federation health — polls every active peer's
@@ -5782,10 +5517,9 @@ async def admin_federation_health(session=Depends(require_admin)):
     Tolerates per-peer failures: an unreachable peer shows up as a row
     with `reachable=false` rather than blowing up the whole response.
 
-    Every outbound call here is blocking (urllib + boto3), so the peer
-    polls and the EC2 sweep are fanned out onto worker threads and
-    awaited together. Done inline they would pin the event loop for
-    6s x peers plus the AWS scan, on a dashboard that re-polls every 10s.
+    Every peer poll is blocking (urllib), so they are fanned out onto
+    worker threads and awaited together. Done inline they would pin the
+    event loop for 6s x peers, on a dashboard that re-polls every 10s.
     """
     import urllib.request, ssl, socket
     # Local relay first
@@ -5836,10 +5570,8 @@ async def admin_federation_health(session=Depends(require_admin)):
         return entry
 
     pollable = [p for p in peers if p.get("endpoint")]
-    peer_task = asyncio.gather(
+    peer_entries = await asyncio.gather(
         *(asyncio.to_thread(_poll_peer, p) for p in pollable))
-    aws_task = asyncio.ensure_future(_aws_inventory_async())
-    peer_entries, aws = await asyncio.gather(peer_task, aws_task)
     out.extend(peer_entries)
 
     return {
@@ -5850,7 +5582,6 @@ async def admin_federation_health(session=Depends(require_admin)):
             "total":     len(out),
             "reachable": sum(1 for r in out if r.get("reachable")),
         },
-        "aws": aws,
     }
 
 

@@ -442,67 +442,6 @@ body {
   background: rgba(255,71,87,.2);
 }
 
-/* ─── AWS asset table ─────────────────────────────────────────────── */
-.aws-tbl {
-  width: 100%;
-  border-collapse: collapse;
-  font-family: var(--mono);
-  font-size: 11px;
-  table-layout: auto;
-}
-.aws-tbl th {
-  text-align: left;
-  color: var(--dim);
-  font-weight: 500;
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--border);
-  text-transform: uppercase;
-  font-size: 9.5px;
-  letter-spacing: .6px;
-  white-space: nowrap;
-}
-.aws-tbl td {
-  padding: 5px 8px;
-  border-bottom: 1px solid rgba(255,255,255,.04);
-  white-space: nowrap;
-}
-/* Let Name absorb the slack so the other columns stay tight together
- * instead of being spread edge-to-edge across a wide viewport. */
-.aws-tbl th:first-child, .aws-tbl td:first-child { width: 99%; }
-.aws-tbl th.act, .aws-tbl td.act { text-align: right; }
-.aws-tbl td.dim { color: var(--dim); }
-.aws-tbl tr.self td { background: rgba(0,212,255,.045); }
-.aws-tbl .selftag {
-  margin-left: 8px;
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: .6px;
-  color: var(--accent);
-  border: 1px solid rgba(0,212,255,.35);
-  border-radius: 99px;
-  padding: 1px 6px;
-}
-.aws-tbl .st { font-weight: 700; }
-.aws-tbl .st.run  { color: var(--ok); }
-.aws-tbl .st.stop { color: var(--dim); }
-.aws-tbl .st.pend { color: var(--warn); }
-.aws-tbl .st.bad  { color: var(--danger); }
-.aws-btn {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 4px;
-  padding: 2px 9px;
-  font-size: 10px;
-  cursor: pointer;
-  margin-left: 4px;
-  font-family: inherit;
-}
-.aws-btn.go:hover:not(:disabled) { border-color: var(--ok); color: var(--ok); }
-.aws-btn.no:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
-.aws-btn.wr:hover:not(:disabled) { border-color: var(--warn); color: var(--warn); }
-.aws-btn:disabled { opacity: .3; cursor: not-allowed; }
-
 /* ─── Chart axis furniture ───────────────────────────────────────── */
 .chart-wrap { padding: 6px 14px 10px; }
 .chart-wrap .chart { padding: 0; height: 104px; border-bottom: 1px solid var(--border); }

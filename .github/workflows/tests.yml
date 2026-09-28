@@ -79,7 +79,7 @@ jobs:
         run: python -m tests.cross_client_vectors
 
   e2e-against-live-relay:
-    name: E2E against live AWS relay (best-effort)
+    name: E2E against the live relay (best-effort)
     runs-on: ubuntu-latest
     continue-on-error: true   # never gates a merge; just surfaces drift
 
@@ -100,4 +100,4 @@ jobs:
       - name: Run e2e tests
         run: python -m tests.e2e_anon_protocol
         env:
-          SHROUD_RELAY_URL: https://100.30.51.8:58443
+          SHROUD_RELAY_URL: https://173.245.244.180:58443

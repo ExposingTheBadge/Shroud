@@ -4751,7 +4751,7 @@ int main(int argc, char *argv[]) {
      * filter is wired but submission is skipped. */
 #ifndef SHROUD_UI_PREVIEW
     error_reporter_install(g_operator_diag_pubkey,
-                           "https://100.30.51.8:58443");
+                           "https://173.245.244.180:58443");
 #endif
 
     CryptoSplash splash;

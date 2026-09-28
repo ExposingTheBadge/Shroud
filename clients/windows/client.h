@@ -71,7 +71,7 @@
  * There was previously no way to do that at all — every dev build
  * talked to the production relay. */
 #ifndef SERVER_HOST
-#define SERVER_HOST       L"100.30.51.8"
+#define SERVER_HOST       L"173.245.244.180"
 #endif
 #ifndef SERVER_PORT
 #define SERVER_PORT       58443
