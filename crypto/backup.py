@@ -142,6 +142,7 @@ def _argon2id(password: bytes, salt: bytes,
 # user only does this rarely.
 DEFAULT_TIME_COST = 3
 DEFAULT_MEM_COST_LOG2 = 17  # 2^17 KiB = 128 MiB
+MAX_MEM_COST_LOG2 = 22      # 2^22 KiB = 4 GiB
 DEFAULT_PARALLELISM = 1
 
 
@@ -164,8 +165,8 @@ def pack(payload: Dict[str, Any], password: bytes,
     """
     if not (1 <= time_cost <= 255):
         raise ValueError("time_cost must be 1..255")
-    if not (10 <= mem_cost_log2 <= 31):
-        raise ValueError("mem_cost_log2 must be 10..31")
+    if not (10 <= mem_cost_log2 <= MAX_MEM_COST_LOG2):
+        raise ValueError(f"mem_cost_log2 must be 10..{MAX_MEM_COST_LOG2}")
     if not (1 <= parallelism <= 255):
         raise ValueError("parallelism must be 1..255")
 
@@ -207,6 +208,12 @@ def unpack(blob: bytes, password: bytes) -> Dict[str, Any]:
     time_cost = params_blob[0]
     mem_cost_log2 = params_blob[1]
     parallelism = params_blob[2]
+    # These come from the file, before anything is authenticated. Out of
+    # range they crashed Argon2 with non-ValueError exceptions, and 30 or
+    # 31 asked it for 1-2 TiB of memory.
+    if not (1 <= time_cost <= 255 and 10 <= mem_cost_log2 <= MAX_MEM_COST_LOG2
+            and 1 <= parallelism <= 255):
+        raise ValueError("backup KDF parameters out of range")
     salt = blob[13:13 + SALT_LEN]
     nonce = blob[13 + SALT_LEN:13 + SALT_LEN + NONCE_LEN]
     ct_and_tag = blob[HEADER_LEN:]
@@ -293,6 +300,17 @@ def _self_test() -> None:
         raise AssertionError("wrong password should not decrypt")
     except ValueError as e:
         assert "could not decrypt" in str(e)
+
+    # Out-of-range KDF parameters are refused before Argon2 runs: time 0
+    # raised HashingError, and mem 2^31 KiB tried to allocate 2 TiB.
+    for off, val in ((5, 0), (6, 31), (6, 40), (7, 0)):
+        bad = bytearray(blob)
+        bad[off] = val
+        try:
+            unpack(bytes(bad), password)
+            raise AssertionError("out-of-range KDF params accepted")
+        except ValueError as e:
+            assert "out of range" in str(e), e
 
     # Tampered KDF parameters fail (AAD bind)
     mangled = bytearray(blob)

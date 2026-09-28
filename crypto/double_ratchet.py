@@ -33,7 +33,7 @@ Wire format (single message envelope, sender to recipient):
     ct        (var, AES-256-GCM)
 """
 from __future__ import annotations
-import os, struct, hmac, hashlib, json
+import copy, os, struct, hmac, hashlib, json
 from dataclasses import dataclass, field
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -42,6 +42,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 MAGIC = 0x32325244
 MAX_SKIP = 1000  # max messages we'll cache as "skipped"
+MAX_SKIPPED_TOTAL = 2000  # absolute cap on the skipped-key cache
 INFO_RK = b"SHROUD-DR-RK"
 INFO_CK = b"SHROUD-DR-CK"
 INFO_MSG = b"SHROUD-DR-MSG"
@@ -169,6 +170,9 @@ def _skip_message_keys(state: RatchetState, until: int):
         state.ckr, mk = _kdf_ck(state.ckr)
         state.skipped[(state.dhr_pub.hex(), state.nr)] = mk
         state.nr += 1
+    # Oldest first (dicts keep insertion order).
+    while len(state.skipped) > MAX_SKIPPED_TOTAL:
+        del state.skipped[next(iter(state.skipped))]
 
 
 def _dh_ratchet_step(state: RatchetState, new_dhr_pub: bytes):
@@ -197,22 +201,35 @@ def decrypt(state: RatchetState, envelope: bytes, associated_data: bytes = b"") 
     header = envelope[:44]
     aad = header + associated_data
 
-    # Was this skipped earlier?
-    sk = state.skipped.pop((dhr_pub.hex(), n), None)
+    # Nothing below may change `state` until the AEAD tag has verified.
+    # The header is unauthenticated until then, so a replayed or forged
+    # envelope used to advance the chain (every later genuine message
+    # then failed), pop a cached skipped key (the real delayed message
+    # became undecryptable), or ratchet onto an attacker's DH key (the
+    # session died in both directions). All work happens on a copy that
+    # is committed only on success.
+    key = (dhr_pub.hex(), n)
+    sk = state.skipped.get(key)
     if sk is not None:
-        return AESGCM(sk).decrypt(nonce, ct, aad)
+        pt = AESGCM(sk).decrypt(nonce, ct, aad)
+        del state.skipped[key]
+        return pt
 
-    if state.dhr_pub != dhr_pub:
+    st = copy.copy(state)
+    st.skipped = dict(state.skipped)
+    if st.dhr_pub != dhr_pub:
         # Peer rotated their DH. Skip any remaining keys in the old chain,
         # then take a ratchet step.
-        if state.ckr is not None:
-            _skip_message_keys(state, pn)
-        _dh_ratchet_step(state, dhr_pub)
+        if st.ckr is not None:
+            _skip_message_keys(st, pn)
+        _dh_ratchet_step(st, dhr_pub)
 
-    _skip_message_keys(state, n)
-    state.ckr, mk = _kdf_ck(state.ckr)
-    state.nr += 1
-    return AESGCM(mk).decrypt(nonce, ct, aad)
+    _skip_message_keys(st, n)
+    st.ckr, mk = _kdf_ck(st.ckr)
+    st.nr += 1
+    pt = AESGCM(mk).decrypt(nonce, ct, aad)
+    state.__dict__.update(st.__dict__)
+    return pt
 
 
 # ── Self-test ─────────────────────────────────────────────────────────
@@ -246,6 +263,29 @@ def self_test() -> bool:
     p4b = decrypt(a, e4b)
     p4a = decrypt(a, e4a)
     if (p4a, p4b) != (b"first", b"second"): return False
+
+    # Replay and forgery must not disturb the session.
+    from cryptography.exceptions import InvalidTag
+    e6 = encrypt(b, b"once")
+    if decrypt(a, e6) != b"once": return False
+    for bad in (e6,                                           # replay
+                e6[:4] + os.urandom(32) + e6[36:],            # forged DH key
+                e6[:36] + struct.pack("<II", 0, 999) + e6[44:]):  # forged n
+        try:
+            decrypt(a, bad)
+            return False
+        except (InvalidTag, ValueError):
+            pass
+    e7a = encrypt(b, b"delayed")
+    e7b = encrypt(b, b"next")
+    if decrypt(a, e7b) != b"next": return False
+    try:                                   # tampered copy of the delayed one
+        decrypt(a, e7a[:-1] + bytes([e7a[-1] ^ 1]))
+        return False
+    except InvalidTag:
+        pass
+    if decrypt(a, e7a) != b"delayed": return False
+    if decrypt(b, encrypt(a, b"still ok")) != b"still ok": return False
 
     # State serialization round-trip
     blob = a.to_bytes()

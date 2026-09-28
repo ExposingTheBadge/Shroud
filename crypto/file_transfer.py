@@ -143,7 +143,6 @@ class Reassembler:
     def __init__(self) -> None:
         self._by_id: dict[bytes, dict[int, bytes]] = {}
         self._final_idx: dict[bytes, int] = {}
-        self._hashes: dict[bytes, bytes] = {}
 
     def accept_chunk(self, payload: bytes) -> Optional[bytes]:
         """Parse one chunk. If this completes a file, return the full
@@ -154,13 +153,7 @@ class Reassembler:
         bucket = self._by_id.setdefault(file_id, {})
         bucket[idx] = data
         if flags & FLAG_FINAL:
-            # Hash is the last 32 bytes of the last chunk's data
-            if len(data) < 32:
-                raise ValueError("final chunk too short to contain SHA-256")
             self._final_idx[file_id] = idx
-            self._hashes[file_id] = data[-32:]
-            # Trim the hash off the stored data
-            bucket[idx] = data[:-32]
 
         if file_id not in self._final_idx:
             return None
@@ -169,13 +162,19 @@ class Reassembler:
         if any(i not in bucket for i in range(final_idx + 1)):
             return None  # still waiting for missing chunks
 
-        assembled = b"".join(bucket[i] for i in range(final_idx + 1))
-        expected = self._hashes[file_id]
-        actual = hashlib.sha256(assembled).digest()
+        # The 32-byte SHA-256 trailer is the tail of the whole stream. The
+        # sender chunks file||hash as one byte string, so the trailer can
+        # straddle the last two chunks; reading it from the final chunk
+        # alone rejected every file whose size mod CHUNK_DATA_SIZE landed
+        # in the last 31 bytes of a chunk.
+        stream = b"".join(bucket[i] for i in range(final_idx + 1))
         # Free up state — we're done with this file_id
         del self._by_id[file_id]
         del self._final_idx[file_id]
-        del self._hashes[file_id]
+        if len(stream) < 32:
+            raise ValueError("transfer too short to contain SHA-256")
+        assembled, expected = stream[:-32], stream[-32:]
+        actual = hashlib.sha256(assembled).digest()
         if actual != expected:
             raise ValueError("file hash mismatch — transfer corrupted or tampered")
         return assembled
@@ -228,6 +227,16 @@ def _self_test() -> None:
         raise AssertionError("expected hash mismatch failure")
     except ValueError as e:
         assert "hash mismatch" in str(e)
+
+    # Sizes whose hash trailer straddles the last two chunks. These were
+    # rejected with "final chunk too short to contain SHA-256".
+    for size in (CHUNK_DATA_SIZE - 32, CHUNK_DATA_SIZE - 31,
+                 CHUNK_DATA_SIZE - 1, CHUNK_DATA_SIZE, 2 * CHUNK_DATA_SIZE - 5):
+        data = body[:size] if size <= len(body) else (body * 2)[:size]
+        _fid, cs = split_file(data)
+        r = Reassembler()
+        outs = [r.accept_chunk(c.payload) for c in reversed(cs)]
+        assert outs[-1] == data, f"size {size} did not round-trip"
 
     # Empty file edge case
     _file_id, chunks = split_file(b"")
