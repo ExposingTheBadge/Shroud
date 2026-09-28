@@ -4619,6 +4619,12 @@ def require_admin(sid: str = Cookie(None, alias="shroud_sid")):
     return session
 
 
+def _admin_page_session(sid: str = Cookie(None, alias="shroud_sid")):
+    """require_admin for the HTML pages. A browser that isn't signed in
+    should land on the login form, not a bare JSON 401."""
+    return get_admin_session(sid)
+
+
 def _admin_session_ip(session) -> str:
     """Source IP off a require_admin session row, for audit_log()'s first
     column. get_admin_session returns a plain sqlite3 tuple
@@ -5983,7 +5989,9 @@ async def admin_stats_legacy(session=Depends(require_admin)):
 
 # ─── Per-user drill-down ────────────────────────────────────────────
 @app.get("/admin/user/{user_id}")
-async def admin_user_page(user_id: str, session=Depends(require_admin)):
+async def admin_user_page(user_id: str, session=Depends(_admin_page_session)):
+    if not session:
+        return RedirectResponse("/admin/login", status_code=303)
     return _serve_admin_html("user.html")
 
 
@@ -6080,7 +6088,9 @@ async def admin_user_details(user_id: str, session=Depends(require_admin)):
 
 # ─── Per-device drill-down ──────────────────────────────────────────
 @app.get("/admin/device/{device_id}")
-async def admin_device_page(device_id: str, session=Depends(require_admin)):
+async def admin_device_page(device_id: str, session=Depends(_admin_page_session)):
+    if not session:
+        return RedirectResponse("/admin/login", status_code=303)
     return _serve_admin_html("device.html")
 
 
@@ -6470,7 +6480,9 @@ async def admin_kill_session(target_sid: str, session=Depends(require_admin_csrf
 
 # ── Admin Dashboard HTML ───────────────────────────────────────────
 @app.get("/admin")
-async def admin_dashboard(session=Depends(require_admin)):
+async def admin_dashboard(session=Depends(_admin_page_session)):
+    if not session:
+        return RedirectResponse("/admin/login", status_code=303)
     return _serve_admin_html("index.html")
 
 if __name__ == "__main__":
