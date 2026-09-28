@@ -19,6 +19,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
@@ -154,6 +160,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        NetworkClient.init(applicationContext)
         // Install the anonymous error reporter ONCE per process so any
         // uncaught exception during composition / IO triggers a sealed
         // report to the operator's diagnostics pubkey. Best-effort —
@@ -213,8 +220,22 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
     var isRegistered by mutableStateOf(false)
     var deviceID by mutableStateOf("")
     var username by mutableStateOf("")
-    var messages by mutableStateOf(listOf<Msg>())
-    var sideList by mutableStateOf(listOf<String>())
+    /* Conversations: one history per contact, keyed by username. There
+     * used to be a single list shared by every contact, so switching chats
+     * showed everyone's messages mixed together. In memory only, as before. */
+    var conversations by mutableStateOf(mapOf<String, List<Msg>>())
+    var unread by mutableStateOf(mapOf<String, Int>())
+    var openPeer by mutableStateOf<String?>(null)
+    /** One-line notices for the snackbar ("Message not sent: …"). */
+    var notice by mutableStateOf<String?>(null)
+    var contacts by mutableStateOf(listOf<Contact>())
+    var incomingRequests by mutableStateOf(listOf<FriendRequest>())
+    var outgoingPending by mutableStateOf(listOf<String>())
+    var searchResult by mutableStateOf<String?>(null)
+    var searchDone by mutableStateOf(false)
+    val messages: List<Msg> get() = conversations[openPeer] ?: emptyList()
+    var myDevices by mutableStateOf(listOf<String>())
+    private val peerCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, PeerDevice>>()
     var selectedRecipient by mutableStateOf("")
     var currentMessage by mutableStateOf("")
     var connStatus by mutableStateOf("Connecting...")
@@ -381,37 +402,53 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
         return Pair(bytes.copyOfRange(0, 32), bytes.copyOfRange(32, 64))
     }
 
-    /** Fetch the peer's X25519 identity pubkey from /ratchet/bundle.
-     *  Returns null if the peer hasn't published a bundle yet. */
+    /** Fetch a peer device's long-term X25519 identity.
+     *
+     *  This used /ratchet/bundle, which hands out and permanently consumes
+     *  one of the peer's one-time prekeys on every call. It ran on every
+     *  4-second heartbeat, so an open chat burned through a contact's
+     *  whole prekey supply in about two minutes. /ratchet/identity returns
+     *  the same key and consumes nothing. */
     private suspend fun fetchPeerX25519(deviceId: String): ByteArray? {
         return try {
-            val bundle = NetworkClient.get("/api/v1/ratchet/bundle/$deviceId")
-            val hex = bundle.optString("x25519_pub", "")
+            val r = NetworkClient.get("/api/v1/ratchet/identity/$deviceId")
+            val hex = r.optString("x25519_pub", "")
             if (hex.isBlank()) null else hex.hexToBytes()
         } catch (_: Throwable) {
             null
         }
     }
 
-    /** Compute the per-contact safety number for the currently-selected
-     *  recipient. Fetches their ratchet bundle, loads our own X25519 pub
-     *  from local files, and runs SafetyNumber.compute on the pair. */
+    /** A contact's most recently active device, with the keys needed to
+     *  write to it. Cached for five minutes. */
+    data class PeerDevice(val deviceId: String, val publicKeyHex: String, val x25519: ByteArray?)
+
+    private suspend fun resolvePeer(username: String, refresh: Boolean = false): PeerDevice? {
+        val now = System.currentTimeMillis()
+        val hit = peerCache[username]
+        if (!refresh && hit != null && now - hit.first < 300_000) return hit.second
+        val r = NetworkClient.post("/api/v1/contacts/devices", JSONObject().apply {
+            put("device_id", deviceID); put("contact_username", username)
+        })
+        val devs = r.optJSONArray("devices") ?: return null
+        if (devs.length() == 0) return null
+        val d = devs.getJSONObject(0)   // relay lists the most recently active device first
+        val id = d.getString("id")
+        val pd = PeerDevice(id, d.optString("public_key", ""), fetchPeerX25519(id))
+        peerCache[username] = now to pd
+        return pd
+    }
+
+    /** Safety number for the open conversation. */
     fun computeSafetyNumber(onResult: (String?) -> Unit) {
-        val recip = selectedRecipient
-        if (recip.isBlank()) { onResult(null); return }
+        val peer = openPeer ?: run { onResult(null); return }
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val bundle = NetworkClient.get("/api/v1/ratchet/bundle/$recip")
-                val theirHex = bundle.optString("x25519_pub", "")
-                if (theirHex.isBlank()) { withContext(Dispatchers.Main) { onResult(null) }; return@launch }
-                val theirPub = theirHex.hexToBytes()
-                val idFile = java.io.File(java.io.File(getApplication<Application>().filesDir, "ratchet"), "identity.x25519")
-                if (!idFile.exists() || idFile.length() < 64) { withContext(Dispatchers.Main) { onResult(null) }; return@launch }
-                val bytes = idFile.readBytes()
-                val myPub = bytes.copyOfRange(32, 64)
-                val fp = SafetyNumber.compute(myPub, theirPub)
-                withContext(Dispatchers.Main) { onResult(fp) }
-            } catch (_: Throwable) { withContext(Dispatchers.Main) { onResult(null) } }
+            val fp = try {
+                val theirPub = resolvePeer(peer)?.x25519
+                val mine = loadMyX25519Identity()
+                if (theirPub == null || mine == null) null else SafetyNumber.compute(mine.second, theirPub)
+            } catch (_: Throwable) { null }
+            withContext(Dispatchers.Main) { onResult(fp) }
         }
     }
 
@@ -455,162 +492,221 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
 
     private fun startHeartbeat() {
         viewModelScope.launch {
+            var beat = 0
             while (isRegistered) {
-                delay(4000)
                 try {
                     val r = withContext(Dispatchers.IO) {
                         NetworkClient.post("/api/v1/heartbeat", JSONObject().apply { put("device_id", deviceID) })
                     }
                     val beatOk = r.optString("beat") == "ok"
-                    // Server v2.4.1+ surfaces maintenance_mode on every beat.
                     maintenanceMode = r.optBoolean("maintenance_mode", false)
-                    if (maintenanceMode) {
-                        connStatus = "Server in maintenance — sending disabled"
-                        connColor  = Color(0xFFff8a8a)
-                    } else if (beatOk) {
-                        connStatus = "Online — AES-256-GCM | ECDH P-384"
-                        connColor  = Color(0xFF2ed573)
-                    } else {
-                        connStatus = "Waiting..."
-                        connColor  = Color(0xFF888888)
+                    when {
+                        maintenanceMode -> { connStatus = "The relay is in maintenance. Sending is paused."; connColor = Color(0xFFE0A030) }
+                        beatOk          -> { connStatus = "Connected"; connColor = Color(0xFF2ED573) }
+                        r.optInt("_status") == 401 -> { connStatus = "This device is no longer signed in. Sign in again."; connColor = Color(0xFFFF4757) }
+                        else            -> { connStatus = "Connecting…"; connColor = Color(0xFF888888) }
                     }
-                    // v2.4.3 — actually fetch + decrypt inbound messages.
-                    // Pre-v2.4.3 Android was send-only.
+                    if (beat % 8 == 0) refreshContacts()
                     fetchAndDecrypt()
-                } catch (_: Exception) {
-                    connStatus = "Server offline"; connColor = Color(0xFFff4757)
+                } catch (e: Exception) {
+                    connStatus = NetworkClient.describe(e); connColor = Color(0xFFFF4757)
                 }
+                beat++
+                delay(4000)
             }
         }
     }
 
     /**
-     * Poll the server for queued messages and decrypt them. Detects the
-     * v3 ratchet envelope by the "ratchet":1 marker and routes through
-     * RatchetSession.decryptFromPeer; otherwise falls back to the legacy
-     * static-AES path. Plaintext is the same {body,name,sender,ts} JSON
-     * shape send() produces on both clients.
+     * Collect queued envelopes from both delivery paths and decrypt them.
+     *
+     * The anonymous path hands back the sealed *envelope* (still ratchet-
+     * or AES-encrypted). This used to be parsed as if it were the final
+     * plaintext, found no "body", and was dropped, so every message that
+     * arrived over the anonymous path vanished. Both paths now feed the
+     * same envelope handler.
      */
     private suspend fun fetchAndDecrypt() {
         if (deviceID.isBlank()) return
-        val ctx = getApplication<Application>()
+        val incoming = mutableListOf<Pair<String, JSONObject>>()   // (sender device, envelope)
 
-        // ── Rule 1+2 compliant anon-routing fetch (scoped to the
-        //    currently-selected recipient for v1; multi-contact cache
-        //    will land alongside the local contact list). ──
-        if (useAnonRouting && selectedRecipient.isNotBlank()) {
+        if (useAnonRouting) {
             try {
                 val myId = loadMyX25519Identity()
-                val peerPubX = fetchPeerX25519(selectedRecipient)
-                if (myId != null && peerPubX != null) {
+                if (myId != null) {
                     val (myPriv, myPub) = myId
-                    val sharedRoot = Ratchet.x25519Dh(myPriv, peerPubX)
-                    val anonResults = NetworkClient.fetchAnonForContacts(
-                        myIdPriv = myPriv,
-                        myIdPub  = myPub,
-                        contacts = listOf(Triple(peerPubX, sharedRoot, selectedRecipient)),
-                    )
-                    for ((_, plaintextBytes) in anonResults) {
-                        val plainJson = try {
-                            JSONObject(String(plaintextBytes, Charsets.UTF_8))
-                        } catch (_: Throwable) { continue }
-                        // Dispatch through the same handler legacy uses.
-                        val senderId = plainJson.optString("sender", selectedRecipient)
-                        val body = plainJson.optString("body", "")
-                        if (body.isNotEmpty()) {
-                            messages = messages + Msg(senderId, body)
+                    val peers = contacts.mapNotNull { c ->
+                        val x = try { resolvePeer(c.username)?.x25519 } catch (_: Throwable) { null }
+                        x?.let { Triple(it, Ratchet.x25519Dh(myPriv, it), c.username) }
+                    }
+                    if (peers.isNotEmpty()) {
+                        for ((_, bytes) in NetworkClient.fetchAnonForContacts(myPriv, myPub, peers)) {
+                            val env = try { JSONObject(String(bytes, Charsets.UTF_8)) } catch (_: Throwable) { continue }
+                            incoming += env.optString("sender", "") to env
                         }
                     }
                 }
-            } catch (_: Throwable) { /* fall through to legacy fetch */ }
+            } catch (_: Throwable) { /* the legacy queue below still runs */ }
         }
 
         val r = withContext(Dispatchers.IO) {
-            NetworkClient.post("/api/v1/messages/fetch",
-                JSONObject().apply { put("device_id", deviceID) })
+            NetworkClient.post("/api/v1/messages/fetch", JSONObject().apply { put("device_id", deviceID) })
         }
-        val arr = r.optJSONArray("messages") ?: return
-        for (i in 0 until arr.length()) {
+        val arr = r.optJSONArray("messages")
+        if (arr != null) for (i in 0 until arr.length()) {
             val m = arr.optJSONObject(i) ?: continue
-            val sender = m.optString("sender_device_id", "")
-            val envField = m.opt("envelope")
-            val env: JSONObject = when (envField) {
-                is JSONObject -> envField
-                is String     -> try { JSONObject(envField) } catch (_: Throwable) { continue }
+            val env: JSONObject = when (val f = m.opt("envelope")) {
+                is JSONObject -> f
+                is String -> try { JSONObject(f) } catch (_: Throwable) { continue }
                 else -> continue
             }
-            val plain: ByteArray? = if (env.optInt("ratchet", 0) == 1) {
-                val hex = env.optString("ciphertext", "")
-                if (hex.isBlank()) null
-                else RatchetSession.decryptFromPeer(ctx, sender, hex)
+            incoming += m.optString("sender_device_id", env.optString("sender", "")) to env
+        }
+
+        for ((sender, env) in incoming) {
+            if (sender.isBlank()) continue
+            try { handleEnvelope(sender, env) } catch (_: Throwable) {
+                notice = "A message arrived that couldn't be decrypted."
+            }
+        }
+    }
+
+    private suspend fun handleEnvelope(sender: String, env: JSONObject) {
+        val ctx = getApplication<Application>()
+        val plain: ByteArray? = if (env.optInt("ratchet", 0) == 1) {
+            val hex = env.optString("ciphertext", "")
+            if (hex.isBlank()) null else RatchetSession.decryptFromPeer(ctx, sender, hex)
+        } else runCatching {
+            val pkResp = NetworkClient.post("/api/v1/devices/$sender/pubkey", JSONObject())
+            val pubHex = pkResp.optString("public_key", "")
+            if (pubHex.isBlank()) null else {
+                val peerPub = CryptoProvider.importPublicKey(pubHex.hexToBytes())
+                val sk = CryptoProvider.deriveSessionKey(identityKey!!.private, peerPub)
+                CryptoProvider.decryptAESGCM(sk, env.getString("nonce").hexToBytes(),
+                    env.getString("ciphertext").hexToBytes(), env.getString("tag").hexToBytes())
+            }
+        }.getOrNull()
+        if (plain == null) {
+            notice = "A message arrived that couldn't be decrypted."
+            return
+        }
+        val obj = JSONObject(String(plain))
+        val name = obj.optString("name", "").trim().lowercase()
+        val peer = name.ifBlank { sender }
+        val body = obj.optString("body", "")
+        val ts = obj.optLong("ts", 0L).let { if (it > 0) it * 1000 else System.currentTimeMillis() }
+        val isImage = obj.optBoolean("is_image", false) || obj.optString("type", "") == "image"
+        if (isImage) {
+            val fid = obj.optString("file_id", "")
+            val localPath = if (fid.isNotBlank()) decryptInlineImage(sender, fid, obj.optString("name", "")) else null
+            if (localPath != null) {
+                addMsg(peer, Msg(sender, "", imagePath = localPath, fileId = fid, name = name.ifBlank { null }, ts = ts))
             } else {
-                // Legacy static-AES path. Symmetric to send()'s fallback.
-                runCatching {
-                    val pkResp = withContext(Dispatchers.IO) {
-                        NetworkClient.post("/api/v1/devices/$sender/pubkey", JSONObject())
-                    }
-                    val pubHex = pkResp.optString("public_key", "")
-                    if (pubHex.isBlank()) null
-                    else {
-                        val peerPub = CryptoProvider.importPublicKey(pubHex.hexToBytes())
-                        val sk = CryptoProvider.deriveSessionKey(identityKey!!.private, peerPub)
-                        val iv  = env.getString("nonce").hexToBytes()
-                        val ct  = env.getString("ciphertext").hexToBytes()
-                        val tag = env.getString("tag").hexToBytes()
-                        CryptoProvider.decryptAESGCM(sk, iv, ct, tag)
-                    }
-                }.getOrNull()
+                addMsg(peer, Msg(sender, "An image arrived but couldn't be downloaded.", name = name.ifBlank { null }, ts = ts, system = true))
             }
-            if (plain == null) continue
+        } else if (body.isNotBlank()) {
+            val gid = obj.optString("group_id", "")
+            addMsg(peer, Msg(sender, if (gid.isNotBlank()) "[group] $body" else body, name = name.ifBlank { null }, ts = ts))
+        }
+    }
 
+    /* ── Conversations ───────────────────────────────────────────────── */
+
+    fun addMsg(peer: String, msg: Msg) {
+        conversations = conversations + (peer to ((conversations[peer] ?: emptyList()) + msg))
+        if (peer != openPeer && !msg.outgoing && !msg.system) unread = unread + (peer to ((unread[peer] ?: 0) + 1))
+        if (contacts.none { it.username == peer }) contacts = contacts + Contact(peer, friend = false)
+    }
+
+    private fun updateMsg(peer: String, id: String, f: (Msg) -> Msg) {
+        val list = conversations[peer] ?: return
+        conversations = conversations + (peer to list.map { if (it.id == id) f(it) else it })
+    }
+
+    fun openChat(peer: String) {
+        openPeer = peer
+        unread = unread - peer
+        selectedRecipient = ""
+        viewModelScope.launch(Dispatchers.IO) {
+            val pd = try { resolvePeer(peer, refresh = true) } catch (e: Throwable) { notice = NetworkClient.describe(e); null }
+            selectedRecipient = pd?.deviceId ?: ""
+            if (pd == null) notice = "$peer hasn't signed in on any device yet, so messages can't be delivered."
+        }
+    }
+    fun closeChat() { openPeer = null; selectedRecipient = "" }
+
+    /* ── Contacts and friend requests ──────────────────────────────── */
+    data class Contact(val username: String, val friend: Boolean)
+    data class FriendRequest(val id: String, val from: String, val reason: String)
+
+    fun refreshContacts() {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
-                val obj = JSONObject(String(plain))
-                val body = obj.optString("body", "")
-                val name = obj.optString("name", "")
-                val isImage = obj.optBoolean("is_image", false) ||
-                              obj.optString("type", "") == "image"
-
-                if (isImage) {
-                    // v2.4.4 — match Windows downloadAndDecryptImage().
-                    // Sender encrypted the file with SHA-256(sender pubkey
-                    // blob); the recipient hashes the same blob fetched
-                    // from /api/v1/devices/{sender}/pubkey, downloads the
-                    // ciphertext from /api/v1/files/{fid}, AES-GCM decrypts,
-                    // and caches the plaintext for inline display.
-                    val fid = obj.optString("file_id", "")
-                    if (fid.isNotBlank()) {
-                        val localPath = decryptInlineImage(sender, fid, obj.optString("name", ""))
-                        if (localPath != null) {
-                            messages = messages + Msg(
-                                sender = sender,
-                                body = "",
-                                imagePath = localPath,
-                                fileId = fid,
-                                name = name.ifBlank { null },
-                            )
-                            continue
-                        }
-                    }
-                    // Couldn't fetch / decrypt — fall through to a text
-                    // placeholder so the user knows something arrived.
-                    if (body.isNotBlank()) {
-                        messages = messages + Msg(sender, body, name = name.ifBlank { null })
-                    } else {
-                        messages = messages + Msg(sender, "[image unavailable]",
-                            name = name.ifBlank { null })
-                    }
-                } else if (body.isNotBlank()) {
-                    // group_id may or may not be present. Display it as a
-                    // small prefix so the user can tell apart 1:1 vs group
-                    // messages without a dedicated group screen.
-                    val gid = obj.optString("group_id", "")
-                    val finalBody = if (gid.isNotBlank()) "[group] $body" else body
-                    messages = messages + Msg(sender, finalBody,
-                        name = name.ifBlank { null })
+                val r = NetworkClient.post("/api/v1/friends/list", JSONObject().apply { put("device_id", deviceID) })
+                if (r.optInt("_status") !in 200..299) return@launch
+                val friends = r.optJSONArray("friends")
+                val names = mutableListOf<String>()
+                if (friends != null) for (i in 0 until friends.length()) names += friends.getJSONObject(i).optString("username")
+                val inc = r.optJSONArray("incoming")
+                val reqs = mutableListOf<FriendRequest>()
+                if (inc != null) for (i in 0 until inc.length()) inc.getJSONObject(i).let {
+                    reqs += FriendRequest(it.optString("id"), it.optString("from"), it.optString("reason"))
                 }
-            } catch (_: Throwable) {
-                // Unparseable plaintext — drop silently.
-            }
+                val out = r.optJSONArray("outgoing")
+                val pending = mutableListOf<String>()
+                if (out != null) for (i in 0 until out.length()) out.getJSONObject(i).let {
+                    if (it.optString("status") == "pending") pending += it.optString("to")
+                }
+                val others = contacts.filter { c -> !c.friend && c.username !in names }
+                contacts = names.filter { it.isNotBlank() }.map { Contact(it, friend = true) } + others
+                incomingRequests = reqs
+                outgoingPending = pending
+            } catch (_: Throwable) { }
+        }
+    }
+
+    fun addContact(target: String) {
+        val t = target.trim().lowercase()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val r = NetworkClient.post("/api/v1/friends/request", JSONObject().apply {
+                    put("device_id", deviceID); put("target_username", t); put("reason", "")
+                })
+                notice = when (r.optInt("_status")) {
+                    in 200..299 -> "Contact request sent to $t"
+                    404 -> "There's no account called $t on this relay"
+                    409 -> r.optString("detail", "Already requested")
+                    else -> "Couldn't send the request: ${detailOf(r)}"
+                }
+                refreshContacts()
+            } catch (e: Throwable) { notice = NetworkClient.describe(e) }
+        }
+    }
+
+    fun respondRequest(req: FriendRequest, accept: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val r = NetworkClient.post("/api/v1/friends/respond", JSONObject().apply {
+                    put("device_id", deviceID); put("request_id", req.id); put("accept", accept)
+                })
+                notice = if (r.optInt("_status") in 200..299)
+                    (if (accept) "${req.from} is now a contact" else "Request from ${req.from} declined")
+                    else "Couldn't answer the request: ${detailOf(r)}"
+                refreshContacts()
+            } catch (e: Throwable) { notice = NetworkClient.describe(e) }
+        }
+    }
+
+    /** Human-readable reason from a relay error response. Catalogued
+     *  errors arrive as {error_code, title, detail}; others as a string. */
+    private fun detailOf(r: JSONObject): String {
+        val d = r.opt("detail")
+        return when (d) {
+            is JSONObject -> listOf(d.optString("title"), d.optString("reason")).filter { it.isNotBlank() }
+                .joinToString(": ").ifBlank { d.optString("error_code", "error") } +
+                d.optString("error_code").let { if (it.isNotBlank()) " ($it)" else "" }
+            is String -> d
+            else -> "HTTP ${r.optInt("_status")}"
         }
     }
 
@@ -681,10 +777,11 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
                 when (verdict) {
                     ServerPin.Verdict.MISMATCH -> {
                         val pinned = ServerPin.loadPinned(getApplication()) ?: "(none)"
-                        onError("Server identity changed.\nPinned: $pinned\nServer: $fp\nRefusing.")
+                        onError("The relay's identity has changed since you last connected, which can mean " +
+                                "someone is impersonating it. Not signing in.\n\nExpected $pinned\nGot $fp")
                         return@launch
                     }
-                    ServerPin.Verdict.NETWORK_ERROR -> { onError("Cannot reach server"); return@launch }
+                    ServerPin.Verdict.NETWORK_ERROR -> { onError("Can't reach the relay at ${NetworkClient.RELAY}. Check your connection and try again."); return@launch }
                     else -> { /* OK, FIRST_PIN_SAVED, or ENDPOINT_MISSING (legacy) — continue */ }
                 }
 
@@ -739,189 +836,159 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
                     prefs.edit().putString("device_id", did).putString("username", u).putString("password", p).apply()
                     publishRatchetBundle(did)
                     startHeartbeat()
+                    refreshContacts()
                 } else {
-                    onError(authR.optString("detail", "Server rejected"))
+                    onError(when (authR.optInt("_status")) {
+                        401 -> if (isReg) detailOf(authR) else
+                               "Wrong username or password. Accounts belong to one relay, so if you haven't " +
+                               "created one on this relay yet, choose Create account."
+                        409 -> "That username is taken. Pick another."
+                        403 -> detailOf(authR)
+                        429 -> "Too many attempts. Wait a few minutes and try again."
+                        else -> detailOf(authR)
+                    })
                 }
-            } catch (ex: Exception) { onError(ex.message ?: "Connection error") }
+            } catch (ex: Exception) { onError(NetworkClient.describe(ex)) }
         }
     }
 
+    /**
+     * Send the composer text to the open conversation.
+     *
+     * This used to look the recipient up with contact_username = *our own*
+     * username, i.e. among our own devices, and silently return when it
+     * wasn't found. Picking a person from search stored their username
+     * where a device id belonged. Net effect: messages to anyone but your
+     * own other devices were dropped without a word. The recipient is now
+     * resolved from the contact's username, and the message shows as
+     * sending, sent or failed (with a reason and a retry).
+     */
     fun send() {
-        val body = currentMessage; val recip = selectedRecipient
-        if (body.isBlank() || recip.isBlank()) return
+        val body = currentMessage.trim()
+        val peer = openPeer ?: return
+        if (body.isEmpty()) return
         currentMessage = ""
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val pkResp = NetworkClient.post("/api/v1/contacts/devices", JSONObject().apply { put("device_id", deviceID); put("contact_username", username) })
-                val devs = pkResp.optJSONArray("devices") ?: return@launch
-                var peerPub: java.security.PublicKey? = null
-                for (i in 0 until devs.length()) {
-                    val dv = devs.getJSONObject(i)
-                    if (dv.getString("id") == recip) { peerPub = CryptoProvider.importPublicKey(dv.getString("public_key").hexToBytes()); break }
-                }
-                if (peerPub == null) return@launch
-                val pl = JSONObject().apply { put("body",body); put("name",username); put("sender",deviceID); put("ts",System.currentTimeMillis()/1000) }.toString().toByteArray()
+        val local = Msg(deviceID, body, name = username, outgoing = true, pending = true)
+        addMsg(peer, local)
+        deliverInBackground(peer, local)
+    }
 
-                // v2.4.3: prefer the Double Ratchet path. Falls back to the
-                // legacy static-AES envelope when the peer hasn't published
-                // a ratchet bundle yet (pre-v1.6 peer, or never logged in
-                // post-upgrade) — same logic as Windows v2.2.0.
-                val ctx = getApplication<Application>()
-                val ratchetHex = RatchetSession.encryptForPeer(ctx, recip, pl)
-                val env = if (ratchetHex != null) {
-                    val bin = ratchetHex.hexToBytes()
-                    val sig = java.security.MessageDigest.getInstance("SHA-256").digest(bin)
-                    JSONObject().apply {
-                        put("ratchet", 1)
-                        put("sender", deviceID); put("ts", System.currentTimeMillis()/1000)
-                        put("nonce",      "0".repeat(24))    // unused on ratchet path; schema-padding
-                        put("ciphertext", ratchetHex)
-                        put("tag",        "0".repeat(32))
-                        put("sig",        sig.toHex())
-                    }
-                } else {
-                    val sk = CryptoProvider.deriveSessionKey(identityKey!!.private, peerPub)
-                    val (iv,ct,tg) = CryptoProvider.encryptAESGCM(sk, pl)
-                    val sg = CryptoProvider.hmacSign(sk, ct)
-                    JSONObject().apply { put("sender",deviceID); put("ts",System.currentTimeMillis()/1000); put("nonce",iv.toHex()); put("ciphertext",ct.toHex()); put("tag",tg.toHex()); put("sig",sg.toHex()) }
-                }
-                val expiresIn = if (disappearEnabled && disappearSeconds > 0) disappearSeconds else null
-                val resp: JSONObject = if (useAnonRouting) {
-                    // Rule 1+2 compliant path: sealed envelope addressed
-                    // to a per-pair routing tag. Server never sees
-                    // sender_device_id or recipient_device_id.
-                    val myId = loadMyX25519Identity()
-                    val peerPubX = fetchPeerX25519(recip)
-                    if (myId == null || peerPubX == null) {
-                        // Can't go anon yet (no ratchet bundle on either
-                        // side). Fall through to legacy.
-                        val headers = if (expiresIn != null) mapOf("X-Expires-In" to expiresIn.toString()) else emptyMap()
-                        NetworkClient.post(
-                            "/api/v1/messages/send",
-                            JSONObject().apply { put("sender_device_id",deviceID); put("recipient_device_id",recip); put("envelope",env.toString()) },
-                            headers,
-                        )
-                    } else {
-                        val (myPriv, myPub) = myId
-                        val sharedRoot = Ratchet.x25519Dh(myPriv, peerPubX)
-                        NetworkClient.sendAnon(
-                            recipientPubkey = peerPubX,
-                            myIdPubkey      = myPub,
-                            sharedRoot      = sharedRoot,
-                            innerEnvelope   = env.toString().toByteArray(Charsets.UTF_8),
-                            expiresInSeconds= expiresIn,
-                        )
-                    }
-                } else {
-                    val headers = if (expiresIn != null) mapOf("X-Expires-In" to expiresIn.toString()) else emptyMap()
-                    NetworkClient.post(
-                        "/api/v1/messages/send",
-                        JSONObject().apply { put("sender_device_id",deviceID); put("recipient_device_id",recip); put("envelope",env.toString()) },
-                        headers,
-                    )
-                }
-                // Server v2.4.1+ returns 503 + {"detail":"maintenance"} when locked.
-                if (resp.optInt("_status") == 503 && resp.optString("detail") == "maintenance") {
-                    maintenanceMode = true
-                    connStatus = "Send refused — server in maintenance"
-                    connColor  = Color(0xFFff8a8a)
-                    return@launch
-                }
-                messages = messages + Msg(deviceID, body)
-            } catch (_: Exception) {}
+    fun retry(msg: Msg) {
+        val peer = openPeer ?: return
+        updateMsg(peer, msg.id) { it.copy(pending = true, failed = null) }
+        deliverInBackground(peer, msg)
+    }
+
+    private fun deliverInBackground(peer: String, msg: Msg) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val err = try { deliverText(peer, msg.body) } catch (e: Throwable) { NetworkClient.describe(e) }
+            updateMsg(peer, msg.id) { it.copy(pending = false, failed = err) }
+            if (err != null) notice = "Message not sent: $err"
         }
     }
 
-    /** Send an image from a content Uri. Saves a local plaintext copy so the
-     *  sender sees the image inline in their own chat, uploads an
-     *  encrypted blob to /api/v1/files/upload, and sends a file-type
-     *  message envelope to the recipient. */
+    /** Encrypt and post one text message. Returns null on success or a
+     *  readable reason on failure. */
+    private suspend fun deliverText(peer: String, body: String): String? {
+        val pd = resolvePeer(peer) ?: return "$peer hasn't signed in on any device yet."
+        val pl = JSONObject().apply {
+            put("body", body); put("name", username); put("sender", deviceID); put("ts", System.currentTimeMillis() / 1000)
+        }.toString().toByteArray()
+        val ctx = getApplication<Application>()
+        // Prefer the Double Ratchet; fall back to the static-key envelope
+        // when the peer has never published a ratchet identity.
+        val ratchetHex = RatchetSession.encryptForPeer(ctx, pd.deviceId, pl)
+        val env = if (ratchetHex != null) {
+            val sig = java.security.MessageDigest.getInstance("SHA-256").digest(ratchetHex.hexToBytes())
+            JSONObject().apply {
+                put("ratchet", 1); put("sender", deviceID); put("ts", System.currentTimeMillis() / 1000)
+                put("nonce", "0".repeat(24)); put("ciphertext", ratchetHex); put("tag", "0".repeat(32)); put("sig", sig.toHex())
+            }
+        } else {
+            if (pd.publicKeyHex.isBlank()) return "$peer's device has no public key on the relay."
+            val sk = CryptoProvider.deriveSessionKey(identityKey!!.private,
+                CryptoProvider.importPublicKey(pd.publicKeyHex.hexToBytes()))
+            val (iv, ct, tg) = CryptoProvider.encryptAESGCM(sk, pl)
+            JSONObject().apply {
+                put("sender", deviceID); put("ts", System.currentTimeMillis() / 1000)
+                put("nonce", iv.toHex()); put("ciphertext", ct.toHex()); put("tag", tg.toHex())
+                put("sig", CryptoProvider.hmacSign(sk, ct).toHex())
+            }
+        }
+        val expiresIn = if (disappearEnabled && disappearSeconds > 0) disappearSeconds else null
+        val myId = loadMyX25519Identity()
+        val resp = if (useAnonRouting && myId != null && pd.x25519 != null) {
+            NetworkClient.sendAnon(
+                recipientPubkey = pd.x25519, myIdPubkey = myId.second,
+                sharedRoot = Ratchet.x25519Dh(myId.first, pd.x25519),
+                innerEnvelope = env.toString().toByteArray(Charsets.UTF_8),
+                expiresInSeconds = expiresIn,
+            )
+        } else {
+            NetworkClient.post("/api/v1/messages/send",
+                JSONObject().apply { put("sender_device_id", deviceID); put("recipient_device_id", pd.deviceId); put("envelope", env.toString()) },
+                if (expiresIn != null) mapOf("X-Expires-In" to expiresIn.toString()) else emptyMap())
+        }
+        val st = resp.optInt("_status", 200)
+        if (st == 503) { maintenanceMode = true; return "the relay is in maintenance." }
+        if (st !in 200..299) return detailOf(resp)
+        return null
+    }
+
+    /** Send an image to the open conversation. Same recipient fix as send(). */
     fun sendImage(uri: android.net.Uri) {
-        val recip = selectedRecipient
-        if (recip.isBlank()) return
+        val peer = openPeer ?: return
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val app = getApplication<Application>()
+                val pd = resolvePeer(peer) ?: run { notice = "$peer hasn't signed in on any device yet."; return@launch }
                 val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@launch
+                if (bytes.size > 20 * 1024 * 1024) { notice = "That image is over 20 MB."; return@launch }
 
-                // Derive symmetric file key = SHA-256(my public-key blob).
+                // File key = SHA-256(my public-key blob); the recipient
+                // derives the same key from the blob the relay stores.
                 val pub = identityKey?.public?.encoded ?: return@launch
-                val md = java.security.MessageDigest.getInstance("SHA-256")
-                val sk = javax.crypto.spec.SecretKeySpec(md.digest(pub).copyOf(32), "AES")
-
+                val sk = javax.crypto.spec.SecretKeySpec(
+                    java.security.MessageDigest.getInstance("SHA-256").digest(pub).copyOf(32), "AES")
                 val (iv, ct, tag) = CryptoProvider.encryptAESGCM(sk, bytes)
-                val combined = iv + ct + tag
 
-                // Resolve a filename + mime; default to .jpg if unknown.
                 val mime = app.contentResolver.getType(uri) ?: "image/jpeg"
                 val ext = when {
-                    mime.endsWith("png") -> "png"
-                    mime.endsWith("gif") -> "gif"
-                    mime.endsWith("webp") -> "webp"
-                    mime.endsWith("bmp") -> "bmp"
-                    else -> "jpg"
+                    mime.endsWith("png") -> "png"; mime.endsWith("gif") -> "gif"
+                    mime.endsWith("webp") -> "webp"; mime.endsWith("bmp") -> "bmp"; else -> "jpg"
                 }
                 val fname = "img_${System.currentTimeMillis()}.$ext"
-
-                val meta = JSONObject().apply {
-                    put("name", fname); put("size", bytes.size)
-                    put("mime", mime); put("is_image", true)
-                }
-                val ur = NetworkClient.uploadFile("/api/v1/files/upload", combined,
-                    deviceID, recip, meta.toString())
+                val meta = JSONObject().apply { put("name", fname); put("size", bytes.size); put("mime", mime); put("is_image", true) }
+                val ur = NetworkClient.uploadFile("/api/v1/files/upload", iv + ct + tag, deviceID, pd.deviceId, meta.toString())
                 val fileId = ur.optString("file_id", "")
-                if (fileId.isEmpty()) return@launch
+                if (fileId.isEmpty()) { notice = "Image upload failed: ${detailOf(ur)}"; return@launch }
 
-                // Cache plaintext locally for inline display + viewer.
-                val dir = java.io.File(app.filesDir, "images").apply { mkdirs() }
-                val local = java.io.File(dir, "$fileId.$ext")
+                val local = java.io.File(java.io.File(app.filesDir, "images").apply { mkdirs() }, "$fileId.$ext")
                 local.writeBytes(bytes)
 
-                // Send file message envelope mirroring Windows' format.
-                val pkResp = NetworkClient.post("/api/v1/contacts/devices", JSONObject().apply { put("device_id", deviceID); put("contact_username", username) })
-                val devs = pkResp.optJSONArray("devices")
-                var peerPub: java.security.PublicKey? = null
-                if (devs != null) for (i in 0 until devs.length()) {
-                    val dv = devs.getJSONObject(i)
-                    if (dv.getString("id") == recip) { peerPub = CryptoProvider.importPublicKey(dv.getString("public_key").hexToBytes()); break }
+                if (pd.publicKeyHex.isBlank()) { notice = "$peer's device has no public key on the relay."; return@launch }
+                val sessionKey = CryptoProvider.deriveSessionKey(identityKey!!.private,
+                    CryptoProvider.importPublicKey(pd.publicKeyHex.hexToBytes()))
+                val pl = JSONObject().apply {
+                    put("type", "image"); put("file_id", fileId); put("name", fname); put("size", bytes.size)
+                    put("mime", mime); put("is_image", true); put("body", "Sent image: $fname")
+                }.toString().toByteArray()
+                val (eiv, ect, etag) = CryptoProvider.encryptAESGCM(sessionKey, pl)
+                val env = JSONObject().apply {
+                    put("sender", deviceID); put("ts", System.currentTimeMillis() / 1000)
+                    put("nonce", eiv.toHex()); put("ciphertext", ect.toHex())
+                    put("tag", etag.toHex()); put("sig", CryptoProvider.hmacSign(sessionKey, ect).toHex())
                 }
-                if (peerPub != null) {
-                    val sessionKey = CryptoProvider.deriveSessionKey(identityKey!!.private, peerPub)
-                    val pl = JSONObject().apply {
-                        put("type", "image"); put("file_id", fileId)
-                        put("name", fname); put("size", bytes.size)
-                        put("mime", mime); put("is_image", true)
-                        put("body", "Sent image: $fname")
-                    }.toString().toByteArray()
-                    val (eiv, ect, etag) = CryptoProvider.encryptAESGCM(sessionKey, pl)
-                    val esg = CryptoProvider.hmacSign(sessionKey, ect)
-                    val env = JSONObject().apply {
-                        put("sender", deviceID); put("ts", System.currentTimeMillis() / 1000)
-                        put("nonce", eiv.toHex()); put("ciphertext", ect.toHex())
-                        put("tag", etag.toHex()); put("sig", esg.toHex())
-                    }
-                    val imgHeaders = if (disappearEnabled && disappearSeconds > 0)
-                        mapOf("X-Expires-In" to disappearSeconds.toString()) else emptyMap()
-                    val imgResp = NetworkClient.post(
-                        "/api/v1/messages/send",
-                        JSONObject().apply {
-                            put("sender_device_id", deviceID)
-                            put("recipient_device_id", recip)
-                            put("envelope", env.toString())
-                        },
-                        imgHeaders,
-                    )
-                    if (imgResp.optInt("_status") == 503 && imgResp.optString("detail") == "maintenance") {
-                        maintenanceMode = true
-                        connStatus = "Upload refused — server in maintenance"
-                        connColor  = Color(0xFFff8a8a)
-                        return@launch
-                    }
+                val resp = NetworkClient.post("/api/v1/messages/send",
+                    JSONObject().apply { put("sender_device_id", deviceID); put("recipient_device_id", pd.deviceId); put("envelope", env.toString()) },
+                    if (disappearEnabled && disappearSeconds > 0) mapOf("X-Expires-In" to disappearSeconds.toString()) else emptyMap())
+                val st = resp.optInt("_status", 200)
+                if (st !in 200..299) {
+                    if (st == 503) maintenanceMode = true
+                    notice = "Image not sent: ${detailOf(resp)}"; return@launch
                 }
-
-                messages = messages + Msg(deviceID, "", imagePath = local.absolutePath,
-                    fileId = fileId, name = username)
-            } catch (_: Exception) {}
+                addMsg(peer, Msg(deviceID, "", imagePath = local.absolutePath, fileId = fileId, name = username, outgoing = true))
+            } catch (e: Exception) { notice = "Image not sent: ${NetworkClient.describe(e)}" }
         }
     }
 
@@ -932,46 +999,54 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
             try {
                 NetworkClient.deleteFile("/api/v1/files/$fid", deviceID)
                 msg.imagePath?.let { java.io.File(it).delete() }
-                messages = messages.map {
-                    if (it.fileId == fid) it.copy(imagePath = null, body = "[image deleted]") else it
+                conversations = conversations.mapValues { (_, list) ->
+                    list.map { if (it.fileId == fid) it.copy(imagePath = null, body = "Image deleted", system = true) else it }
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) { notice = "Couldn't delete the image: ${NetworkClient.describe(e)}" }
         }
     }
 
+    /** Exact-username lookup; the relay never lists or enumerates users. */
     fun search(q: String) {
-        // Lowercase server-side match — keep client behaviour consistent.
         val query = q.trim().lowercase()
+        searchDone = false; searchResult = null
+        if (query.length < 3) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val r = NetworkClient.post("/api/v1/contacts/search", JSONObject().apply { put("device_id",deviceID); put("query",query) })
-                val arr = r.optJSONArray("users"); val l = mutableListOf<String>()
-                if (arr != null) for (i in 0 until arr.length()) l.add(arr.getString(i))
-                sideList = l
-            } catch (_: Exception) {}
+                val r = NetworkClient.post("/api/v1/contacts/search", JSONObject().apply { put("device_id", deviceID); put("query", query) })
+                val arr = r.optJSONArray("users")
+                searchResult = if (arr != null && arr.length() > 0) arr.getString(0) else null
+            } catch (e: Exception) { notice = NetworkClient.describe(e) }
+            searchDone = true
         }
     }
 
+    /** This account's devices, for Settings → Security. */
     fun ownDevices() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val r = NetworkClient.post("/api/v1/devices/list", JSONObject().apply { put("device_id",deviceID) })
+                val r = NetworkClient.post("/api/v1/devices/list", JSONObject().apply { put("device_id", deviceID) })
                 val arr = r.optJSONArray("devices"); val l = mutableListOf<String>()
-                if (arr != null) for (i in 0 until arr.length()) { val d = arr.getJSONObject(i); l.add("${d.getString("name")} (${d.getString("id").take(12)})") }
-                sideList = l
+                if (arr != null) for (i in 0 until arr.length()) arr.getJSONObject(i).let { d ->
+                    val me = if (d.getString("id") == deviceID) " (this device)" else ""
+                    l.add("${d.optString("name").ifBlank { "Unnamed" }} · ${d.optString("platform")}$me")
+                }
+                myDevices = l
             } catch (_: Exception) {}
         }
     }
 
-    fun loadGroups() {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val r = NetworkClient.get("/api/v1/groups/$deviceID")
-                val arr = r.optJSONArray("groups"); val l = mutableListOf<String>()
-                if (arr != null) for (i in 0 until arr.length()) { val g = arr.getJSONObject(i); l.add("# ${g.getString("name")} [${g.getString("id").take(12)}]") }
-                sideList = l
-            } catch (_: Exception) {}
-        }
+    /** Forget this account on this phone. The account itself stays on
+     *  the relay; sign in again with the same username and password. */
+    fun signOut() {
+        isRegistered = false
+        deviceID = ""; username = ""; savedPassword = ""
+        pinHash = null; pinFailCount = 0; pinLocked = false
+        conversations = emptyMap(); unread = emptyMap(); contacts = emptyList(); openPeer = null
+        incomingRequests = emptyList(); outgoingPending = emptyList()
+        peerCache.clear()
+        val theme = themeName
+        prefs.edit().clear().putString("theme_name", theme).apply()
     }
 
     // ── Multi-device linking (sealed-Sesame style) ───────────────────
@@ -1103,6 +1178,12 @@ data class Msg(
     val imagePath: String? = null,   // local plaintext path for inline display
     val fileId: String? = null,      // server file id (for delete)
     val name: String? = null,        // sender display name
+    val ts: Long = System.currentTimeMillis(),
+    val outgoing: Boolean = false,
+    val pending: Boolean = false,    // still being sent
+    val failed: String? = null,      // why it wasn't sent, if it wasn't
+    val system: Boolean = false,     // a notice, not something anyone wrote
+    val id: String = java.util.UUID.randomUUID().toString(),
 )
 
 /**
@@ -1122,8 +1203,8 @@ fun PinSetupScreen(vm: ShroudVM) {
                 style = MaterialTheme.typography.headlineSmall,
                 color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(8.dp))
-            Text("4+ digits. You'll re-enter this whenever the screen turns " +
-                 "off or the app sits idle. 3 wrong attempts log you out.",
+            Text("At least 4 digits. You'll enter it whenever the screen turns off " +
+                 "or the app sits idle for a minute. Three wrong tries sign you out of this phone.",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center)
@@ -1200,9 +1281,10 @@ fun PinUnlockScreen(vm: ShroudVM) {
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     modifier = Modifier.fillMaxWidth())
             }
-            Text("Wrong attempts: ${vm.pinFailCount} / 3",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (vm.pinFailCount > 0) Text(
+                "${3 - vm.pinFailCount} attempt${if (3 - vm.pinFailCount == 1) "" else "s"} left before you're signed out of this phone",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.error)
             Spacer(Modifier.height(16.dp))
             Button(
                 onClick = {
@@ -1248,385 +1330,532 @@ fun TooltipIconButton(
     }
 }
 
+/* ── Small shared pieces ─────────────────────────────────────────────── */
+
+/** Letter avatar with a stable colour per name. */
+@Composable
+fun Avatar(name: String, size: androidx.compose.ui.unit.Dp = 40.dp) {
+    val palette = listOf(0xFF5E81AC, 0xFFBF616A, 0xFFA3BE8C, 0xFFD08770, 0xFFB48EAD, 0xFF88C0D0, 0xFFEBCB8B, 0xFF8FBCBB)
+    val c = Color(palette[(name.hashCode() and 0x7fffffff) % palette.size])
+    Box(
+        Modifier.size(size).clip(androidx.compose.foundation.shape.CircleShape).background(c),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(name.take(1).uppercase().ifBlank { "?" }, color = Color.White,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            fontSize = (size.value * 0.42f).sp)
+    }
+}
+
+@Composable
+private fun CountBadge(n: Int) {
+    Box(
+        Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(50))
+            .background(MaterialTheme.colorScheme.primary)
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+    ) { Text(if (n > 99) "99+" else n.toString(), color = MaterialTheme.colorScheme.onPrimary, fontSize = 11.sp) }
+}
+
+private val timeFmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+private val dayFmt = java.text.SimpleDateFormat("EEE d MMM", java.util.Locale.getDefault())
+private fun dayLabel(ts: Long): String {
+    val cal = java.util.Calendar.getInstance()
+    val today = cal.get(java.util.Calendar.DAY_OF_YEAR) to cal.get(java.util.Calendar.YEAR)
+    cal.timeInMillis = ts
+    val d = cal.get(java.util.Calendar.DAY_OF_YEAR) to cal.get(java.util.Calendar.YEAR)
+    return when {
+        d == today -> "Today"
+        d.second == today.second && d.first == today.first - 1 -> "Yesterday"
+        else -> dayFmt.format(java.util.Date(ts))
+    }
+}
+
+/* ── Sign in / create account ────────────────────────────────────────── */
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AuthScreen(vm: ShroudVM) {
-    var u by remember { mutableStateOf("") }; var p by remember { mutableStateOf("") }
-    var d by remember { mutableStateOf(android.os.Build.MODEL) }
-    var showReg by remember { mutableStateOf(false) }
+    var register by remember { mutableStateOf(false) }
+    var u by remember { mutableStateOf("") }
+    var p by remember { mutableStateOf("") }
+    var p2 by remember { mutableStateOf("") }
+    var d by remember { mutableStateOf(android.os.Build.MODEL ?: "Android") }
+    var show by remember { mutableStateOf(false) }
     var err by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
 
+    val uOk = u.trim().length >= 3
+    val pOk = p.length >= 12
+    val matchOk = !register || p == p2
+    val canSubmit = uOk && pOk && matchOk && !loading
+    val strength = when {
+        p.isEmpty() -> ""
+        p.length < 12 -> "Too short: ${12 - p.length} more character${if (12 - p.length == 1) "" else "s"}"
+        p.length >= 20 || (p.any(Char::isDigit) && p.any(Char::isUpperCase) && p.any { !it.isLetterOrDigit() }) -> "Strong"
+        else -> "OK. Longer is stronger."
+    }
+
     Scaffold { pad ->
-        Column(Modifier.fillMaxSize().padding(pad).padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("SHROUD", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
+        Column(
+            Modifier.fillMaxSize().padding(pad).verticalScroll(rememberScrollState()).padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(Modifier.height(32.dp))
+            Icon(Icons.Filled.Lock, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(44.dp))
+            Spacer(Modifier.height(10.dp))
+            Text("SHROUD", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+            Text("Private messages the relay can't read.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
             Spacer(Modifier.height(24.dp))
-            OutlinedTextField(u, { u = it }, label = { Text("Username") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(p, { p = it }, label = { Text("Password (12+)") }, modifier = Modifier.fillMaxWidth(), singleLine = true, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
-            if (showReg) { Spacer(Modifier.height(8.dp)); OutlinedTextField(d, { d = it }, label = { Text("Device Name") }, modifier = Modifier.fillMaxWidth(), singleLine = true) }
-            if (err != null) { Spacer(Modifier.height(8.dp)); Text(err!!, color = MaterialTheme.colorScheme.error) }
-            Spacer(Modifier.height(16.dp))
-            Button(onClick = { loading = true; err = null; vm.auth(u, p, d, showReg) { msg -> err = msg; loading = false } }, enabled = u.length >= 3 && p.length >= 12 && !loading, modifier = Modifier.fillMaxWidth().height(48.dp)) {
-                Text(if (loading) "Please wait..." else if (showReg) "Create Account" else "Login")
+
+            TabRow(selectedTabIndex = if (register) 1 else 0, containerColor = Color.Transparent) {
+                Tab(selected = !register, onClick = { register = false; err = null }, text = { Text("Sign in") })
+                Tab(selected = register, onClick = { register = true; err = null }, text = { Text("Create account") })
             }
-            Spacer(Modifier.height(8.dp))
-            TextButton(onClick = { showReg = !showReg; err = null }) { Text(if (showReg) "Already registered? Login" else "Don't have an account? Register", color = MaterialTheme.colorScheme.primary) }
+            Spacer(Modifier.height(16.dp))
+
+            OutlinedTextField(u, { u = it.trim(); err = null }, label = { Text("Username") },
+                supportingText = { if (u.isNotEmpty() && !uOk) Text("At least 3 characters") },
+                modifier = Modifier.fillMaxWidth(), singleLine = true)
+            OutlinedTextField(p, { p = it; err = null }, label = { Text("Password") },
+                supportingText = { if (register || (p.isNotEmpty() && !pOk)) Text(if (register) strength.ifEmpty { "At least 12 characters" } else "At least 12 characters") },
+                trailingIcon = { TextButton(onClick = { show = !show }) { Text(if (show) "Hide" else "Show") } },
+                visualTransformation = if (show) androidx.compose.ui.text.input.VisualTransformation.None else PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                modifier = Modifier.fillMaxWidth(), singleLine = true)
+            if (register) {
+                OutlinedTextField(p2, { p2 = it; err = null }, label = { Text("Confirm password") },
+                    isError = p2.isNotEmpty() && !matchOk,
+                    supportingText = { if (p2.isNotEmpty() && !matchOk) Text("Passwords don't match") },
+                    visualTransformation = if (show) androidx.compose.ui.text.input.VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                OutlinedTextField(d, { d = it }, label = { Text("Name for this device") },
+                    supportingText = { Text("Shown in your device list") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Text("Your password never leaves this phone unencrypted, and nobody can reset it. Write it down somewhere safe.",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 4.dp))
+            }
+
+            if (err != null) {
+                Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
+                        Icon(Icons.Filled.Warning, null, tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(err!!, color = MaterialTheme.colorScheme.onErrorContainer, fontSize = 13.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = { loading = true; err = null; vm.auth(u, p, d, register) { msg -> err = msg; loading = false } },
+                enabled = canSubmit, modifier = Modifier.fillMaxWidth().height(50.dp),
+            ) {
+                if (loading) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                    Spacer(Modifier.width(10.dp))
+                    Text(if (register) "Creating your account…" else "Signing in…")
+                } else Text(if (register) "Create account" else "Sign in")
+            }
+            Spacer(Modifier.height(24.dp))
+            Text("Relay: ${NetworkClient.RELAY.removePrefix("https://")}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class,
-       androidx.compose.foundation.ExperimentalFoundationApi::class)
+/* ── Main screen: conversation list or an open conversation ─────────── */
+
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(vm: ShroudVM) {
-    var showSide by remember { mutableStateOf(false) }
-    var tab by remember { mutableIntStateOf(0) }
-    var searchQ by remember { mutableStateOf("") }
     var fullscreenMsg by remember { mutableStateOf<Msg?>(null) }
     var pendingDelete by remember { mutableStateOf<Msg?>(null) }
     var safetyNumber by remember { mutableStateOf<String?>(null) }
+    var safetyLoading by remember { mutableStateOf(false) }
     var showLink by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
-    val ctx = androidx.compose.ui.platform.LocalContext.current
+    var showAdd by remember { mutableStateOf(false) }
+    val snack = remember { SnackbarHostState() }
 
-    if (showSettings) {
-        SettingsDialog(vm, onDismiss = { showSettings = false }, onLinkDevice = {
-            showSettings = false; showLink = true
-        })
+    LaunchedEffect(vm.notice) {
+        vm.notice?.let { snack.showSnackbar(it); vm.notice = null }
     }
+    LaunchedEffect(Unit) { vm.refreshContacts(); vm.ownDevices() }
+    androidx.activity.compose.BackHandler(enabled = vm.openPeer != null) { vm.closeChat() }
 
-    if (showLink) {
-        var pasted by remember { mutableStateOf("") }
-        var err by remember { mutableStateOf<String?>(null) }
-        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    if (showSettings) SettingsDialog(vm, onDismiss = { showSettings = false }, onLinkDevice = { showSettings = false; showLink = true })
+    if (showLink) LinkDeviceDialog(vm) { showLink = false }
+    if (showAdd) AddContactDialog(vm, onDismiss = { showAdd = false }, onMessage = { showAdd = false; vm.openChat(it) })
+    if (safetyLoading || safetyNumber != null) {
         AlertDialog(
-            onDismissRequest = { showLink = false },
-            confirmButton = { TextButton(onClick = { showLink = false }) { Text("Close") } },
-            title = { Text("Link another device") },
+            onDismissRequest = { safetyNumber = null; safetyLoading = false },
+            confirmButton = { TextButton(onClick = { safetyNumber = null; safetyLoading = false }) { Text("Done") } },
+            title = { Text("Verify ${vm.openPeer ?: ""}") },
             text = {
                 Column {
-                    Text(
-                        "End-to-end encrypted via ephemeral X25519. The server only " +
-                        "relays opaque ciphertext and forgets it after pickup. 5-min TTL.",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Text("Generate code (on the existing device)", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
-                    Button(
-                        onClick = { vm.generateLinkCode { msg -> err = msg } },
-                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                    ) { Text("Generate link code") }
-                    if (vm.linkCode.isNotEmpty()) {
-                        OutlinedTextField(
-                            value = vm.linkCode,
-                            onValueChange = {},
-                            readOnly = true,
-                            label = { Text("Link code") },
-                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                            singleLine = false,
-                            maxLines = 3,
-                        )
-                        TextButton(
-                            onClick = {
-                                clipboard.setText(androidx.compose.ui.text.AnnotatedString(vm.linkCode))
-                            },
-                            modifier = Modifier.padding(top = 4.dp),
-                        ) { Text("Copy", color = MaterialTheme.colorScheme.primary) }
-                    }
-                    Spacer(Modifier.height(16.dp))
-                    Text("Accept code (on the new device)", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
-                    OutlinedTextField(
-                        value = pasted,
-                        onValueChange = { pasted = it },
-                        label = { Text("Paste link code") },
-                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                        singleLine = false,
-                    )
-                    Button(
-                        onClick = { vm.acceptLinkCode(pasted.trim()) { msg -> err = msg } },
-                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                    ) { Text("Accept code") }
-                    if (vm.linkStatus.isNotEmpty()) {
-                        Spacer(Modifier.height(12.dp))
-                        Text(vm.linkStatus, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
-                    }
-                    if (err != null) {
-                        Text(err!!, color = MaterialTheme.colorScheme.error, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                    if (safetyLoading) CircularProgressIndicator(Modifier.padding(12.dp))
+                    else if (safetyNumber == "") Text("${vm.openPeer} hasn't set up encryption keys yet. Ask them to open SHROUD once, then try again.")
+                    else {
+                        Text(safetyNumber!!.chunked(5).joinToString(" "), fontSize = 20.sp,
+                            color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 12.dp),
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                        Text("Compare this number with ${vm.openPeer} in person or on a call you trust. " +
+                             "If you both see the same number, nobody is intercepting your messages.",
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             },
         )
     }
 
-    safetyNumber?.let { number ->
-        AlertDialog(
-            onDismissRequest = { safetyNumber = null },
-            confirmButton = { TextButton(onClick = { safetyNumber = null }) { Text("OK") } },
-            title = { Text("Safety number") },
-            text = {
-                Column {
-                    Text(
-                        text = number,
-                        fontSize = 24.sp,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(vertical = 12.dp),
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                    )
-                    Text(
-                        "Compare this number with the other person in person, over a phone call, or any other trusted channel. If both sides see the same number, the connection is free of MITM.",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            },
-        )
-    }
-
-    // v2.4.5 — switched from GetContent() to PickVisualMedia(): the
-    // legacy content picker requires READ_MEDIA_IMAGES on Android 13+
-    // and was silently no-op'ing on some devices. PickVisualMedia is
-    // the modern photo-picker that needs no runtime permission.
-    val pickImage = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
+    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) vm.sendImage(uri)
     }
-    val ctxLocal = androidx.compose.ui.platform.LocalContext.current
-
-    LaunchedEffect(Unit) { vm.ownDevices() }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snack) },
         topBar = {
+            val peer = vm.openPeer
             TopAppBar(
-                // v2.4.5 — title removed per user request; signed-in username
-                // remains in the trailing actions row so people know which
-                // account they're using.
-                title = { },
-                actions = {
-                    Text(vm.username, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TooltipIconButton(
-                        tip = "Verify safety number with this contact",
-                        onClick = { vm.computeSafetyNumber { fp -> safetyNumber = fp } },
-                        enabled = vm.selectedRecipient.isNotBlank(),
-                        icon = Icons.Filled.Lock,
-                        contentDesc = "Verify safety number",
-                    )
-                    TooltipIconButton(
-                        tip = "Search and pick a contact",
-                        onClick = { vm.ownDevices(); tab = 0; showSide = true },
-                        icon = Icons.Filled.Search,
-                        contentDesc = "Contacts",
-                    )
-                    TooltipIconButton(
-                        tip = "Open groups",
-                        onClick = { vm.loadGroups(); tab = 2; showSide = true },
-                        icon = Icons.Filled.Share,
-                        contentDesc = "Groups",
-                    )
-                    TooltipIconButton(
-                        tip = "App settings",
-                        onClick = { showSettings = true },
-                        icon = Icons.Filled.Settings,
-                        contentDesc = "Settings",
-                    )
+                navigationIcon = {
+                    if (peer != null) IconButton(onClick = { vm.closeChat() }) { Icon(Icons.Filled.ArrowBack, "Back to conversations") }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                title = {
+                    if (peer == null) Text("Conversations")
+                    else Row(verticalAlignment = Alignment.CenterVertically) {
+                        Avatar(peer, 34.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text(peer, fontSize = 17.sp, maxLines = 1)
+                            Text(if (vm.selectedRecipient.isBlank()) "Looking up their device…" else "End-to-end encrypted",
+                                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                },
+                actions = {
+                    if (peer != null) {
+                        TooltipIconButton(tip = "Check that nobody is intercepting this conversation",
+                            onClick = { safetyLoading = true; vm.computeSafetyNumber { fp -> safetyLoading = false; safetyNumber = fp ?: "" } },
+                            icon = Icons.Filled.Lock, contentDesc = "Verify contact")
+                    } else {
+                        TooltipIconButton(tip = "Add a contact", onClick = { showAdd = true },
+                            icon = Icons.Filled.Add, contentDesc = "Add contact")
+                    }
+                    TooltipIconButton(tip = "Settings", onClick = { vm.ownDevices(); showSettings = true },
+                        icon = Icons.Filled.Settings, contentDesc = "Settings")
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
             )
         },
         bottomBar = {
             Column {
-                // v2.4.2 — maintenance banner identical wording to Windows
-                // v2.4.1. Sits above the input; only visible while the
-                // server has flipped the maintenance flag.
                 if (vm.maintenanceMode) {
-                    Surface(
-                        color = Color(0xFFB00020),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            "Server is undergoing maintenance — messaging is disabled for security.",
-                            modifier = Modifier.fillMaxWidth().padding(8.dp),
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        )
+                    Surface(color = Color(0xFF8A5A00), modifier = Modifier.fillMaxWidth()) {
+                        Text("The relay is in maintenance. Messages can't be sent until it's back.",
+                            modifier = Modifier.fillMaxWidth().padding(10.dp), color = Color.White, fontSize = 13.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                     }
                 }
-                Text(vm.connStatus, fontSize = 10.sp, color = vm.connColor, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp))
-                Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
-                    Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(
-                            onClick = {
-                                if (vm.selectedRecipient.isBlank()) {
-                                    android.widget.Toast.makeText(
-                                        ctxLocal, "Pick a contact first", android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                } else {
-                                    pickImage.launch(
-                                        androidx.activity.result.PickVisualMediaRequest(
-                                            ActivityResultContracts.PickVisualMedia.ImageOnly
-                                        )
-                                    )
-                                }
-                            },
-                            enabled = !vm.maintenanceMode,
-                        ) { Icon(Icons.Filled.Add, "Attach image", tint = MaterialTheme.colorScheme.primary) }
-                        // 3x taller multi-line input matching the Windows v2.4.1
-                        // 108px bump. minLines=3 gives ~3 lines of visible text;
-                        // user can keep typing past that and the field scrolls.
-                        OutlinedTextField(
-                            value = vm.currentMessage,
-                            onValueChange = { vm.currentMessage = it },
-                            placeholder = {
-                                Text(if (vm.maintenanceMode)
-                                    "Server in maintenance — messaging disabled for security"
-                                    else "Message...")
-                            },
-                            modifier = Modifier.weight(1f),
-                            minLines = 3,
-                            maxLines = 6,
-                            enabled = !vm.maintenanceMode,
-                            colors = if (vm.maintenanceMode) {
-                                androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                                    disabledTextColor = Color(0xFFff8a8a),
-                                    disabledBorderColor = Color(0xFFB00020),
-                                    disabledContainerColor = Color(0x33B00020),
-                                )
-                            } else androidx.compose.material3.OutlinedTextFieldDefaults.colors(),
-                        )
-                        IconButton(
-                            onClick = { vm.send() },
-                            enabled = vm.currentMessage.isNotBlank() && !vm.maintenanceMode,
-                        ) { Icon(Icons.Filled.Send, "Send", tint = MaterialTheme.colorScheme.primary) }
-                    }
+                if (vm.openPeer != null) Composer(vm, onAttach = {
+                    pickImage.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                })
+                Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(7.dp).clip(androidx.compose.foundation.shape.CircleShape).background(vm.connColor))
+                    Spacer(Modifier.width(6.dp))
+                    Text(vm.connStatus, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                 }
             }
-        }
+        },
     ) { pad ->
-        Box(Modifier.fillMaxSize().padding(pad)) {
-            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items(vm.messages) { msg ->
-                    val isMe = msg.sender == vm.deviceID
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start) {
-                        Surface(color = if (isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium, modifier = Modifier.widthIn(max = 280.dp)) {
-                            Column(Modifier.padding(8.dp)) {
-                                if (msg.imagePath != null) {
-                                    val bm = remember(msg.imagePath) {
-                                        android.graphics.BitmapFactory.decodeFile(msg.imagePath)
-                                    }
-                                    if (bm != null) {
-                                        Image(
-                                            bitmap = bm.asImageBitmap(),
-                                            contentDescription = "Sent image",
-                                            modifier = Modifier
-                                                .sizeIn(maxWidth = 260.dp, maxHeight = 320.dp)
-                                                .clip(MaterialTheme.shapes.small)
-                                                .combinedClickable(
-                                                    onClick = { fullscreenMsg = msg },
-                                                    onLongClick = { pendingDelete = msg }
-                                                ),
-                                            contentScale = ContentScale.Fit
-                                        )
-                                    } else {
-                                        Text("[image unavailable]", color = if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface)
-                                    }
-                                } else if (msg.body.isNotEmpty()) {
-                                    val onCol = if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-                                    Text(
-                                        text = mdToAnnotated(msg.body, onCol),
-                                        color = onCol,
-                                    )
-                                }
-                                Text((msg.name ?: vm.username).take(16), fontSize = 9.sp, color = (if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface).copy(alpha = 0.5f))
-                            }
-                        }
-                    }
-                }
-            }
-            if (showSide) {
-                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background.copy(alpha = 0.95f)) {
-                    Column(Modifier.padding(16.dp)) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(if (tab == 0) "Contacts" else "Groups", style = MaterialTheme.typography.titleMedium)
-                            IconButton(onClick = { showSide = false }) { Icon(Icons.Filled.Close, "Close") }
-                        }
-                        if (tab == 0) {
-                            OutlinedTextField(searchQ, { searchQ = it; if (it.length >= 2) vm.search(it) }, placeholder = { Text("Search...") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                            Spacer(Modifier.height(8.dp))
-                        }
-                        LazyColumn { items(vm.sideList) { item ->
-                            TextButton(onClick = {
-                                vm.selectedRecipient = item.substringAfter("(").substringBefore(")")
-                                if (vm.selectedRecipient.isEmpty()) vm.selectedRecipient = item
-                                showSide = false
-                            }) { Text(item, color = MaterialTheme.colorScheme.onSurface) }
-                        }}
-                    }
-                }
-            }
+        Box(Modifier.fillMaxSize().padding(pad).background(MaterialTheme.colorScheme.background)) {
+            if (vm.openPeer == null) ConversationList(vm, onAdd = { showAdd = true })
+            else MessageList(vm, onOpenImage = { fullscreenMsg = it }, onDeleteImage = { pendingDelete = it })
         }
     }
 
-    /* Fullscreen image viewer with a clearly-visible orange X close button
-       in the top-right corner and a Delete button in the bottom-right. */
     fullscreenMsg?.let { msg ->
-        Dialog(
-            onDismissRequest = { fullscreenMsg = null },
-            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true)
-        ) {
-            Box(Modifier.fillMaxSize().background(Color(0xEE000000))) {
-                val bm = remember(msg.imagePath) {
-                    msg.imagePath?.let { android.graphics.BitmapFactory.decodeFile(it) }
+        Dialog(onDismissRequest = { fullscreenMsg = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true)) {
+            Box(Modifier.fillMaxSize().background(Color(0xF0000000))) {
+                val bm = remember(msg.imagePath) { msg.imagePath?.let { android.graphics.BitmapFactory.decodeFile(it) } }
+                if (bm != null) Image(bm.asImageBitmap(), "Image", Modifier.fillMaxSize().padding(24.dp), contentScale = ContentScale.Fit)
+                IconButton(onClick = { fullscreenMsg = null },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).size(48.dp)
+                        .clip(androidx.compose.foundation.shape.CircleShape).background(Color(0x99000000))) {
+                    Icon(Icons.Filled.Close, "Close", tint = Color.White)
                 }
-                if (bm != null) {
-                    Image(
-                        bitmap = bm.asImageBitmap(),
-                        contentDescription = "Image",
-                        modifier = Modifier.fillMaxSize().padding(32.dp),
-                        contentScale = ContentScale.Fit
-                    )
+                if (msg.fileId != null) OutlinedButton(onClick = { pendingDelete = msg; fullscreenMsg = null },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)) {
+                    Icon(Icons.Filled.Delete, null, tint = Color(0xFFFF8A8A), modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp)); Text("Delete", color = Color(0xFFFF8A8A))
                 }
-                /* X close button — bright orange, white border, top-right. */
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(16.dp)
-                        .size(56.dp)
-                        .clip(androidx.compose.foundation.shape.CircleShape)
-                        .background(Color(0xFFff8c1e))
-                        .combinedClickable(
-                            onClick = { fullscreenMsg = null },
-                            onLongClick = { fullscreenMsg = null }
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Filled.Close, contentDescription = "Close",
-                         tint = Color.Black, modifier = Modifier.size(32.dp))
-                }
-                /* Delete button — bottom-right. */
-                Button(
-                    onClick = { pendingDelete = msg; fullscreenMsg = null },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xCC551515), contentColor = Color(0xFFffaaaa)),
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
-                ) { Text("Delete") }
             }
         }
     }
-
     pendingDelete?.let { msg ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
-            title = { Text("Delete image") },
-            text = { Text("Permanently delete this image for both you and the recipient?") },
-            confirmButton = {
-                TextButton(onClick = { vm.deleteImage(msg); pendingDelete = null }) { Text("Delete") }
-            },
-            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } }
+            title = { Text("Delete this image?") },
+            text = { Text("It will be removed from the relay and from this phone. If ${vm.openPeer ?: "the other person"} already downloaded it, their copy stays.") },
+            confirmButton = { TextButton(onClick = { vm.deleteImage(msg); pendingDelete = null }) { Text("Delete") } },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } },
         )
     }
+}
+
+@Composable
+private fun ConversationList(vm: ShroudVM, onAdd: () -> Unit) {
+    LazyColumn(Modifier.fillMaxSize()) {
+        if (vm.incomingRequests.isNotEmpty()) {
+            item { SectionLabel("Contact requests") }
+            items(vm.incomingRequests, key = { "req-" + it.id }) { r ->
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Avatar(r.from)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(r.from, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+                        Text(r.reason.ifBlank { "Wants to add you as a contact" }, fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
+                    }
+                    TextButton(onClick = { vm.respondRequest(r, false) }) { Text("Decline") }
+                    Button(onClick = { vm.respondRequest(r, true) }) { Text("Accept") }
+                }
+            }
+            item { Divider() }
+        }
+        val names = vm.contacts.map { it.username }
+        val ordered = names.sortedByDescending { vm.conversations[it]?.lastOrNull()?.ts ?: 0L }
+        if (ordered.isEmpty()) {
+            item {
+                Column(Modifier.fillMaxWidth().padding(top = 72.dp, start = 32.dp, end = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Filled.Person, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(48.dp))
+                    Spacer(Modifier.height(12.dp))
+                    Text("No conversations yet", style = MaterialTheme.typography.titleMedium)
+                    Text("Add someone by their exact username. They'll get a request to accept, and you can message them right away.",
+                        fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.padding(top = 6.dp, bottom = 16.dp))
+                    Button(onClick = onAdd) { Icon(Icons.Filled.Add, null); Spacer(Modifier.width(6.dp)); Text("Add a contact") }
+                }
+            }
+        } else {
+            item { SectionLabel("Contacts") }
+            items(ordered, key = { "c-$it" }) { name ->
+                val last = vm.conversations[name]?.lastOrNull()
+                val unread = vm.unread[name] ?: 0
+                val pending = name in vm.outgoingPending
+                Row(Modifier.fillMaxWidth().clickable { vm.openChat(name) }.padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Avatar(name)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(name, fontWeight = if (unread > 0) androidx.compose.ui.text.font.FontWeight.Bold else androidx.compose.ui.text.font.FontWeight.Medium)
+                        Text(
+                            when {
+                                last == null && pending -> "Request sent. You can message them already."
+                                last == null -> "Say hello"
+                                last.imagePath != null -> (if (last.outgoing) "You: " else "") + "Image"
+                                else -> (if (last.outgoing) "You: " else "") + last.body
+                            },
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        if (last != null) Text(timeFmt.format(java.util.Date(last.ts)), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (unread > 0) { Spacer(Modifier.height(4.dp)); CountBadge(unread) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(text.uppercase(), fontSize = 11.sp, letterSpacing = 0.8.sp, color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp))
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun MessageList(vm: ShroudVM, onOpenImage: (Msg) -> Unit, onDeleteImage: (Msg) -> Unit) {
+    val msgs = vm.messages
+    val state = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(msgs.size) { if (msgs.isNotEmpty()) state.animateScrollToItem(msgs.size - 1) }
+    if (msgs.isEmpty()) {
+        Column(Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(Icons.Filled.Lock, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(40.dp))
+            Spacer(Modifier.height(10.dp))
+            Text("Messages with ${vm.openPeer} are end-to-end encrypted.", textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            Text("The relay only ever sees scrambled bytes. Tap the lock above to verify you're really talking to them.",
+                fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
+        }
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
+        items(msgs.size, key = { msgs[it].id }) { i ->
+            val msg = msgs[i]
+            val prev = msgs.getOrNull(i - 1)
+            if (prev == null || dayLabel(prev.ts) != dayLabel(msg.ts)) {
+                Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = androidx.compose.foundation.shape.RoundedCornerShape(50)) {
+                        Text(dayLabel(msg.ts), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp))
+                    }
+                }
+            }
+            if (msg.system) {
+                Text(msg.body, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp))
+                return@items
+            }
+            val grouped = prev != null && !prev.system && prev.outgoing == msg.outgoing && msg.ts - prev.ts < 120_000
+            Bubble(vm, msg, grouped, onOpenImage, onDeleteImage)
+        }
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun Bubble(vm: ShroudVM, msg: Msg, grouped: Boolean, onOpenImage: (Msg) -> Unit, onDeleteImage: (Msg) -> Unit) {
+    val me = msg.outgoing
+    val bg = if (me) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+    val fg = if (me) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+    val shape = androidx.compose.foundation.shape.RoundedCornerShape(
+        topStart = 16.dp, topEnd = 16.dp, bottomStart = if (me) 16.dp else 4.dp, bottomEnd = if (me) 4.dp else 16.dp)
+    Column(Modifier.fillMaxWidth().padding(top = if (grouped) 2.dp else 8.dp),
+        horizontalAlignment = if (me) Alignment.End else Alignment.Start) {
+        Surface(color = bg, shape = shape, modifier = Modifier.widthIn(max = 300.dp)) {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                if (msg.imagePath != null) {
+                    val bm = remember(msg.imagePath) { android.graphics.BitmapFactory.decodeFile(msg.imagePath) }
+                    if (bm != null) Image(bm.asImageBitmap(), "Image",
+                        Modifier.sizeIn(maxWidth = 260.dp, maxHeight = 320.dp).clip(MaterialTheme.shapes.small)
+                            .combinedClickable(onClick = { onOpenImage(msg) }, onLongClick = { onDeleteImage(msg) }),
+                        contentScale = ContentScale.Fit)
+                    else Text("Image unavailable", color = fg)
+                } else {
+                    Text(mdToAnnotated(msg.body, fg), color = fg, fontSize = 15.sp)
+                }
+                Row(Modifier.align(Alignment.End).padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(timeFmt.format(java.util.Date(msg.ts)), fontSize = 10.sp, color = fg.copy(alpha = 0.7f))
+                    if (me) {
+                        Spacer(Modifier.width(4.dp))
+                        when {
+                            msg.pending -> Text("sending", fontSize = 10.sp, color = fg.copy(alpha = 0.7f))
+                            msg.failed != null -> Icon(Icons.Filled.Warning, "Not sent", tint = Color(0xFFFFD0D0), modifier = Modifier.size(12.dp))
+                            else -> Icon(Icons.Filled.Check, "Sent", tint = fg.copy(alpha = 0.8f), modifier = Modifier.size(12.dp))
+                        }
+                    }
+                }
+            }
+        }
+        if (msg.failed != null) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
+                Text("Not sent: ${msg.failed}", fontSize = 11.sp, color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.widthIn(max = 220.dp))
+                TextButton(onClick = { vm.retry(msg) }) {
+                    Icon(Icons.Filled.Refresh, null, modifier = Modifier.size(14.dp)); Spacer(Modifier.width(4.dp)); Text("Retry", fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Composer(vm: ShroudVM, onAttach: () -> Unit) {
+    val blocked = vm.maintenanceMode
+    Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp), verticalAlignment = Alignment.Bottom) {
+            IconButton(onClick = onAttach, enabled = !blocked && vm.selectedRecipient.isNotBlank()) {
+                Icon(Icons.Filled.Add, "Send an image", tint = MaterialTheme.colorScheme.primary)
+            }
+            OutlinedTextField(
+                value = vm.currentMessage, onValueChange = { vm.currentMessage = it; vm.touch() },
+                placeholder = { Text(if (blocked) "Sending is paused during maintenance" else "Message ${vm.openPeer ?: ""}") },
+                modifier = Modifier.weight(1f), minLines = 1, maxLines = 6, enabled = !blocked,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
+            )
+            IconButton(onClick = { vm.send() }, enabled = vm.currentMessage.isNotBlank() && !blocked) {
+                Icon(Icons.Filled.Send, "Send", tint = if (vm.currentMessage.isNotBlank() && !blocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddContactDialog(vm: ShroudVM, onDismiss: () -> Unit, onMessage: (String) -> Unit) {
+    var q by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) { vm.searchResult = null; vm.searchDone = false }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        title = { Text("Add a contact") },
+        text = {
+            Column {
+                Text("Enter their exact username. For privacy the relay only confirms exact matches; it never lists accounts.",
+                    fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(q, { q = it.trim(); vm.searchResult = null; vm.searchDone = false },
+                    label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    trailingIcon = { IconButton(onClick = { vm.search(q) }, enabled = q.length >= 3) { Icon(Icons.Filled.Search, "Look up") } },
+                    keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { vm.search(q) }))
+                Spacer(Modifier.height(12.dp))
+                val found = vm.searchResult
+                when {
+                    found != null -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        Avatar(found, 36.dp); Spacer(Modifier.width(10.dp))
+                        Text(found, Modifier.weight(1f), fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+                        val known = vm.contacts.any { it.username == found && it.friend }
+                        if (!known) TextButton(onClick = { vm.addContact(found) }) { Text("Add") }
+                        Button(onClick = { onMessage(found) }) { Text("Message") }
+                    }
+                    vm.searchDone -> Text("No account called \"$q\" on this relay.", fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun LinkDeviceDialog(vm: ShroudVM, onDismiss: () -> Unit) {
+    var pasted by remember { mutableStateOf("") }
+    var err by remember { mutableStateOf<String?>(null) }
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        title = { Text("Link another device") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("Copies your contact list to a new device. The code expires after 5 minutes.",
+                    fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(14.dp))
+                Text("1. On this device", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                Button(onClick = { vm.generateLinkCode { msg -> err = msg } }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) { Text("Create a link code") }
+                if (vm.linkCode.isNotEmpty()) {
+                    OutlinedTextField(vm.linkCode, {}, readOnly = true, label = { Text("Link code") },
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp), maxLines = 3)
+                    TextButton(onClick = { clipboard.setText(androidx.compose.ui.text.AnnotatedString(vm.linkCode)) }) { Text("Copy code") }
+                }
+                Spacer(Modifier.height(14.dp))
+                Text("2. On the new device", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                OutlinedTextField(pasted, { pasted = it }, label = { Text("Paste the link code") },
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+                Button(onClick = { vm.acceptLinkCode(pasted.trim()) { msg -> err = msg } }, enabled = pasted.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) { Text("Use this code") }
+                if (vm.linkStatus.isNotEmpty()) Text(vm.linkStatus, fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp))
+                if (err != null) Text(err!!, color = MaterialTheme.colorScheme.error, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
+            }
+        },
+    )
 }
 
 /**
@@ -1801,7 +2030,7 @@ private fun MessagesTab(vm: ShroudVM) {
         }
         Spacer(Modifier.height(18.dp))
         Text("Rich text", style = MaterialTheme.typography.titleSmall)
-        Text("Incoming messages render **bold**, *italic*, `code`, and clickable URLs.\nWindows users get the same. Emoji works via your system keyboard.",
+        Text("Messages show **bold**, *italic* and `code`, and highlight links. The Windows app does the same.",
             fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
@@ -1832,14 +2061,31 @@ private fun SecurityTab(vm: ShroudVM, onLinkDevice: () -> Unit) {
             fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(8.dp))
         Button(onClick = onLinkDevice) { Text("Link another device…") }
+        if (vm.myDevices.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Text("Your devices", style = MaterialTheme.typography.labelLarge)
+            vm.myDevices.forEach { Text(it, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp)) }
+        }
         Spacer(Modifier.height(18.dp))
-        Text("Safety numbers", style = MaterialTheme.typography.titleSmall)
-        Text("Tap the shield icon at the top of the chat with a contact selected to see a 30-digit number. Compare it with them in person to defeat MITM.",
+        Text("Verifying contacts", style = MaterialTheme.typography.titleSmall)
+        Text("Open a conversation and tap the lock at the top to see a safety number. Compare it with the other person in person or on a call you trust.",
             fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(18.dp))
         Text("Screen-capture protection", style = MaterialTheme.typography.titleSmall)
-        Text("FLAG_SECURE is set on this activity — screenshots and screen-share record a black frame instead of the chat.",
+        Text("Screenshots and screen recordings of SHROUD come out black.",
             fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(18.dp))
+        Text("Signed in as ${vm.username}", style = MaterialTheme.typography.titleSmall)
+        Text("Relay ${NetworkClient.RELAY.removePrefix("https://")}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        var confirm by remember { mutableStateOf(false) }
+        OutlinedButton(onClick = { confirm = true }, modifier = Modifier.padding(top = 8.dp)) { Text("Sign out of this phone") }
+        if (confirm) AlertDialog(
+            onDismissRequest = { confirm = false },
+            title = { Text("Sign out?") },
+            text = { Text("Conversations on this phone are cleared. Your account stays on the relay; sign in again with the same username and password.") },
+            confirmButton = { TextButton(onClick = { confirm = false; vm.signOut() }) { Text("Sign out") } },
+            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+        )
     }
 }
 
@@ -1854,19 +2100,21 @@ private fun HelpTab() {
         }
         section("How conversations work",
             "Every message is encrypted on your device before it touches the server. The server can route ciphertext and not read it.")
+        section("Adding people",
+            "On the Conversations screen tap + and enter their exact username. They get a contact request; you can message them straight away.")
         section("Verifying contacts",
-            "Open a chat → tap the shield icon at the top. A 30-digit number appears. Compare it out-of-band; same on both sides means no MITM.")
+            "Open a conversation and tap the lock at the top. Compare the number with the other person in person or on a call you trust. The same number on both sides means nobody is intercepting.")
         section("Disappearing messages",
             "Settings → Messages. Toggle on, pick minutes/seconds. The server's sweeper deletes expired messages. Default is OFF.")
         section("Theme",
             "Settings → Appearance. Pick from preset palettes. Choice survives app restart.")
         section("Linking a second device",
             "Settings → Security → Link another device. Follow the short-code prompts. 5-minute TTL.")
-        section("If you suspect coercion",
-            "Five wrong-password attempts auto-wipes the account on the server side. Cannot be undone.")
+        section("Your PIN",
+            "Three wrong PIN attempts sign you out of this phone. Your account stays on the relay.")
         section("Troubleshooting",
-            "'Server in maintenance' — operator paused the system, sends are 503'd. Wait + retry.\n" +
-            "'Server offline' — heartbeat is failing; check connectivity.")
+            "\"The relay is in maintenance\": the operator has paused sending. Wait and try again.\n" +
+            "\"Can't reach the relay\": check your connection. A message that fails shows why, with a Retry button.")
         section("Source",
             "https://github.com/ExposingTheBadge/Shroud")
     }

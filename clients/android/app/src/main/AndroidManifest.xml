@@ -10,7 +10,7 @@
         android:label="SHROUD"
         android:supportsRtl="true"
         android:theme="@style/Theme.Shroud"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="false">
 
         <activity
             android:name=".MainActivity"

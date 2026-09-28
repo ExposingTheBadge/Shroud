@@ -37,7 +37,7 @@ object ErrorReporter {
     private var operatorDiagPubkey: ByteArray? = null
 
     @Volatile
-    private var relayBaseUrl: String = "https://173.245.244.180:58443"
+    private var relayBaseUrl: String = NetworkClient.RELAY
 
     private var defaultHandler: Thread.UncaughtExceptionHandler? = null
 
@@ -126,7 +126,7 @@ object ErrorReporter {
         )
 
         val url = URL(relayBaseUrl.trimEnd('/') + "/api/v1/diagnostics/report")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
+        val conn = NetworkClient.open(url).apply {
             requestMethod = "POST"
             setRequestProperty("Content-Type", "application/octet-stream")
             setRequestProperty(
