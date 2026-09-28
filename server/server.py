@@ -4797,7 +4797,11 @@ async def admin_fingerprint_login(request: Request):
     db.execute("INSERT INTO admin_sessions (id, ip, user_agent) VALUES (?,?,?)", (sid, ar_enc(ip), ar_enc(ua)))
     db.commit()
 
-    resp = JSONResponse({"ok": True, "session_id": sid})
+    # password_set=false tells login.js to store the password just typed,
+    # so a passwordless fingerprint gets one on its next sign-in instead
+    # of the operator having to hand-craft a POST to set-password.
+    resp = JSONResponse({"ok": True, "session_id": sid,
+                         "password_set": bool(row[1])})
     resp.set_cookie(key="shroud_sid", value=sid, httponly=True, samesite="lax", max_age=SESSION_TIMEOUT_SEC, path="/")
     # Double-submit CSRF: the cookie MUST be readable by JS so admin.js
     # can echo it as X-CSRF-Token on writes. Same-origin policy keeps
