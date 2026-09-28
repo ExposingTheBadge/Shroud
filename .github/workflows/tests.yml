@@ -35,6 +35,10 @@ jobs:
       - name: Admin dashboard / API contract
         run: python -m tests.admin_api_contract
 
+      # One check per fixed relay bug (auth, bans, groups, files, 500s).
+      - name: Relay regressions
+        run: python -m tests.server_regressions
+
       # Two in-process relays: gossip moves a sealed envelope A -> B, and
       # unsigned / unpinned federation calls are refused.
       - name: Two-relay federation
