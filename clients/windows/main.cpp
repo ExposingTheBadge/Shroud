@@ -121,7 +121,7 @@ QString themeQSS(const Theme &t) {
     /* Segmented toggle (Contacts / Groups) and small icon buttons. */
     s += QString("QPushButton#segment { border-radius: 8px; padding: 6px 10px; background: transparent; border: 1px solid transparent; color: %1; }").arg(dm);
     s += QString("QPushButton#segment:checked { background-color: %1; color: %2; border: 1px solid %3; font-weight: 600; }").arg(in, tx, bd);
-    s += QString("QPushButton#iconBtn { padding: 6px 10px; border-radius: 8px; background: transparent; border: 1px solid transparent; }");
+    s += QString("QPushButton#iconBtn { font-size: 13pt; padding: 3px 8px; border-radius: 8px; background: transparent; border: 1px solid transparent; }");
     s += QString("QPushButton#iconBtn:hover { background-color: %1; border-color: %2; }").arg(in, bd);
     s += QString("QPushButton#iconBtn:checked { background-color: %1; color: %2; border-color: %1; }").arg(ac, onAc);
     s += QString("QListWidget { background-color: %1; color: %2; border: none; outline: 0; }").arg(su, tx);
@@ -129,6 +129,15 @@ QString themeQSS(const Theme &t) {
     s += QString("QListWidget::item:hover { background-color: %1; }").arg(in);
     s += QString("QListWidget::item:selected { background-color: %1; color: %2; }").arg(ac, onAc);
     s += QString("QCheckBox, QRadioButton { color: %1; spacing: 8px; background: transparent; }").arg(tx);
+    /* Draw the indicators ourselves: with a stylesheet on "*" the native
+     * box can vanish against light backgrounds. */
+    s += QString("QCheckBox::indicator, QRadioButton::indicator { width: 16px; height: 16px; border: 1px solid %1; background-color: %2; }").arg(dm, in);
+    s += QString("QCheckBox::indicator { border-radius: 4px; }");
+    s += QString("QRadioButton::indicator { border-radius: 9px; }");
+    s += QString("QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: %1; }").arg(ac);
+    s += QString("QCheckBox::indicator:checked { background-color: %1; border-color: %1; image: url(%2); }").arg(ac, onAc == "#ffffff" ? ":/check-light.png" : ":/check-dark.png");
+    s += QString("QRadioButton::indicator:checked { background-color: %1; border: 4px solid %2; }").arg(ac, in);
+    s += QString("QCheckBox::indicator:disabled, QRadioButton::indicator:disabled { border-color: %1; }").arg(bd);
     s += QString("QGroupBox { color: %1; border: 1px solid %2; border-radius: 10px; margin-top: 14px; padding: 14px 10px 10px 10px; }").arg(tx, bd);
     s += QString("QGroupBox::title { color: %1; subcontrol-origin: margin; left: 12px; padding: 0 4px; font-weight: 600; }").arg(dm);
     s += QString("QLabel { color: %1; background: transparent; }").arg(tx);
@@ -240,6 +249,7 @@ static QIcon avatarIcon(const QString &name, int size = 32, bool group = false) 
 static bool gDisappearEnabled = false;
 static int  gDisappearSeconds = 60;
 static bool gRichText = true;
+static bool gFlashOnMessage = true;   /* flash the taskbar button on new messages */
 
 /* Network-layer transport selector — one transport at a time, exclusive.
  *
@@ -296,6 +306,7 @@ static void loadUserPrefs() {
     if (RegQueryValueExA(hk, "DisappearEnabled", NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gDisappearEnabled = val != 0;
     if (RegQueryValueExA(hk, "DisappearSec",     NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gDisappearSeconds = (int)val;
     if (RegQueryValueExA(hk, "RichText",         NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gRichText = val != 0;
+    if (RegQueryValueExA(hk, "FlashOnMessage",   NULL, NULL, (BYTE*)&val, &sz) == ERROR_SUCCESS) gFlashOnMessage = val != 0;
     /* Transport selector (Direct / Tor). v2.3.0 stored TorEnabled as a bool;
      * v2.3.1 briefly added a Transport DWORD with a Nym value (removed in
      * v2.3.2). Honor TorEnabled for back-compat, then accept Transport but
@@ -348,6 +359,7 @@ static void saveUserPrefs() {
     v = gDisappearEnabled ? 1 : 0;    RegSetValueExA(hk, "DisappearEnabled", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
     v = (DWORD)gDisappearSeconds;     RegSetValueExA(hk, "DisappearSec", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
     v = gRichText ? 1 : 0;            RegSetValueExA(hk, "RichText", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
+    v = gFlashOnMessage ? 1 : 0;      RegSetValueExA(hk, "FlashOnMessage", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
     v = static_cast<DWORD>(gTransport); RegSetValueExA(hk, "Transport", 0, REG_DWORD, (BYTE*)&v, sizeof(v));
     /* Keep TorEnabled written too, so v2.3.0 installs that read this key
      * (e.g. a downgrade) still see the right Tor state. */
@@ -531,10 +543,17 @@ public:
         /* Block screen-capture / screen-share tools from recording this
            window. WDA_EXCLUDEFROMCAPTURE is Win 10 2004+; degrades to
            WDA_MONITOR (black-out on capture) on older builds. */
+#ifndef SHROUD_UI_PREVIEW
         HWND hwnd = (HWND)this->winId();
         if (!SetWindowDisplayAffinity(hwnd, /*WDA_EXCLUDEFROMCAPTURE=*/0x00000011)) {
             SetWindowDisplayAffinity(hwnd, /*WDA_MONITOR=*/0x00000001);
         }
+#endif
+        /* SHROUD_UI_PREVIEW is a developer-only build flag for looking at
+         * UI changes against a local relay (see the note in
+         * CMakeLists.txt): it leaves the window capturable so screenshots work
+         * and keeps crash reports off the operator inbox. Release and CI
+         * builds never define it. */
 
         /* Init crypto + network */
         crypto_init();
@@ -570,9 +589,9 @@ private:
     QListWidget *m_sideList;
     QTextBrowser *m_chatLog;
     QMap<QString, QString> m_imagePaths; // file_id -> local plaintext image path
-    QLineEdit *m_toField, *m_msgInput;
-    QPushButton *m_sendBtn, *m_attachBtn;
-    QLabel *m_statusBar;
+    QLineEdit *m_msgInput = nullptr;
+    QPushButton *m_sendBtn = nullptr, *m_attachBtn = nullptr;
+    QLabel *m_statusBar = nullptr;
     bool m_registered = false, m_tabGroups = false;
     bool m_maintenanceMode = false;   // server-wide; set from heartbeat + send 503s
     QString m_deviceId, m_username, m_deviceName, m_platform, m_password;
@@ -600,28 +619,12 @@ private:
      * gets a 503. Flips the banner, disables the send button + input,
      * and reverts everything when maintenance ends. */
     void setMaintenanceMode(bool on) {
-        if (on == m_maintenanceMode && m_maintenanceBanner) {
-            /* Idempotent — but always re-apply the visible flag in case the
-             * banner widget was rebuilt by buildChatUI(). */
-            if (m_maintenanceBanner) m_maintenanceBanner->setVisible(on);
-            if (m_msgInput) m_msgInput->setEnabled(!on);
-            if (m_sendBtn)  m_sendBtn->setEnabled(!on);
-            if (m_attachBtn) m_attachBtn->setEnabled(!on);
-            return;
-        }
         m_maintenanceMode = on;
-        if (m_maintenanceBanner) m_maintenanceBanner->setVisible(on);
-        if (m_msgInput) {
-            m_msgInput->setEnabled(!on);
-            m_msgInput->setPlaceholderText(on
-                ? "Server in maintenance — messaging disabled for security"
-                : "Type a message...  (Win + . for emoji)");
-            m_msgInput->setStyleSheet(on
-                ? "QLineEdit { background: #2a0a0a; color: #ff8a8a; border: 2px solid #b00020; }"
-                : "");
+        if (m_maintenanceBanner) {
+            QWidget *wrap = qobject_cast<QWidget*>(m_maintenanceBanner->property("wrap").value<QObject*>());
+            (wrap ? wrap : (QWidget*)m_maintenanceBanner)->setVisible(on);
         }
-        if (m_sendBtn)  m_sendBtn->setEnabled(!on);
-        if (m_attachBtn) m_attachBtn->setEnabled(!on);
+        updateComposerState();
     }
 
     /* Search result panel widgets — built once in buildChatUI, shown when a
@@ -694,29 +697,75 @@ private:
 
     void setupMenuBar() {
         QMenu *file = menuBar()->addMenu("&File");
-        QAction *upd = file->addAction("Check for &Updates");
+        QAction *upd = file->addAction("Check for &updates");
         connect(upd, &QAction::triggered, [this]() { checkForUpdates(true); });
         file->addSeparator();
-        QAction *ex = file->addAction("E&xit"); connect(ex, &QAction::triggered, this, &QWidget::close);
+        QAction *ex = file->addAction("E&xit");
+        ex->setShortcut(QKeySequence("Ctrl+Q"));
+        connect(ex, &QAction::triggered, this, &QWidget::close);
+
+        QMenu *view = menuBar()->addMenu("&View");
+        QAction *th = view->addAction("Switch &light / dark");
+        th->setShortcut(QKeySequence("Ctrl+Shift+L"));
+        connect(th, &QAction::triggered, this, [this]() {
+            if (m_chatLog) onToggleTheme();
+            else { toggleLightDark(); saveUserPrefs(); }
+        });
+        QAction *themes = view->addAction("&Themes and colours…");
+        connect(themes, &QAction::triggered, [this]() { openSettings(0); });
 
         QMenu *sett = menuBar()->addMenu("&Settings");
-        QAction *st = sett->addAction("&Settings..."); connect(st, &QAction::triggered, this, &ShroudWindow::openSettings);
-        QAction *th = sett->addAction(gDark ? "Switch to &Light Mode" : "Switch to &Dark Mode");
-        connect(th, &QAction::triggered, [this, th]() {
-            toggleLightDark();
-            th->setText(gDark ? "Switch to &Light Mode" : "Switch to &Dark Mode");
-        });
+        QAction *st = sett->addAction("&Settings…");
+        st->setShortcut(QKeySequence("Ctrl+,"));
+        connect(st, &QAction::triggered, [this]() { openSettings(0); });
+        QAction *dis = sett->addAction("&Disappearing messages…");
+        connect(dis, &QAction::triggered, [this]() { openSettings(1); });
+        QAction *net = sett->addAction("&Network and Tor…");
+        connect(net, &QAction::triggered, [this]() { openSettings(2); });
+        QAction *dev = sett->addAction("&Link another device…");
+        connect(dev, &QAction::triggered, [this]() { openSettings(3); });
 
         QMenu *help = menuBar()->addMenu("&Help");
-        QAction *ab = help->addAction("&About"); connect(ab, &QAction::triggered, [this]() {
+        QAction *guide = help->addAction("&Quick guide");
+        guide->setShortcut(QKeySequence::HelpContents);
+        connect(guide, &QAction::triggered, [this]() { openSettings(5); });
+        QAction *keys = help->addAction("&Keyboard shortcuts");
+        connect(keys, &QAction::triggered, [this]() {
+            QMessageBox box(this);
+            box.setWindowTitle("Keyboard shortcuts");
+            box.setTextFormat(Qt::RichText);
+            box.setText(
+                "<table cellpadding='4'>"
+                "<tr><td><b>Enter</b></td><td>Send message</td></tr>"
+                "<tr><td><b>Ctrl+K</b></td><td>Find someone by username</td></tr>"
+                "<tr><td><b>Ctrl+F</b></td><td>Find in this conversation</td></tr>"
+                "<tr><td><b>Ctrl+Tab</b></td><td>Next conversation (Ctrl+Shift+Tab: previous)</td></tr>"
+                "<tr><td><b>Win + .</b></td><td>Emoji panel</td></tr>"
+                "<tr><td><b>Ctrl+Shift+L</b></td><td>Switch light / dark</td></tr>"
+                "<tr><td><b>Ctrl+,</b></td><td>Settings</td></tr>"
+                "<tr><td><b>F1</b></td><td>Quick guide</td></tr>"
+                "<tr><td><b>Esc</b></td><td>Close find bar / search result</td></tr>"
+                "</table>");
+            box.exec();
+        });
+        help->addSeparator();
+        QAction *ab = help->addAction("&About SHROUD"); connect(ab, &QAction::triggered, [this]() {
             const char *tname =
                 gTransport == Transport::Tor ? "Tor (SOCKS5)" :
                                                 "Direct (clearnet)";
-            QMessageBox::about(this, "SHROUD",
-                QString("SHROUD v%1\n\nAES-256-GCM | ECDH P-384 | ML-KEM-1024\n"
-                        "Self-Destructing Messages | One-Time Files\n"
-                        "No personal data. No metadata. No trace.\n\n"
-                        "Active transport: %2").arg(CLIENT_VERSION).arg(tname));
+            QMessageBox box(this);
+            box.setWindowTitle("About SHROUD");
+            box.setIconPixmap(QIcon(":/shroud.png").pixmap(64, 64));
+            box.setTextFormat(Qt::RichText);
+            box.setText(QString(
+                "<p style='font-size:14pt'><b>SHROUD</b> v%1</p>"
+                "<p>Private messaging with no phone number, no email and no metadata.</p>"
+                "<p style='color:%3'>AES-256-GCM · ECDH P-384 · ML-KEM-1024<br>"
+                "Double Ratchet · sealed sender · disappearing messages</p>"
+                "<p>Active transport: %2</p>"
+                "<p><a href='https://github.com/ExposingTheBadge/Shroud'>github.com/ExposingTheBadge/Shroud</a></p>")
+                .arg(CLIENT_VERSION, tname, cN(gTheme.dim)));
+            box.exec();
         });
     }
 
@@ -777,8 +826,8 @@ private:
 
     auto *logo = new QLabel;
     logo->setPixmap(QIcon(":/shroud.png").pixmap(64, 64));
-    logo->setAlignment(Qt::AlignCenter);
-    cl->addWidget(logo);
+    logo->setFixedSize(64, 64);
+    cl->addWidget(logo, 0, Qt::AlignHCenter);
 
     auto *title = new QLabel("Welcome back");
     title->setObjectName("heading");
@@ -1249,7 +1298,84 @@ private:
 
     /* ===============================================================
      *  CHAT UI
+     *
+     *  Each conversation (a contact's username, or "#<group id>") keeps
+     *  its own history in memory only. Nothing is written to disk and
+     *  everything is gone when the app closes, which is what the
+     *  single shared log did before, just no longer mixing everyone's
+     *  messages together.
      * =============================================================== */
+    struct ChatMsg {
+        QString from;          // display name; "You" for our own messages
+        QString html;          // body, already escaped / rendered
+        qint64  ts = 0;        // local send / receive time
+        bool    mine = false;
+        bool    system = false;
+        bool    timed = false; // sent with a disappearing timer
+        bool    failed = false;
+        QString imageId;
+    };
+    QHash<QString, QList<ChatMsg>> m_conv;
+    QHash<QString, int> m_unread;
+    QString m_currentConv, m_currentName;
+    bool m_currentIsGroup = false;
+    QStringList m_extraConvs;              // non-friends who messaged us this session
+    QHash<QString, QImage> m_imageCache;
+    int  m_pollTick = 0;
+    bool m_friendsLoaded = false;
+    int  m_pendingFriendReqs = 0, m_pendingGroupInvites = 0;
+    QLabel *m_chatAvatar = nullptr, *m_chatTitle = nullptr, *m_chatSub = nullptr;
+    QPushButton *m_timerBtn = nullptr, *m_verifyBtn = nullptr, *m_findBtn = nullptr;
+    QPushButton *m_ctBtn = nullptr, *m_gtBtn = nullptr, *m_reqBtn = nullptr, *m_grpBtn = nullptr;
+    QPushButton *m_emojiBtn = nullptr;
+    QWidget *m_findBar = nullptr; QLineEdit *m_findEdit = nullptr; QLabel *m_findStatus = nullptr;
+    QLineEdit *m_search = nullptr;
+
+    /* QTextBrowser that serves inline images straight from the in-memory
+     * cache. addResource() entries get dropped whenever the document is
+     * rebuilt (switching conversations), so resolving on demand is the
+     * robust way to keep images showing. */
+    class ChatBrowser : public QTextBrowser {
+    public:
+        std::function<QVariant(const QUrl &)> resolver;
+        QVariant loadResource(int type, const QUrl &name) override {
+            if (type == QTextDocument::ImageResource && resolver) {
+                QVariant v = resolver(name);
+                if (v.isValid()) return v;
+            }
+            return QTextBrowser::loadResource(type, name);
+        }
+    };
+
+    bool timerOn() const { return gDisappearEnabled && gDisappearSeconds > 0; }
+
+    static QString durationLabel(int s, bool shortForm = false) {
+        struct U { int secs; const char *one; const char *many; const char *abbr; };
+        static const U units[] = {
+            {604800, "week", "weeks", "w"}, {86400, "day", "days", "d"},
+            {3600, "hour", "hours", "h"}, {60, "minute", "minutes", "m"},
+        };
+        for (const U &u : units) {
+            if (s >= u.secs && s % u.secs == 0) {
+                int n = s / u.secs;
+                return shortForm ? QString("%1%2").arg(n).arg(u.abbr)
+                                 : QString("%1 %2").arg(n).arg(n == 1 ? u.one : u.many);
+            }
+        }
+        if (s >= 60 && !shortForm) return QString("%1 min %2 sec").arg(s / 60).arg(s % 60);
+        return shortForm ? QString("%1s").arg(s) : QString("%1 seconds").arg(s);
+    }
+
+    static QColor nameColorFor(const QString &name) {
+        uint h = qHash(name.toLower());
+        return isDarkTheme(gTheme) ? QColor::fromHsl((int)(h % 360), 170, 170)
+                                   : QColor::fromHsl((int)(h % 360), 170, 85);
+    }
+
+    void notify(const QString &text, int timeoutMs = 8000) {
+        statusBar()->showMessage(text, timeoutMs);
+    }
+
     void buildChatUI() {
         auto *mainW = new QWidget;
         auto *hbox = new QHBoxLayout(mainW);
@@ -1258,111 +1384,245 @@ private:
 
         /* === SIDEBAR === */
         auto *sidebar = new QWidget;
-        sidebar->setFixedWidth(220);
+        sidebar->setObjectName("sidebar");
+        sidebar->setAttribute(Qt::WA_StyledBackground, true);
+        sidebar->setFixedWidth(280);
         auto *sl = new QVBoxLayout(sidebar);
-        sl->setContentsMargins(4, 4, 4, 4);
-        sl->setSpacing(2);
+        sl->setContentsMargins(12, 12, 12, 12);
+        sl->setSpacing(8);
 
-        auto *tabRow = new QHBoxLayout;
-        auto *ctBtn = new QPushButton("Contacts");
-        auto *gtBtn = new QPushButton("Groups");
-        tabRow->addWidget(ctBtn); tabRow->addWidget(gtBtn);
-        sl->addLayout(tabRow);
+        /* Who am I + connection state */
+        auto *meRow = new QHBoxLayout;
+        meRow->setSpacing(10);
+        auto *meAvatar = new QLabel;
+        meAvatar->setPixmap(avatarIcon(m_username, 38).pixmap(38, 38));
+        meRow->addWidget(meAvatar);
+        auto *meCol = new QVBoxLayout;
+        meCol->setSpacing(0);
+        auto *meName = new QLabel(m_username);
+        meName->setStyleSheet("font-weight: 700; font-size: 11pt;");
+        meName->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        meName->setToolTip("Your username. Friends find you by typing it exactly.");
+        meCol->addWidget(meName);
+        m_statusBar = new QLabel;
+        m_statusBar->setStyleSheet("font-size: 9pt;");
+        setStatusLabel(m_statusBar, "● Connecting…", "warn");
+        meCol->addWidget(m_statusBar);
+        meRow->addLayout(meCol, 1);
+        auto *themeBtn = new QPushButton("◐");
+        themeBtn->setObjectName("iconBtn");
+        themeBtn->setToolTip("Switch light / dark (Ctrl+Shift+L)");
+        themeBtn->setCursor(Qt::PointingHandCursor);
+        meRow->addWidget(themeBtn);
+        auto *settingsBtn = new QPushButton("⚙");
+        settingsBtn->setObjectName("iconBtn");
+        settingsBtn->setToolTip("Settings (Ctrl+,)");
+        settingsBtn->setCursor(Qt::PointingHandCursor);
+        meRow->addWidget(settingsBtn);
+        sl->addLayout(meRow);
+        sl->addSpacing(4);
 
-        auto *search = new QLineEdit; search->setPlaceholderText("Find user (exact, press Enter)");
-        sl->addWidget(search);
+        /* Contacts / Groups segmented switch */
+        auto *segRow = new QHBoxLayout;
+        segRow->setSpacing(4);
+        m_ctBtn = new QPushButton("Contacts");
+        m_gtBtn = new QPushButton("Groups");
+        for (QPushButton *b : {m_ctBtn, m_gtBtn}) {
+            b->setObjectName("segment");
+            b->setCheckable(true);
+            b->setCursor(Qt::PointingHandCursor);
+            segRow->addWidget(b, 1);
+        }
+        auto *segGroup = new QButtonGroup(sidebar);
+        segGroup->setExclusive(true);
+        segGroup->addButton(m_ctBtn);
+        segGroup->addButton(m_gtBtn);
+        m_ctBtn->setChecked(true);
+        sl->addLayout(segRow);
 
-        /* Search result panel: shown only after an explicit lookup. */
+        m_search = new QLineEdit;
+        m_search->setPlaceholderText("Find someone by exact username");
+        m_search->setClearButtonEnabled(true);
+        m_search->setToolTip("Type a username exactly and press Enter (Ctrl+K)");
+        sl->addWidget(m_search);
+
+        /* Search result card: shown only after an explicit lookup. */
         m_searchResult = new QWidget;
+        m_searchResult->setObjectName("card");
+        m_searchResult->setAttribute(Qt::WA_StyledBackground, true);
         m_searchResult->setVisible(false);
         auto *srl = new QVBoxLayout(m_searchResult);
-        srl->setContentsMargins(4, 4, 4, 4);
-        srl->setSpacing(4);
+        srl->setContentsMargins(10, 10, 10, 10);
+        srl->setSpacing(6);
         m_searchResultLabel = new QLabel;
         m_searchResultLabel->setWordWrap(true);
         srl->addWidget(m_searchResultLabel);
         m_btnMsg = new QPushButton("Message");
-        m_btnFriend = new QPushButton("Send Friend Request");
-        m_btnGroupInvite = new QPushButton("Add to Group");
+        m_btnMsg->setObjectName("primary");
+        m_btnFriend = new QPushButton("Add friend");
+        m_btnGroupInvite = new QPushButton("Invite to a group");
         srl->addWidget(m_btnMsg);
         srl->addWidget(m_btnFriend);
         srl->addWidget(m_btnGroupInvite);
         sl->addWidget(m_searchResult);
 
-        m_sideList = new QListWidget; sl->addWidget(m_sideList, 1);
+        m_sideList = new QListWidget;
+        m_sideList->setIconSize(QSize(32, 32));
+        m_sideList->setWordWrap(true);
+        m_sideList->setSpacing(1);
+        m_sideList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        sl->addWidget(m_sideList, 1);
 
-        auto *reqBtn = new QPushButton("Requests");
-        sl->addWidget(reqBtn);
-
-        auto *grpBtn = new QPushButton("+ New Group");
-        sl->addWidget(grpBtn);
-
-        auto *themeBtn = new QPushButton(gDark ? "Light Mode" : "Dark Mode");
-        sl->addWidget(themeBtn);
+        auto *bottomRow = new QHBoxLayout;
+        bottomRow->setSpacing(6);
+        m_reqBtn = new QPushButton("Requests");
+        m_reqBtn->setToolTip("Friend requests and group invites waiting for you");
+        m_grpBtn = new QPushButton("+ New group");
+        bottomRow->addWidget(m_reqBtn, 1);
+        bottomRow->addWidget(m_grpBtn, 1);
+        sl->addLayout(bottomRow);
 
         hbox->addWidget(sidebar);
 
         /* === CHAT AREA === */
         auto *chatArea = new QWidget;
         auto *cl = new QVBoxLayout(chatArea);
-        cl->setContentsMargins(6, 4, 6, 4);
-        cl->setSpacing(4);
+        cl->setContentsMargins(0, 0, 0, 0);
+        cl->setSpacing(0);
 
-        /* Recipient */
-        auto *toRow = new QHBoxLayout;
-        toRow->addWidget(new QLabel("To:"));
-        m_toField = new QLineEdit; m_toField->setReadOnly(true);
-        m_toField->setPlaceholderText("Select a contact from the sidebar");
-        toRow->addWidget(m_toField, 1);
-        cl->addLayout(toRow);
+        /* Header: who you're talking to + per-conversation tools */
+        auto *header = new QWidget;
+        header->setObjectName("chatHeader");
+        header->setAttribute(Qt::WA_StyledBackground, true);
+        auto *hl = new QHBoxLayout(header);
+        hl->setContentsMargins(16, 10, 12, 10);
+        hl->setSpacing(10);
+        m_chatAvatar = new QLabel;
+        m_chatAvatar->setFixedSize(38, 38);
+        hl->addWidget(m_chatAvatar);
+        auto *titleCol = new QVBoxLayout;
+        titleCol->setSpacing(0);
+        m_chatTitle = new QLabel;
+        m_chatTitle->setObjectName("subheading");
+        m_chatSub = new QLabel;
+        m_chatSub->setObjectName("muted");
+        m_chatSub->setStyleSheet("font-size: 9pt;");
+        titleCol->addWidget(m_chatTitle);
+        titleCol->addWidget(m_chatSub);
+        hl->addLayout(titleCol, 1);
+        m_findBtn = new QPushButton("🔍");
+        m_findBtn->setObjectName("iconBtn");
+        m_findBtn->setCheckable(true);
+        m_findBtn->setToolTip("Find in this conversation (Ctrl+F)");
+        m_timerBtn = new QPushButton("⏱");
+        m_timerBtn->setObjectName("iconBtn");
+        m_timerBtn->setToolTip("Disappearing messages: make the messages you send delete themselves");
+        m_verifyBtn = new QPushButton("🛡 Verify");
+        m_verifyBtn->setObjectName("iconBtn");
+        m_verifyBtn->setStyleSheet("font-size: 10pt; padding: 5px 10px;");
+        m_verifyBtn->setToolTip("Compare safety numbers to make sure nobody is in the middle");
+        for (QPushButton *b : {m_findBtn, m_timerBtn, m_verifyBtn}) {
+            b->setCursor(Qt::PointingHandCursor);
+            hl->addWidget(b);
+        }
+        cl->addWidget(header);
 
-        /* Connection status */
-        m_statusBar = new QLabel("Connecting...");
-        m_statusBar->setStyleSheet("color: #cc8800; font-size: 11px; font-weight: bold;");
-        cl->addWidget(m_statusBar);
+        /* Find bar (Ctrl+F) */
+        auto *findWrap = new QWidget;
+        auto *fwl = new QVBoxLayout(findWrap);
+        fwl->setContentsMargins(12, 8, 12, 0);
+        m_findBar = new QFrame;
+        m_findBar->setObjectName("banner");
+        auto *fbl = new QHBoxLayout(m_findBar);
+        fbl->setContentsMargins(8, 4, 4, 4);
+        fbl->setSpacing(4);
+        m_findEdit = new QLineEdit;
+        m_findEdit->setPlaceholderText("Find in conversation");
+        m_findEdit->setClearButtonEnabled(true);
+        fbl->addWidget(m_findEdit, 1);
+        m_findStatus = new QLabel;
+        fbl->addWidget(m_findStatus);
+        auto *findPrev = new QPushButton("↑");
+        auto *findNext = new QPushButton("↓");
+        auto *findClose = new QPushButton("✕");
+        findPrev->setToolTip("Previous match (Shift+Enter)");
+        findNext->setToolTip("Next match (Enter)");
+        findClose->setToolTip("Close (Esc)");
+        for (QPushButton *b : {findPrev, findNext, findClose}) {
+            b->setObjectName("iconBtn");
+            fbl->addWidget(b);
+        }
+        fwl->addWidget(m_findBar);
+        findWrap->setVisible(false);
+        cl->addWidget(findWrap);
 
-        /* Always-visible relay endpoint — so the operator (or user
-         * reporting a bug) can tell at a glance which relay this
-         * client is talking to. SERVER_HOST/PORT/USE_TLS are baked at
-         * build time today; the manifest pin work is the path to
-         * making this user-switchable later. */
-        QString relayDisplay = QString("relay: %1://%2:%3")
-            .arg(SERVER_USE_TLS ? "https" : "http")
-            .arg(QString::fromWCharArray(SERVER_HOST))
-            .arg(SERVER_PORT);
-        QLabel *m_relayLbl = new QLabel(relayDisplay);
-        m_relayLbl->setStyleSheet("color: #888; font-size: 10px; font-family: Consolas, monospace;");
-        m_relayLbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        m_relayLbl->setToolTip("Set at build time. Future versions will switch via the operator manifest pin.");
-        cl->addWidget(m_relayLbl);
+        /* Maintenance banner — shown ONLY when the server has flipped the
+         * maintenance_mode flag. setMaintenanceMode() handles the banner
+         * and the composer in one place. */
+        auto *bannerWrap = new QWidget;
+        auto *bwl = new QVBoxLayout(bannerWrap);
+        bwl->setContentsMargins(12, 8, 12, 0);
+        m_maintenanceBanner = new QLabel(
+            "The relay is undergoing maintenance. Sending is paused for your safety "
+            "and will resume automatically.");
+        m_maintenanceBanner->setAlignment(Qt::AlignCenter);
+        m_maintenanceBanner->setWordWrap(true);
+        m_maintenanceBanner->setStyleSheet(QString(
+            "QLabel { background: %1; color: #ffffff; padding: 8px 12px; "
+            "border-radius: 8px; font-weight: 600; }").arg(cN(gTheme.danger)));
+        bwl->addWidget(m_maintenanceBanner);
+        bannerWrap->setVisible(false);
+        m_maintenanceBanner->setProperty("wrap", QVariant::fromValue<QObject*>(bannerWrap));
+        cl->addWidget(bannerWrap);
 
         /* Chat log — QTextBrowser so we can click inline images. */
-        m_chatLog = new QTextBrowser;
+        auto *browser = new ChatBrowser;
+        browser->resolver = [this](const QUrl &u) -> QVariant {
+            QString n = u.toString();
+            if (!n.startsWith("image_")) return QVariant();
+            QString fid = n.mid(6);
+            QImage img = m_imageCache.value(fid);
+            if (img.isNull()) {
+                QString path = m_imagePaths.value(fid);
+                if (!path.isEmpty() && img.load(path)) m_imageCache.insert(fid, img);
+            }
+            return img.isNull() ? QVariant() : QVariant(img);
+        };
+        m_chatLog = browser;
+        m_chatLog->setObjectName("chatLog");
         m_chatLog->setReadOnly(true);
         m_chatLog->setOpenLinks(false);
         m_chatLog->setOpenExternalLinks(false);
+        m_chatLog->setAcceptDrops(false);   /* file drops go to the window */
         connect(m_chatLog, &QTextBrowser::anchorClicked, this, &ShroudWindow::onChatAnchorClicked);
         m_chatLog->setContextMenuPolicy(Qt::CustomContextMenu);
         /* Ensure emoji glyphs render via Segoe UI Emoji fallback. */
         {
             QFont f = m_chatLog->font();
             f.setFamilies({"Segoe UI", "Segoe UI Emoji", "Noto Color Emoji"});
+            f.setPointSize(10);
             m_chatLog->setFont(f);
         }
         connect(m_chatLog, &QWidget::customContextMenuRequested, this, &ShroudWindow::onChatContextMenu);
         cl->addWidget(m_chatLog, 1);
 
-        /* File panel */
-        auto *fileList = new QListWidget; fileList->setMaximumHeight(50);
-        cl->addWidget(fileList);
-
-        /* Input row */
-        auto *inputRow = new QHBoxLayout;
-        m_attachBtn = new QPushButton("Attach"); inputRow->addWidget(m_attachBtn);
-        auto *emojiBtnIn = new QPushButton(QString::fromUtf8("\xF0\x9F\x98\x80"));   /* 😀 */
-        emojiBtnIn->setToolTip("Open Windows emoji panel (Win + .)");
-        emojiBtnIn->setFixedWidth(46);
-        connect(emojiBtnIn, &QPushButton::clicked, [this]() {
+        /* Composer */
+        auto *composer = new QWidget;
+        composer->setObjectName("composer");
+        composer->setAttribute(Qt::WA_StyledBackground, true);
+        auto *inputRow = new QHBoxLayout(composer);
+        inputRow->setContentsMargins(12, 10, 12, 12);
+        inputRow->setSpacing(6);
+        m_attachBtn = new QPushButton("📎");
+        m_attachBtn->setObjectName("iconBtn");
+        m_attachBtn->setToolTip("Send a file or image, end-to-end encrypted. You can also drag files onto the window.");
+        m_attachBtn->setCursor(Qt::PointingHandCursor);
+        inputRow->addWidget(m_attachBtn);
+        m_emojiBtn = new QPushButton("😀");
+        m_emojiBtn->setObjectName("iconBtn");
+        m_emojiBtn->setToolTip("Open the Windows emoji panel (Win + .)");
+        m_emojiBtn->setCursor(Qt::PointingHandCursor);
+        connect(m_emojiBtn, &QPushButton::clicked, [this]() {
             m_msgInput->setFocus();
             INPUT in[4] = {};
             in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = VK_LWIN;
@@ -1371,9 +1631,10 @@ private:
             in[3].type = INPUT_KEYBOARD; in[3].ki.wVk = VK_LWIN;       in[3].ki.dwFlags = KEYEVENTF_KEYUP;
             SendInput(4, in, sizeof(INPUT));
         });
-        inputRow->addWidget(emojiBtnIn);
-        m_msgInput = new QLineEdit; m_msgInput->setPlaceholderText("Type a message...  (Win + . for emoji)");
-        m_msgInput->setMinimumHeight(108);   /* 3x the old 36px per v2.4.1 ask */
+        inputRow->addWidget(m_emojiBtn);
+        m_msgInput = new QLineEdit;
+        m_msgInput->setMinimumHeight(40);
+        m_msgInput->setAcceptDrops(false);
         /* Force a font with emoji glyphs as fallback so 🎯 etc render in-place. */
         {
             QFont f = m_msgInput->font();
@@ -1381,59 +1642,126 @@ private:
             m_msgInput->setFont(f);
         }
         inputRow->addWidget(m_msgInput, 1);
-        m_sendBtn = new QPushButton("Send"); inputRow->addWidget(m_sendBtn);
-
-        /* Maintenance banner — shown ONLY when the server has flipped the
-         * maintenance_mode flag. Sits just above the input row in red so
-         * the user can't miss it. setMaintenanceMode() handles all the
-         * styling + send-button disabling in one place. */
-        m_maintenanceBanner = new QLabel(
-            "Server is undergoing maintenance — messaging is disabled for security.");
-        m_maintenanceBanner->setAlignment(Qt::AlignCenter);
-        m_maintenanceBanner->setStyleSheet(
-            "QLabel { background: #b00020; color: #ffffff; padding: 6px 10px; "
-            "border-radius: 4px; font-weight: 600; }");
-        m_maintenanceBanner->setVisible(false);
-        cl->addWidget(m_maintenanceBanner);
-
-        cl->addLayout(inputRow);
+        m_sendBtn = new QPushButton("Send");
+        m_sendBtn->setObjectName("primary");
+        m_sendBtn->setMinimumHeight(40);
+        m_sendBtn->setCursor(Qt::PointingHandCursor);
+        inputRow->addWidget(m_sendBtn);
+        cl->addWidget(composer);
 
         hbox->addWidget(chatArea, 1);
 
-        /* Status */
+        /* Status bar: transient notices on the left, what's protecting
+         * the session on the right. */
         QStatusBar *sb = statusBar();
+        sb->setSizeGripEnabled(false);
         QString tpmStr; { char buf[128]; tpm_status_string(buf, 128); tpmStr = buf; }
-        const char *pq = kyber_available() ? "ECDH+ML-KEM-1024" : "ECDH P-384";
-        sb->showMessage(QString("Device: %1... | AES-256-GCM | %2 | %3 | v%4")
-            .arg(m_deviceId.left(32)).arg(pq).arg(tpmStr).arg(CLIENT_VERSION));
+        const char *pq = kyber_available() ? "ML-KEM-1024 + ECDH P-384" : "ECDH P-384";
+        auto *cryptoLbl = new QLabel(QString("🔒 %1 · AES-256-GCM").arg(pq));
+        cryptoLbl->setToolTip(QString("Device: %1…\nKey storage: %2")
+            .arg(m_deviceId.left(16), tpmStr));
+        /* Always-visible relay endpoint — so the operator (or user
+         * reporting a bug) can tell at a glance which relay this
+         * client is talking to. SERVER_HOST/PORT/USE_TLS are baked at
+         * build time today; the manifest pin work is the path to
+         * making this user-switchable later. */
+        QString relayDisplay = QString("relay %1:%2%3")
+            .arg(QString::fromWCharArray(SERVER_HOST))
+            .arg(SERVER_PORT)
+            .arg(gTransport == Transport::Tor ? " via Tor" : "");
+        auto *relayLbl = new QLabel(relayDisplay);
+        relayLbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        relayLbl->setToolTip(QString("%1://%2:%3. Set at build time; future versions will switch via the operator manifest pin.")
+            .arg(SERVER_USE_TLS ? "https" : "http").arg(QString::fromWCharArray(SERVER_HOST)).arg(SERVER_PORT));
+        auto *verLbl = new QLabel(QString("v%1").arg(CLIENT_VERSION));
+        sb->addPermanentWidget(cryptoLbl);
+        sb->addPermanentWidget(relayLbl);
+        sb->addPermanentWidget(verLbl);
+        notify(QString("Signed in as %1").arg(m_username), 6000);
 
         m_stack->addWidget(mainW);
         m_stack->setCurrentWidget(mainW);
+        setAcceptDrops(true);
+
+        buildTimerMenu();
 
         /* === CONNECTIONS === */
-        connect(ctBtn, &QPushButton::clicked, [=]() { m_tabGroups = false; grpBtn->setText("+ New Group"); hideSearchResult(); loadContacts(); });
-        connect(gtBtn, &QPushButton::clicked, [=]() { m_tabGroups = true; grpBtn->setText("+ New Group"); hideSearchResult(); loadGroups(); });
-        connect(grpBtn, &QPushButton::clicked, [=]() {
+        connect(m_ctBtn, &QPushButton::clicked, [this]() { m_tabGroups = false; hideSearchResult(); loadContacts(); });
+        connect(m_gtBtn, &QPushButton::clicked, [this]() { m_tabGroups = true; hideSearchResult(); loadGroups(); });
+        connect(m_grpBtn, &QPushButton::clicked, [this]() {
             bool ok = false;
-            QString name = QInputDialog::getText(this, "New Group", "Group name:", QLineEdit::Normal, "", &ok);
-            if (ok && !name.trimmed().isEmpty()) { createGroup(name.trimmed()); m_tabGroups = true; loadGroups(); }
+            QString name = QInputDialog::getText(this, "New group",
+                "What should the group be called?", QLineEdit::Normal, "", &ok);
+            if (ok && !name.trimmed().isEmpty()) {
+                createGroup(name.trimmed());
+                m_tabGroups = true; m_gtBtn->setChecked(true);
+                loadGroups();
+                notify(QString("Group \"%1\" created. Find friends with the search box to invite them.").arg(name.trimmed()));
+            }
         });
-        connect(reqBtn, &QPushButton::clicked, this, &ShroudWindow::openRequestsDialog);
-        connect(themeBtn, &QPushButton::clicked, [=]() {
-            toggleLightDark();
-            themeBtn->setText(gDark ? "Light Mode" : "Dark Mode");
+        connect(m_reqBtn, &QPushButton::clicked, this, &ShroudWindow::openRequestsDialog);
+        connect(themeBtn, &QPushButton::clicked, this, &ShroudWindow::onToggleTheme);
+        connect(settingsBtn, &QPushButton::clicked, [this]() { openSettings(0); });
+        connect(m_sideList, &QListWidget::itemClicked, this, &ShroudWindow::sideSelect);
+        connect(m_sideList, &QListWidget::itemActivated, this, &ShroudWindow::sideSelect);
+        /* Arrow keys (and assistive tech selecting an item) open it too. */
+        connect(m_sideList, &QListWidget::itemSelectionChanged, this, [this]() {
+            const auto sel = m_sideList->selectedItems();
+            if (sel.size() == 1 && sel[0]->data(Qt::UserRole).toString() != m_currentConv) sideSelect(sel[0]);
         });
-        connect(m_sideList, &QListWidget::itemDoubleClicked, this, &ShroudWindow::sideSelect);
         m_sideList->setContextMenuPolicy(Qt::CustomContextMenu);
         connect(m_sideList, &QListWidget::customContextMenuRequested, this, &ShroudWindow::onContactContextMenu);
         connect(m_sendBtn, &QPushButton::clicked, this, &ShroudWindow::sendMessage);
-        connect(m_attachBtn, &QPushButton::clicked, this, &ShroudWindow::attachFile);
+        connect(m_attachBtn, &QPushButton::clicked, [this]() { attachFile(); });
         connect(m_msgInput, &QLineEdit::returnPressed, this, &ShroudWindow::sendMessage);
-        /* Exact-match search only fires on Enter. */
-        connect(search, &QLineEdit::returnPressed, [=]() {
-            if (!m_tabGroups) doExactSearch(search->text());
+        connect(m_msgInput, &QLineEdit::textChanged, [this]() { updateComposerState(); });
+        connect(m_verifyBtn, &QPushButton::clicked, [this]() {
+            if (!m_currentConv.isEmpty() && !m_currentIsGroup) showSafetyNumber(m_currentName);
         });
-        connect(search, &QLineEdit::textChanged, [=](const QString &t) {
+        connect(m_findBtn, &QPushButton::toggled, [this, findWrap](bool on) {
+            findWrap->setVisible(on);
+            if (on) { m_findEdit->setFocus(); m_findEdit->selectAll(); }
+            else    { setStatusLabel(m_findStatus, "", "info"); m_msgInput->setFocus(); }
+        });
+        connect(m_findEdit, &QLineEdit::returnPressed, [this]() {
+            findInChat(QApplication::keyboardModifiers() & Qt::ShiftModifier);
+        });
+        connect(m_findEdit, &QLineEdit::textChanged, [this]() {
+            /* Search as you type, from the top. */
+            QTextCursor c = m_chatLog->textCursor();
+            c.movePosition(QTextCursor::Start);
+            m_chatLog->setTextCursor(c);
+            findInChat(false);
+        });
+        connect(findPrev, &QPushButton::clicked, [this]() { findInChat(true); });
+        connect(findNext, &QPushButton::clicked, [this]() { findInChat(false); });
+        connect(findClose, &QPushButton::clicked, [this]() { m_findBtn->setChecked(false); });
+
+        /* Keyboard shortcuts */
+        auto *scFind = new QShortcut(QKeySequence::Find, this);
+        connect(scFind, &QShortcut::activated, [this]() {
+            if (m_currentConv.isEmpty()) return;
+            if (m_findBtn->isChecked()) { m_findEdit->setFocus(); m_findEdit->selectAll(); }
+            else m_findBtn->setChecked(true);
+        });
+        auto *scSearch = new QShortcut(QKeySequence("Ctrl+K"), this);
+        connect(scSearch, &QShortcut::activated, [this]() { m_search->setFocus(); m_search->selectAll(); });
+        auto *scEsc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+        connect(scEsc, &QShortcut::activated, [this]() {
+            if (m_findBtn->isChecked()) m_findBtn->setChecked(false);
+            else if (m_searchResult->isVisible()) { m_search->clear(); hideSearchResult(); }
+        });
+        auto *scNext = new QShortcut(QKeySequence("Ctrl+Tab"), this);
+        connect(scNext, &QShortcut::activated, [this]() { stepConversation(+1); });
+        auto *scPrev = new QShortcut(QKeySequence("Ctrl+Shift+Tab"), this);
+        connect(scPrev, &QShortcut::activated, [this]() { stepConversation(-1); });
+
+        /* Exact-match search only fires on Enter. */
+        connect(m_search, &QLineEdit::returnPressed, [this]() {
+            if (m_tabGroups) { m_tabGroups = false; m_ctBtn->setChecked(true); loadContacts(); }
+            doExactSearch(m_search->text());
+        });
+        connect(m_search, &QLineEdit::textChanged, [this](const QString &t) {
             if (t.isEmpty()) hideSearchResult();
         });
         /* Search-result action buttons */
@@ -1455,8 +1783,8 @@ private:
                 QByteArray hb = httpPost("/api/v1/heartbeat",
                     jsonBody({{"device_id", m_deviceId}}));
                 /* Server includes "maintenance_mode": true/false on every
-                 * successful beat. Mirror it into the UI so the input
-                 * box flips red the moment the admin toggles it on, no
+                 * successful beat. Mirror it into the UI so the composer
+                 * locks the moment the admin toggles it on, no
                  * send-attempt required. */
                 if (!hb.isEmpty()) {
                     setMaintenanceMode(hb.contains("\"maintenance_mode\":true"));
@@ -1465,22 +1793,427 @@ private:
             /* Health check */
             QByteArray hr = httpGet("/health");
             if (!hr.isEmpty() && hr.contains("\"status\":\"ok\"")) {
-                if (m_maintenanceMode) {
-                    m_statusBar->setText("Server in maintenance — sending disabled");
-                    m_statusBar->setStyleSheet("color: #ff8a8a; font-size: 11px; font-weight: bold;");
-                } else {
-                    m_statusBar->setText("Online — AES-256-GCM | ECDH P-384");
-                    m_statusBar->setStyleSheet("color: #2ed573; font-size: 11px; font-weight: bold;");
-                }
+                if (m_maintenanceMode) setStatusLabel(m_statusBar, "● Relay in maintenance", "warn");
+                else                   setStatusLabel(m_statusBar, "● Online", "ok");
             } else {
-                m_statusBar->setText("Server offline");
-                m_statusBar->setStyleSheet("color: #ff4757; font-size: 11px; font-weight: bold;");
+                setStatusLabel(m_statusBar,
+                    gTransport == Transport::Tor ? "● Offline (is Tor running?)" : "● Offline, retrying…", "err");
             }
+            /* Requests and new friendships don't need 4-second freshness. */
+            if (++m_pollTick % 8 == 0) refreshRequests();
         });
         timer->start(4000);
 
         /* Initial load */
         loadContacts();
+        refreshRequests();
+        openConversation(QString(), QString(), false, QString());
+#ifdef SHROUD_UI_PREVIEW
+        if (qEnvironmentVariableIsSet("SHROUD_PREVIEW_DEMO")) seedPreviewDemo();
+#endif
+    }
+
+#ifdef SHROUD_UI_PREVIEW
+    /* Local-only sample conversations for eyeballing the chat UI in a
+     * preview build. Nothing is sent anywhere. */
+    void seedPreviewDemo() {
+        qint64 now = QDateTime::currentSecsSinceEpoch();
+        auto msg = [](const QString &from, const QString &text, qint64 ts, bool mine) {
+            ChatMsg m; m.from = from; m.html = mdToHtml(text); m.ts = ts; m.mine = mine; return m;
+        };
+        for (const char *n : {"carol", "dave"}) if (!m_extraConvs.contains(n)) m_extraConvs << n;
+        loadContacts();
+        m_conv["carol"] = {
+            msg("carol", "Did you get the files from yesterday?", now - 86400 - 3600, false),
+            msg("You", "Yes, all three. Thanks!", now - 86400 - 3500, true),
+            msg("carol", "Great. Let's go over them **tomorrow** at 10?", now - 600, false),
+            msg("carol", "Here's the agenda: https://example.org/agenda", now - 590, false),
+            msg("You", "Works for me 👍", now - 120, true),
+        };
+        m_conv["carol"].last().timed = true;
+        m_conv["dave"] = { msg("dave", "ping", now - 60, false), msg("dave", "you around?", now - 30, false) };
+        m_unread["dave"] = 2;
+        refreshSidebarBadges();
+        updateWindowTitle();
+        openConversation("carol", "carol", false, QString("preview-device"));
+    }
+#endif
+
+    /* ── Conversation model ───────────────────────────────────────── */
+
+    void onToggleTheme() {
+        toggleLightDark();
+        saveUserPrefs();
+        onThemeChanged();
+    }
+
+    /* Everything that bakes theme colours into content rather than
+     * picking them up from the stylesheet. */
+    void onThemeChanged() {
+        if (m_maintenanceBanner)
+            m_maintenanceBanner->setStyleSheet(QString(
+                "QLabel { background: %1; color: #ffffff; padding: 8px 12px; "
+                "border-radius: 8px; font-weight: 600; }").arg(cN(gTheme.danger)));
+        if (m_chatLog) renderConversation();
+    }
+
+    QString dayLabel(const QDate &d) const {
+        QDate today = QDate::currentDate();
+        if (d == today) return "Today";
+        if (d == today.addDays(-1)) return "Yesterday";
+        return QLocale::system().toString(d, QLocale::LongFormat);
+    }
+
+    QString messageHtml(const ChatMsg &m, const ChatMsg *prev) const {
+        const QString dim = cN(gTheme.dim);
+        QString out;
+        QDateTime dt = QDateTime::fromSecsSinceEpoch(m.ts);
+        bool newDay = !prev || QDateTime::fromSecsSinceEpoch(prev->ts).date() != dt.date();
+        if (newDay)
+            out += QString("<p align='center' style='margin-top:14px; margin-bottom:2px; color:%1; font-size:8pt;'>%2</p>")
+                .arg(dim, dayLabel(dt.date()));
+        if (m.system) {
+            out += QString("<p align='center' style='margin-top:6px; margin-bottom:6px; color:%1; font-size:9pt;'><i>%2</i></p>")
+                .arg(dim, m.html);
+            return out;
+        }
+        bool grouped = !newDay && prev && !prev->system && prev->mine == m.mine
+                    && prev->from == m.from && m.ts - prev->ts < 300;
+        if (!grouped) {
+            QString nameColor = m.mine ? cN(gTheme.accent) : cN(nameColorFor(m.from));
+            out += QString("<p style='margin-top:10px; margin-bottom:0px;'>"
+                           "<span style='color:%1; font-weight:600;'>%2</span>"
+                           "&nbsp;&nbsp;<span style='color:%3; font-size:8pt;'>%4%5</span></p>")
+                .arg(nameColor, m.from.toHtmlEscaped(), dim,
+                     QLocale::system().toString(dt.time(), QLocale::ShortFormat),
+                     m.timed ? QString(" · ⏱") : QString());
+        }
+        QString body = m.html;
+        if (!m.imageId.isEmpty()) {
+            QImage img = m_imageCache.value(m.imageId);
+            int w = img.isNull() ? 280 : qMin(280, img.width());
+            body = QString("<a href=\"shroud-img://%1\"><img src=\"image_%1\" width=\"%2\"/></a>")
+                .arg(m.imageId).arg(w);
+        }
+        if (m.failed)
+            body += QString("&nbsp;<span style='color:%1; font-size:8pt;'>⚠ not delivered</span>")
+                .arg(cN(gTheme.danger));
+        out += QString("<p style='margin-top:1px; margin-bottom:0px;'>%1</p>").arg(body);
+        return out;
+    }
+
+    QString welcomeHtml() const {
+        const QString dim = cN(gTheme.dim), lk = cN(gTheme.link);
+        int pending = m_pendingFriendReqs + m_pendingGroupInvites;
+        QString html = QString(
+            "<br><br><p align='center' style='font-size:34pt;'>🔐</p>"
+            "<p align='center' style='font-size:15pt; font-weight:600;'>Welcome, %1</p>"
+            "<p align='center' style='color:%2;'>Pick a conversation on the left to start chatting.<br>"
+            "Everything you send is encrypted on this PC before it leaves.</p>")
+            .arg(m_username.toHtmlEscaped(), dim);
+        if (pending > 0)
+            html += QString("<p align='center' style='color:%1; font-weight:600;'>You have %2 pending request%3. "
+                            "Open <i>Requests</i> at the bottom left.</p>")
+                .arg(lk).arg(pending).arg(pending == 1 ? "" : "s");
+        auto row = [&](const QString &icon, const QString &title, const QString &text) {
+            return QString("<tr><td style='font-size:16pt; padding:6px 10px;'>%1</td>"
+                           "<td style='padding:6px 4px;'><b>%2</b><br><span style='color:%3;'>%4</span></td></tr>")
+                .arg(icon, title, dim, text);
+        };
+        html += "<br><table align='center' cellspacing='0' cellpadding='0'>";
+        html += row("🔎", "Add a friend", "Type their exact username in the search box and press Enter.");
+        html += row("🛡", "Verify who you're talking to", "Compare safety numbers so you know nobody is in the middle.");
+        html += row("⏱", "Disappearing messages", "Use the timer in a chat's header to make what you send delete itself.");
+        html += row("📎", "Share files privately", "Drag a file onto the window or click the paperclip.");
+        html += "</table>";
+        return html;
+    }
+
+    QString introHtml() const {
+        const QString dim = cN(gTheme.dim);
+        QString html = QString(
+            "<br><p align='center' style='font-size:12pt; font-weight:600;'>%1</p>"
+            "<p align='center' style='color:%2; font-size:9pt;'>")
+            .arg(m_currentIsGroup
+                     ? QString("Group: %1").arg(m_currentName.toHtmlEscaped())
+                     : QString("This is the start of your conversation with %1").arg(m_currentName.toHtmlEscaped()),
+                 dim);
+        html += "Messages are end-to-end encrypted and only kept in memory: "
+                "they're gone from this PC when you close SHROUD.";
+        if (timerOn())
+            html += QString("<br>⏱ Messages you send disappear after %1.").arg(durationLabel(gDisappearSeconds));
+        if (!m_currentIsGroup)
+            html += "<br>Tip: click <b>Verify</b> above to compare safety numbers.";
+        html += "</p>";
+        return html;
+    }
+
+    void renderConversation() {
+        if (!m_chatLog) return;
+        if (m_currentConv.isEmpty()) {
+            m_chatLog->setHtml(welcomeHtml());
+            return;
+        }
+        QString html = introHtml();
+        auto it = m_conv.constFind(m_currentConv);
+        if (it != m_conv.constEnd()) {
+            const ChatMsg *prev = nullptr;
+            for (const ChatMsg &m : it.value()) { html += messageHtml(m, prev); prev = &m; }
+        }
+        m_chatLog->setHtml(html);
+        scrollChatToBottom();
+    }
+
+    void scrollChatToBottom() {
+        if (QScrollBar *sb = m_chatLog->verticalScrollBar()) sb->setValue(sb->maximum());
+    }
+
+    void appendMessage(const QString &conv, ChatMsg m) {
+        if (conv.isEmpty()) return;
+        if (!m.ts) m.ts = QDateTime::currentSecsSinceEpoch();
+        QList<ChatMsg> &list = m_conv[conv];
+        const bool isCurrent = (conv == m_currentConv);
+        if (isCurrent) {
+            if (list.isEmpty()) {
+                list.append(m);
+                renderConversation();
+            } else {
+                QScrollBar *sb = m_chatLog->verticalScrollBar();
+                bool atBottom = !sb || sb->value() >= sb->maximum() - 40 || m.mine;
+                m_chatLog->append(messageHtml(m, &list.last()));
+                list.append(m);
+                if (atBottom) scrollChatToBottom();
+            }
+        } else {
+            list.append(m);
+        }
+        /* Bound memory for very long sessions. */
+        while (list.size() > 1000) list.removeFirst();
+
+        if (!m.mine && !m.system) {
+            if (!isCurrent) m_unread[conv]++;
+            if (!isCurrent || !isActiveWindow()) {
+                if (gFlashOnMessage) QApplication::alert(this);
+            }
+            /* Someone we haven't friended messaged us: surface them. */
+            if (!conv.startsWith('#') && !m_friends.contains(conv) && !m_extraConvs.contains(conv)) {
+                m_extraConvs << conv;
+                if (!m_tabGroups) {
+                    auto *it = makeConvItem(conv, conv, false, QString());
+                    it->setToolTip("Not in your contacts. Right-click for options.");
+                    m_sideList->addItem(it);
+                }
+            }
+            refreshSidebarBadges();
+            updateWindowTitle();
+        }
+    }
+
+    void addSystemNote(const QString &conv, const QString &text) {
+        ChatMsg m; m.system = true; m.html = text.toHtmlEscaped();
+        appendMessage(conv, m);
+    }
+
+    QListWidgetItem *makeConvItem(const QString &key, const QString &name, bool group, const QString &recip) {
+        auto *it = new QListWidgetItem(avatarIcon(name, 32, group), name);
+        it->setData(Qt::UserRole, key);
+        it->setData(Qt::UserRole + 1, name);
+        it->setData(Qt::UserRole + 2, recip);
+        it->setSizeHint(QSize(0, 46));
+        return it;
+    }
+
+    QListWidgetItem *placeholderItem(const QString &text) {
+        auto *it = new QListWidgetItem(text);
+        it->setFlags(Qt::NoItemFlags);
+        it->setForeground(gTheme.dim);
+        it->setTextAlignment(Qt::AlignCenter);
+        it->setSizeHint(QSize(0, 110));
+        return it;
+    }
+
+    void refreshSidebarBadges() {
+        if (!m_sideList) return;
+        QSignalBlocker block(m_sideList);
+        for (int i = 0; i < m_sideList->count(); i++) {
+            QListWidgetItem *it = m_sideList->item(i);
+            QString key = it->data(Qt::UserRole).toString();
+            if (key.isEmpty()) continue;
+            QString name = it->data(Qt::UserRole + 1).toString();
+            int n = m_unread.value(key);
+            it->setText(n > 0 ? QString("%1   • %2 new").arg(name).arg(n) : name);
+            QFont f = it->font(); f.setBold(n > 0); it->setFont(f);
+            if (key == m_currentConv) m_sideList->setCurrentItem(it);
+        }
+        if (m_currentConv.isEmpty()) m_sideList->clearSelection();
+        if (m_reqBtn) {
+            int pending = m_pendingFriendReqs + m_pendingGroupInvites;
+            m_reqBtn->setText(pending > 0 ? QString("Requests (%1)").arg(pending) : QString("Requests"));
+            const char *want = pending > 0 ? "primary" : "";
+            if (m_reqBtn->objectName() != QLatin1String(want)) {
+                m_reqBtn->setObjectName(want);
+                m_reqBtn->style()->unpolish(m_reqBtn);
+                m_reqBtn->style()->polish(m_reqBtn);
+            }
+        }
+    }
+
+    void updateWindowTitle() {
+        int total = 0;
+        for (int n : m_unread) total += n;
+        setWindowTitle(total > 0 ? QString("(%1) SHROUD Secure Messenger").arg(total)
+                                 : QString("SHROUD Secure Messenger"));
+    }
+
+    void updateChatHeader() {
+        if (!m_chatTitle) return;
+        if (m_currentConv.isEmpty()) {
+            m_chatAvatar->setPixmap(QIcon(":/shroud.png").pixmap(38, 38));
+            m_chatTitle->setText("SHROUD");
+            m_chatSub->setText("Choose a conversation to start");
+        } else {
+            m_chatAvatar->setPixmap(avatarIcon(m_currentName, 38, m_currentIsGroup).pixmap(38, 38));
+            m_chatTitle->setText(m_currentName);
+            QString sub;
+            if (m_currentIsGroup)            sub = "Group";
+            else if (m_selectedRecip.isEmpty()) sub = "No active device right now, so messages can't be delivered";
+            else                             sub = "🔒 End-to-end encrypted";
+            if (timerOn() && !m_currentIsGroup && !m_selectedRecip.isEmpty())
+                sub += QString(" · ⏱ your messages disappear after %1").arg(durationLabel(gDisappearSeconds));
+            m_chatSub->setText(sub);
+        }
+        bool haveChat = !m_currentConv.isEmpty();
+        m_findBtn->setEnabled(haveChat);
+        m_verifyBtn->setVisible(haveChat && !m_currentIsGroup);
+        m_timerBtn->setText(timerOn() ? QString("⏱ %1").arg(durationLabel(gDisappearSeconds, true))
+                                      : QString("⏱"));
+        m_timerBtn->setToolTip(timerOn()
+            ? QString("Disappearing messages are on: what you send is deleted after %1. Click to change.")
+                  .arg(durationLabel(gDisappearSeconds))
+            : QString("Disappearing messages are off. Click to make what you send delete itself."));
+    }
+
+    void updateComposerState() {
+        if (!m_msgInput) return;
+        bool haveChat = !m_currentConv.isEmpty();
+        bool canSend = !m_maintenanceMode && haveChat && !m_currentIsGroup && !m_selectedRecip.isEmpty();
+        m_msgInput->setEnabled(canSend);
+        m_attachBtn->setEnabled(canSend);
+        m_emojiBtn->setEnabled(canSend);
+        m_sendBtn->setEnabled(canSend && !m_msgInput->text().trimmed().isEmpty());
+        QString ph;
+        if (m_maintenanceMode)             ph = "The relay is in maintenance. Sending is paused for your safety.";
+        else if (!haveChat)                ph = "Select a conversation to start typing";
+        else if (m_currentIsGroup)         ph = "Group chat isn't available in the Windows client yet";
+        else if (m_selectedRecip.isEmpty()) ph = QString("%1 has no active device right now").arg(m_currentName);
+        else                               ph = QString("Message %1   (Win + . for emoji)").arg(m_currentName);
+        m_msgInput->setPlaceholderText(ph);
+    }
+
+    void openConversation(const QString &key, const QString &name, bool group, const QString &recip) {
+        m_currentConv = key;
+        m_currentName = name;
+        m_currentIsGroup = group;
+        m_selectedRecip = recip;
+        m_unread.remove(key);
+        if (m_findBtn && m_findBtn->isChecked()) m_findBtn->setChecked(false);
+        renderConversation();
+        updateChatHeader();
+        updateComposerState();
+        refreshSidebarBadges();
+        updateWindowTitle();
+        if (!key.isEmpty() && m_msgInput->isEnabled()) m_msgInput->setFocus();
+    }
+
+    /* Ctrl+Tab / Ctrl+Shift+Tab through the sidebar. */
+    void stepConversation(int dir) {
+        int n = m_sideList->count();
+        if (n == 0) return;
+        int cur = m_sideList->currentRow();
+        for (int i = 1; i <= n; i++) {
+            int r = ((cur < 0 ? (dir > 0 ? -1 : 0) : cur) + dir * i + n * 2) % n;
+            QListWidgetItem *it = m_sideList->item(r);
+            if (it && !it->data(Qt::UserRole).toString().isEmpty()) { sideSelect(it); return; }
+        }
+    }
+
+    void findInChat(bool backward) {
+        QString t = m_findEdit->text();
+        if (t.isEmpty()) { setStatusLabel(m_findStatus, "", "info"); return; }
+        QTextDocument::FindFlags f;
+        if (backward) f |= QTextDocument::FindBackward;
+        if (!m_chatLog->find(t, f)) {
+            QTextCursor c = m_chatLog->textCursor();
+            c.movePosition(backward ? QTextCursor::End : QTextCursor::Start);
+            m_chatLog->setTextCursor(c);
+            if (!m_chatLog->find(t, f)) { setStatusLabel(m_findStatus, "No matches", "err"); return; }
+        }
+        setStatusLabel(m_findStatus, "", "info");
+    }
+
+    void buildTimerMenu() {
+        auto *menu = new QMenu(m_timerBtn);
+        auto *grp = new QActionGroup(menu);
+        struct Opt { const char *label; int secs; };
+        static const Opt opts[] = {
+            {"Off", 0}, {"30 seconds", 30}, {"5 minutes", 300}, {"1 hour", 3600},
+            {"8 hours", 28800}, {"1 day", 86400}, {"1 week", 604800},
+        };
+        QAction *title = menu->addAction("Messages you send disappear after…");
+        title->setEnabled(false);
+        menu->addSeparator();
+        for (const Opt &o : opts) {
+            QAction *a = menu->addAction(o.label);
+            a->setCheckable(true);
+            a->setData(o.secs);
+            grp->addAction(a);
+        }
+        menu->addSeparator();
+        QAction *custom = menu->addAction("Custom time…");
+        connect(menu, &QMenu::aboutToShow, [grp]() {
+            for (QAction *a : grp->actions()) {
+                int s = a->data().toInt();
+                a->setChecked(s == 0 ? !(gDisappearEnabled && gDisappearSeconds > 0)
+                                     : (gDisappearEnabled && gDisappearSeconds == s));
+            }
+        });
+        connect(grp, &QActionGroup::triggered, [this](QAction *a) {
+            int s = a->data().toInt();
+            gDisappearEnabled = s > 0;
+            if (s > 0) gDisappearSeconds = s;
+            saveUserPrefs();
+            onTimerChanged();
+        });
+        connect(custom, &QAction::triggered, [this]() { openSettings(1); });
+        connect(m_timerBtn, &QPushButton::clicked, [this, menu]() {
+            menu->exec(m_timerBtn->mapToGlobal(QPoint(0, m_timerBtn->height())));
+        });
+    }
+
+    void onTimerChanged() {
+        updateChatHeader();
+        if (!m_currentConv.isEmpty() && !m_currentIsGroup)
+            addSystemNote(m_currentConv, timerOn()
+                ? QString("Disappearing messages on: what you send from now on is deleted after %1.")
+                      .arg(durationLabel(gDisappearSeconds))
+                : QString("Disappearing messages off."));
+    }
+
+    /* Drag files from Explorer onto the window to send them. */
+    void dragEnterEvent(QDragEnterEvent *e) override {
+        if (e->mimeData()->hasUrls() && m_msgInput && m_msgInput->isEnabled()) {
+            for (const QUrl &u : e->mimeData()->urls())
+                if (u.isLocalFile()) { e->acceptProposedAction(); return; }
+        }
+        e->ignore();
+    }
+    void dropEvent(QDropEvent *e) override {
+        if (!m_msgInput || !m_msgInput->isEnabled()) return;
+        QStringList files;
+        for (const QUrl &u : e->mimeData()->urls())
+            if (u.isLocalFile() && QFileInfo(u.toLocalFile()).isFile()) files << u.toLocalFile();
+        e->acceptProposedAction();
+        for (const QString &f : files) attachFile(f);
     }
 
     /* ===============================================================
@@ -1491,16 +2224,54 @@ private:
         m_sideList->clear();
         m_friends.clear();
         QByteArray r = httpPost("/api/v1/friends/list", jsonBody({{"device_id", m_deviceId}}));
-        QJsonArray arr = QJsonDocument::fromJson(r).object().value("friends").toArray();
+        QJsonObject root = QJsonDocument::fromJson(r).object();
+        QJsonArray arr = root.value("friends").toArray();
         for (const QJsonValue &v : arr) {
             QString name = v.toObject().value("username").toString();
-            if (!name.isEmpty()) { m_friends << name; m_sideList->addItem(name); }
+            if (!name.isEmpty()) { m_friends << name; m_sideList->addItem(makeConvItem(name, name, false, QString())); }
+        }
+        if (!r.isEmpty()) m_friendsLoaded = true;
+        if (root.contains("incoming")) m_pendingFriendReqs = root.value("incoming").toArray().size();
+        for (const QString &x : m_extraConvs) {
+            if (m_friends.contains(x)) continue;
+            auto *it = makeConvItem(x, x, false, QString());
+            it->setToolTip("Not in your contacts. Right-click for options.");
+            m_sideList->addItem(it);
         }
         if (m_sideList->count() == 0) {
-            auto *item = new QListWidgetItem("(no friends yet — search by username)");
-            item->setFlags(Qt::NoItemFlags);
-            m_sideList->addItem(item);
+            m_sideList->addItem(placeholderItem(r.isEmpty()
+                ? "Couldn't load your contacts.\nCheck your connection; SHROUD\nwill keep trying."
+                : "No contacts yet.\n\nSearch for a friend's exact\nusername above, then send\nthem a friend request."));
         }
+        refreshSidebarBadges();
+    }
+
+    /* Pending friend requests + group invites, for the Requests badge.
+     * Also notices when a request we sent was accepted. */
+    void refreshRequests() {
+        QByteArray r = httpPost("/api/v1/friends/list", jsonBody({{"device_id", m_deviceId}}));
+        if (!r.isEmpty()) {
+            QJsonObject root = QJsonDocument::fromJson(r).object();
+            m_pendingFriendReqs = root.value("incoming").toArray().size();
+            QStringList now;
+            for (const QJsonValue &v : root.value("friends").toArray()) {
+                QString n = v.toObject().value("username").toString();
+                if (!n.isEmpty()) now << n;
+            }
+            QStringList added;
+            for (const QString &n : now) if (!m_friends.contains(n)) added << n;
+            if (!added.isEmpty() && !m_tabGroups) {
+                bool knewBefore = m_friendsLoaded;
+                loadContacts();
+                if (knewBefore)
+                    notify(QString("%1 is now in your contacts.").arg(added.join(", ")));
+            }
+        }
+        QByteArray gi = httpPost("/api/v1/groups/invites/list", jsonBody({{"device_id", m_deviceId}}));
+        if (!gi.isEmpty())
+            m_pendingGroupInvites = QJsonDocument::fromJson(gi).object().value("invites").toArray().size();
+        refreshSidebarBadges();
+        if (m_currentConv.isEmpty()) renderConversation();
     }
 
     /* Exact-match lookup. Updates the search-result panel. */
@@ -1509,6 +2280,10 @@ private:
         if (q.isEmpty()) { hideSearchResult(); return; }
         QByteArray r = httpPost("/api/v1/contacts/search",
             jsonBody({{"device_id", m_deviceId}, {"query", q}}));
+        if (r.isEmpty()) {
+            notify("Couldn't search: the relay isn't answering. Try again in a moment.");
+            return;
+        }
         QJsonArray users = QJsonDocument::fromJson(r).object().value("users").toArray();
         QString hit = users.isEmpty() ? QString() : users[0].toString();
         showSearchResult(hit, q);
@@ -1524,15 +2299,19 @@ private:
         m_searchResult->setVisible(true);
         if (found.isEmpty()) {
             m_searchHit.clear();
-            m_searchResultLabel->setText(QString("No matching user for \"%1\"").arg(queried.toHtmlEscaped()));
+            m_searchResultLabel->setText(QString("Nobody is called <b>%1</b>.<br>"
+                "<span style='color:%2'>Usernames have to match exactly, including capital letters.</span>")
+                .arg(queried.toHtmlEscaped(), cN(gTheme.dim)));
             m_btnMsg->setVisible(false);
             m_btnFriend->setVisible(false);
             m_btnGroupInvite->setVisible(false);
         } else {
             m_searchHit = found;
             m_searchHitIsFriend = m_friends.contains(found, Qt::CaseSensitive);
-            m_searchResultLabel->setText(QString("<b>%1</b>%2")
-                .arg(found.toHtmlEscaped(), m_searchHitIsFriend ? " (friend)" : ""));
+            m_searchResultLabel->setText(QString("<b>%1</b><br><span style='color:%2'>%3</span>")
+                .arg(found.toHtmlEscaped(), cN(gTheme.dim),
+                     m_searchHitIsFriend ? QString("Already in your contacts")
+                                         : QString("Not in your contacts yet")));
             m_btnMsg->setVisible(true);
             m_btnFriend->setVisible(!m_searchHitIsFriend);
             m_btnGroupInvite->setVisible(true);
@@ -1561,7 +2340,10 @@ private:
         if (deviceId.isEmpty()) return QByteArray();
         auto it = m_peerX25519.constFind(deviceId);
         if (it != m_peerX25519.constEnd()) return it.value();
-        QByteArray b = httpGet(QString("/api/v1/ratchet/bundle/%1").arg(deviceId).toUtf8().constData());
+        /* /ratchet/identity, not /ratchet/bundle: the bundle endpoint
+         * also hands out -- and deletes -- one of the peer's one-time
+         * prekeys, which a plain identity lookup must not consume. */
+        QByteArray b = httpGet(QString("/api/v1/ratchet/identity/%1").arg(deviceId).toUtf8().constData());
         QString hex = jsonStr(b, "x25519_pub");
         if (hex.isEmpty()) return QByteArray();          // pre-v1.6 peer
         QByteArray pub = QByteArray::fromHex(hex.toUtf8());
@@ -1602,7 +2384,41 @@ private:
         QByteArray r = httpPost("/api/v1/contacts/devices",
             jsonBody({{"device_id", m_deviceId}, {"contact_username", username}}));
         QJsonArray devs = QJsonDocument::fromJson(r).object().value("devices").toArray();
+        /* Remember which username each device belongs to, so incoming
+         * file/image notices (whose "name" field is the file name, not
+         * the sender) can still be filed under the right person. */
+        for (const QJsonValue &d : devs) {
+            QString id = d.toObject().value("id").toString();
+            if (!id.isEmpty()) m_deviceOwner.insert(id, username);
+        }
         return devs.isEmpty() ? QString() : devs[0].toObject().value("id").toString();
+    }
+
+    QHash<QString, QString> m_deviceOwner;   // device id -> username (session cache)
+    int m_undecryptable = 0;
+
+    /* Who sent this? Text messages carry the sender's username in the
+     * encrypted "name" field; file and image notices reuse "name" for the
+     * file name, so for those go by the sending device instead. */
+    QString senderLabelFor(const QJsonObject &plain, const QString &senderDevice) {
+        QString type = plain.value("type").toString();
+        bool isFileNotice = !plain.value("file_id").toString().isEmpty()
+                         || type == "image" || type == "file";
+        QString owner = m_deviceOwner.value(senderDevice);
+        if (isFileNotice) return owner.isEmpty() ? QString("Unknown sender") : owner;
+        QString name = plain.value("name").toString();
+        if (!name.isEmpty()) return name;
+        return owner.isEmpty() ? QString("Unknown sender") : owner;
+    }
+
+    /* A message arrived but couldn't be opened: say so instead of
+     * dropping it without a trace. */
+    void reportUndecryptable() {
+        m_undecryptable++;
+        notify(m_undecryptable == 1
+            ? QString("A message arrived that couldn't be decrypted. The sender may need to update SHROUD or sign in again.")
+            : QString("%1 messages this session couldn't be decrypted. The senders may need to update SHROUD or sign in again.")
+                  .arg(m_undecryptable), 15000);
     }
 
     /* ── Server identity pinning (TOFU) ─────────────────────────────
@@ -1741,29 +2557,24 @@ private:
             || n.endsWith(".gif") || n.endsWith(".bmp") || n.endsWith(".webp");
     }
 
-    /* Insert an image bubble into the chat log. The image is wrapped in an
-       anchor whose href encodes the file_id so anchorClicked can open the
-       viewer. A constrained width preserves the aspect ratio. */
-    void insertImageBubble(const QString &fileId, const QString &localPath,
-                            const QString &senderLabel) {
+    /* Add an image message to a conversation. The image is shown inline
+       (see ChatBrowser) wrapped in an anchor whose href encodes the
+       file_id so anchorClicked can open the viewer. */
+    void insertImageBubble(const QString &conv, const QString &fileId, const QString &localPath,
+                           const QString &senderLabel, bool mine) {
         QImage img(localPath);
+        ChatMsg m;
+        m.from = senderLabel;
+        m.mine = mine;
+        m.timed = mine && timerOn();
         if (img.isNull()) {
-            m_chatLog->append(QString("<b>[%1]</b> [image unreadable]")
-                .arg(senderLabel.toHtmlEscaped()));
-            return;
+            m.html = "<i>[image couldn't be displayed]</i>";
+        } else {
+            m_imagePaths[fileId] = localPath;
+            m_imageCache.insert(fileId, img);
+            m.imageId = fileId;
         }
-        m_imagePaths[fileId] = localPath;
-        QString resName = QString("image_%1").arg(fileId);
-        m_chatLog->document()->addResource(QTextDocument::ImageResource,
-                                            QUrl(resName), QVariant(img));
-        int maxW = 280;
-        int displayW = qMin(maxW, img.width());
-        QString html = QString(
-            "<div><b>[%1]</b><br/>"
-            "<a href=\"shroud-img://%2\">"
-            "<img src=\"%3\" width=\"%4\"/></a></div>"
-        ).arg(senderLabel.toHtmlEscaped(), fileId, resName).arg(displayW);
-        m_chatLog->append(html);
+        appendMessage(conv, m);
     }
 
     void onChatAnchorClicked(const QUrl &url) {
@@ -1815,28 +2626,20 @@ private:
         replaceImageInChatLog(fileId);
     }
 
-    /* After deletion, walk the chat log document and replace the image
-       fragment with a [deleted] placeholder so the bubble updates visually. */
+    /* After deletion, swap the image for a placeholder in whichever
+       conversation holds it. */
     void replaceImageInChatLog(const QString &fileId) {
-        QString anchor = QString("shroud-img://%1").arg(fileId);
-        QTextCursor c(m_chatLog->document());
-        while (!c.atEnd()) {
-            c.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
-            QString href = c.charFormat().anchorHref();
-            if (href == anchor) {
-                QTextCursor lineStart = c;
-                lineStart.movePosition(QTextCursor::StartOfBlock, QTextCursor::MoveAnchor);
-                QTextCursor lineEnd = c;
-                lineEnd.movePosition(QTextCursor::EndOfBlock, QTextCursor::MoveAnchor);
-                QTextCursor wipe(m_chatLog->document());
-                wipe.setPosition(lineStart.position());
-                wipe.setPosition(lineEnd.position(), QTextCursor::KeepAnchor);
-                wipe.removeSelectedText();
-                wipe.insertHtml("<i style=\"color:#888;\">[image deleted]</i>");
-                return;
+        m_imageCache.remove(fileId);
+        bool touchedCurrent = false;
+        for (auto it = m_conv.begin(); it != m_conv.end(); ++it) {
+            for (ChatMsg &m : it.value()) {
+                if (m.imageId != fileId) continue;
+                m.imageId.clear();
+                m.html = QString("<i style='color:%1'>image deleted</i>").arg(cN(gTheme.dim));
+                if (it.key() == m_currentConv) touchedCurrent = true;
             }
-            c.movePosition(QTextCursor::NextCharacter, QTextCursor::MoveAnchor);
         }
+        if (touchedCurrent) renderConversation();
     }
 
     void openImageViewer(const QString &fileId, const QString &path) {
@@ -1852,12 +2655,19 @@ private:
 
     void selectUsernameForChat(const QString &username) {
         QString did = resolveUsernameToDevice(username);
-        if (did.isEmpty()) {
-            m_statusBar->setText(QString("No active device for %1").arg(username));
-            return;
+        if (!m_friends.contains(username) && !m_extraConvs.contains(username)) {
+            m_extraConvs << username;
+            if (!m_tabGroups) {
+                auto *it = makeConvItem(username, username, false, QString());
+                it->setToolTip("Not in your contacts. Right-click for options.");
+                m_sideList->addItem(it);
+            }
         }
-        m_selectedRecip = did;
-        m_toField->setText(username);
+        hideSearchResult();
+        m_search->clear();
+        openConversation(username, username, false, did);
+        if (did.isEmpty())
+            notify(QString("%1 has no active device right now, so messages can't be delivered yet.").arg(username));
     }
 
     /* Extract server-side error detail (FastAPI: {"detail":"..."}) safely. */
@@ -1868,8 +2678,8 @@ private:
 
     void sendFriendRequest(const QString &username) {
         bool ok = false;
-        QString reason = QInputDialog::getText(this, "Friend Request",
-            QString("Send a friend request to %1?\nOptional note:").arg(username),
+        QString reason = QInputDialog::getText(this, "Add friend",
+            QString("Send %1 a friend request?\n\nAdd a short note so they know it's you (optional):").arg(username),
             QLineEdit::Normal, "", &ok);
         if (!ok) return;
         QByteArray body = jsonBody({
@@ -1878,9 +2688,12 @@ private:
         QByteArray r = httpPost("/api/v1/friends/request", body);
         QJsonObject obj = QJsonDocument::fromJson(r).object();
         if (obj.contains("request_id")) {
-            QMessageBox::information(this, "Friend Request", "Request sent.");
+            hideSearchResult();
+            notify(QString("Friend request sent to %1. They'll appear in your contacts once they accept.").arg(username), 10000);
         } else {
-            QMessageBox::warning(this, "Friend Request", jsonDetail(r, "Failed"));
+            QMessageBox::warning(this, "Add friend", r.isEmpty()
+                ? QString("Couldn't reach the relay, so the request wasn't sent.")
+                : QString("The request to %1 wasn't sent: %2").arg(username, jsonDetail(r, "unknown error")));
         }
     }
 
@@ -1896,16 +2709,17 @@ private:
             if (!gid.isEmpty()) { ids << gid; names << gname; }
         }
         if (names.isEmpty()) {
-            QMessageBox::information(this, "Add to Group", "You have no groups yet. Create one first from the Groups tab.");
+            QMessageBox::information(this, "Invite to a group",
+                "You don't have any groups yet. Click \"+ New group\" at the bottom left to create one first.");
             return;
         }
         bool ok = false;
-        QString chosen = QInputDialog::getItem(this, "Add to Group",
+        QString chosen = QInputDialog::getItem(this, "Invite to a group",
             QString("Invite %1 to which group?").arg(username), names, 0, false, &ok);
         if (!ok || chosen.isEmpty()) return;
         QString gid = ids[names.indexOf(chosen)];
-        QString reason = QInputDialog::getText(this, "Group Invite",
-            "Optional note for the recipient:", QLineEdit::Normal, "", &ok);
+        QString reason = QInputDialog::getText(this, "Invite to a group",
+            "Add a short note for them (optional):", QLineEdit::Normal, "", &ok);
         if (!ok) return;
         QByteArray body = jsonBody({
             {"device_id", m_deviceId}, {"group_id", gid},
@@ -1914,17 +2728,19 @@ private:
         QByteArray rr = httpPost("/api/v1/groups/invite", body);
         QJsonObject obj = QJsonDocument::fromJson(rr).object();
         if (obj.contains("invite_id")) {
-            QMessageBox::information(this, "Group Invite", "Invite sent.");
+            notify(QString("Invited %1 to %2.").arg(username, chosen), 8000);
         } else {
-            QMessageBox::warning(this, "Group Invite", jsonDetail(rr, "Failed"));
+            QMessageBox::warning(this, "Invite to a group", rr.isEmpty()
+                ? QString("Couldn't reach the relay, so the invite wasn't sent.")
+                : QString("The invite wasn't sent: %1").arg(jsonDetail(rr, "unknown error")));
         }
     }
 
     /* ── Requests dialog: pending friend requests + group invites. ── */
     void openRequestsDialog() {
         QDialog dlg(this);
-        dlg.setWindowTitle("Pending Requests");
-        dlg.resize(520, 460);
+        dlg.setWindowTitle("Requests");
+        dlg.resize(540, 460);
         auto *lay = new QVBoxLayout(&dlg);
         auto *tabs = new QTabWidget;
 
@@ -1933,25 +2749,32 @@ private:
         auto *fList = new QListWidget; fl->addWidget(fList, 1);
         auto *frRow = new QHBoxLayout;
         auto *frAccept = new QPushButton("Accept");
-        auto *frDeny = new QPushButton("Deny");
+        frAccept->setObjectName("primary");
+        auto *frDeny = new QPushButton("Decline");
         frRow->addStretch(); frRow->addWidget(frAccept); frRow->addWidget(frDeny);
         fl->addLayout(frRow);
-        tabs->addTab(fw, "Friend Requests");
+        fList->setIconSize(QSize(32, 32));
+        tabs->addTab(fw, "Friend requests");
 
         /* Group invites tab */
         auto *gw = new QWidget; auto *gl = new QVBoxLayout(gw);
         auto *gList = new QListWidget; gl->addWidget(gList, 1);
         auto *giRow = new QHBoxLayout;
-        auto *giAccept = new QPushButton("Accept");
-        auto *giDeny = new QPushButton("Deny");
+        auto *giAccept = new QPushButton("Join");
+        giAccept->setObjectName("primary");
+        auto *giDeny = new QPushButton("Decline");
         giRow->addStretch(); giRow->addWidget(giAccept); giRow->addWidget(giDeny);
         gl->addLayout(giRow);
-        tabs->addTab(gw, "Group Invites");
+        gList->setIconSize(QSize(32, 32));
+        tabs->addTab(gw, "Group invites");
 
         lay->addWidget(tabs, 1);
+        auto *closeRow = new QHBoxLayout;
         auto *closeBtn = new QPushButton("Close");
         connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
-        lay->addWidget(closeBtn);
+        closeRow->addStretch();
+        closeRow->addWidget(closeBtn);
+        lay->addLayout(closeRow);
 
         /* Holds (id, from, reason) per row so we can act on selection. */
         QList<QStringList> frData, giData;
@@ -1967,8 +2790,18 @@ private:
                 QString reason = o.value("reason").toString();
                 if (id.isEmpty()) continue;
                 frData << QStringList{id, from, reason};
-                fList->addItem(reason.isEmpty() ? from : QString("%1 — \"%2\"").arg(from, reason));
+                auto *it = new QListWidgetItem(avatarIcon(from, 32),
+                    reason.isEmpty() ? from : QString("%1\n\"%2\"").arg(from, reason));
+                it->setSizeHint(QSize(0, 48));
+                fList->addItem(it);
             }
+            if (frData.isEmpty())
+                fList->addItem(placeholderItem(r.isEmpty() ? "Couldn't load requests." : "No friend requests right now."));
+            else fList->setCurrentRow(0);
+            frAccept->setEnabled(!frData.isEmpty());
+            frDeny->setEnabled(!frData.isEmpty());
+            tabs->setTabText(0, frData.isEmpty() ? QString("Friend requests") : QString("Friend requests (%1)").arg(frData.size()));
+            m_pendingFriendReqs = frData.size();
         };
 
         auto reloadInvites = [&]() {
@@ -1984,9 +2817,18 @@ private:
                 if (id.isEmpty()) continue;
                 giData << QStringList{id, gname, from, reason};
                 QString label = QString("%1 invited you to %2").arg(from, gname);
-                if (!reason.isEmpty()) label += QString(" — \"%1\"").arg(reason);
-                gList->addItem(label);
+                if (!reason.isEmpty()) label += QString("\n\"%1\"").arg(reason);
+                auto *it = new QListWidgetItem(avatarIcon(gname, 32, true), label);
+                it->setSizeHint(QSize(0, 48));
+                gList->addItem(it);
             }
+            if (giData.isEmpty())
+                gList->addItem(placeholderItem(r.isEmpty() ? "Couldn't load invites." : "No group invites right now."));
+            else gList->setCurrentRow(0);
+            giAccept->setEnabled(!giData.isEmpty());
+            giDeny->setEnabled(!giData.isEmpty());
+            tabs->setTabText(1, giData.isEmpty() ? QString("Group invites") : QString("Group invites (%1)").arg(giData.size()));
+            m_pendingGroupInvites = giData.size();
         };
 
         auto respondFriend = [&](bool accept) {
@@ -1995,16 +2837,26 @@ private:
             QString reason;
             if (!accept) {
                 bool ok = false;
-                reason = QInputDialog::getText(&dlg, "Deny", "Optional reason:", QLineEdit::Normal, "", &ok);
+                reason = QInputDialog::getText(&dlg, "Decline", "Reason, if you want to give one (optional):", QLineEdit::Normal, "", &ok);
                 if (!ok) return;
             }
             QByteArray body = jsonBody({
                 {"device_id", m_deviceId}, {"request_id", frData[row][0]},
                 {"accept", accept}, {"reason", reason}
             });
-            httpPost("/api/v1/friends/respond", body);
+            QByteArray rr = httpPost("/api/v1/friends/respond", body);
+            if (rr.isEmpty() || rr.contains("\"detail\"")) {
+                QMessageBox::warning(&dlg, "Friend request", rr.isEmpty()
+                    ? QString("Couldn't reach the relay. Nothing was changed.")
+                    : QString("That didn't work: %1").arg(jsonDetail(rr, "unknown error")));
+                return;
+            }
+            QString who = frData[row][1];
             reloadFriends();
-            if (accept) loadContacts();
+            if (accept) {
+                if (!m_tabGroups) loadContacts();
+                notify(QString("%1 is now in your contacts.").arg(who));
+            }
         };
 
         auto respondInvite = [&](bool accept) {
@@ -2013,15 +2865,22 @@ private:
             QString reason;
             if (!accept) {
                 bool ok = false;
-                reason = QInputDialog::getText(&dlg, "Deny", "Optional reason:", QLineEdit::Normal, "", &ok);
+                reason = QInputDialog::getText(&dlg, "Decline", "Reason, if you want to give one (optional):", QLineEdit::Normal, "", &ok);
                 if (!ok) return;
             }
             QByteArray body = jsonBody({
                 {"device_id", m_deviceId}, {"invite_id", giData[row][0]},
                 {"accept", accept}, {"reason", reason}
             });
-            httpPost("/api/v1/groups/invites/respond", body);
+            QByteArray rr = httpPost("/api/v1/groups/invites/respond", body);
+            if (rr.isEmpty() || rr.contains("\"detail\"")) {
+                QMessageBox::warning(&dlg, "Group invite", rr.isEmpty()
+                    ? QString("Couldn't reach the relay. Nothing was changed.")
+                    : QString("That didn't work: %1").arg(jsonDetail(rr, "unknown error")));
+                return;
+            }
             reloadInvites();
+            if (accept && m_tabGroups) loadGroups();
         };
 
         connect(frAccept, &QPushButton::clicked, [&]() { respondFriend(true); });
@@ -2029,29 +2888,36 @@ private:
         connect(giAccept, &QPushButton::clicked, [&]() { respondInvite(true); });
         connect(giDeny,   &QPushButton::clicked, [&]() { respondInvite(false); });
 
+        connect(fList, &QListWidget::itemDoubleClicked, [&]() { respondFriend(true); });
+        connect(gList, &QListWidget::itemDoubleClicked, [&]() { respondInvite(true); });
         reloadFriends();
         reloadInvites();
+        if (frData.isEmpty() && !giData.isEmpty()) tabs->setCurrentIndex(1);
         dlg.exec();
+        refreshSidebarBadges();
+        if (m_currentConv.isEmpty()) renderConversation();   /* welcome text counts requests */
     }
 
     void loadGroups() {
         m_sideList->clear();
         QByteArray r = httpGet(QString("/api/v1/groups/%1").arg(m_deviceId).toUtf8().constData());
-        QString j = QString::fromUtf8(r);
-        int idx = j.indexOf("\"groups\":[");
-        if (idx < 0) return;
-        idx = j.indexOf('[', idx);
-        while (idx >= 0) {
-            int nid = j.indexOf("\"name\":\"", idx);
-            int iid = j.indexOf("\"id\":\"", idx);
-            if (nid < 0 || iid < 0) break;
-            int ne = j.indexOf('"', nid + 8);
-            int ie = j.indexOf('"', iid + 6);
-            QString name = j.mid(nid + 8, ne - nid - 8);
-            QString gid = j.mid(iid + 6, ie - iid - 6);
-            m_sideList->addItem(QString("# %1 [%2]").arg(name, gid.left(12)));
-            idx = qMax(ne, ie) + 1;
+        QJsonArray groups = QJsonDocument::fromJson(r).object().value("groups").toArray();
+        for (const QJsonValue &v : groups) {
+            QJsonObject g = v.toObject();
+            QString gid = g.value("id").toString();
+            QString name = g.value("name").toString();
+            if (gid.isEmpty()) continue;
+            if (name.isEmpty()) name = "Unnamed group";
+            auto *it = makeConvItem("#" + gid, name, true, gid);
+            it->setToolTip(QString("Group ID %1").arg(gid));
+            m_sideList->addItem(it);
         }
+        if (m_sideList->count() == 0) {
+            m_sideList->addItem(placeholderItem(r.isEmpty()
+                ? "Couldn't load your groups.\nCheck your connection."
+                : "No groups yet.\n\nClick \"+ New group\" to start\none, then invite friends\nfrom the search box."));
+        }
+        refreshSidebarBadges();
     }
 
     void createGroup(const QString &name) {
@@ -2068,82 +2934,144 @@ private:
     }
 
     void sideSelect(QListWidgetItem *item) {
-        QString text = item->text();
-        if (m_tabGroups) {
-            int lb = text.indexOf('['), rb = text.indexOf(']');
-            if (lb >= 0 && rb > lb) m_selectedRecip = text.mid(lb + 1, rb - lb - 1);
-            m_toField->setText(text);
+        if (!item) return;
+        QString key = item->data(Qt::UserRole).toString();
+        if (key.isEmpty()) return;                      /* placeholder row */
+        if (key == m_currentConv && !m_selectedRecip.isEmpty()) return;
+        QString name = item->data(Qt::UserRole + 1).toString();
+        bool group = key.startsWith('#');
+        QString recip;
+        if (group) {
+            recip = item->data(Qt::UserRole + 2).toString();
         } else {
             /* Sidebar items are usernames; resolve to a device_id for sending. */
-            QString did = resolveUsernameToDevice(text);
-            if (did.isEmpty()) {
-                m_statusBar->setText(QString("No active device for %1").arg(text));
-                return;
-            }
-            m_selectedRecip = did;
-            m_toField->setText(text);
+            recip = resolveUsernameToDevice(name);
+            if (recip.isEmpty())
+                notify(QString("%1 has no active device right now, so messages can't be delivered yet.").arg(name));
+        }
+        openConversation(key, name, group, recip);
+    }
+
+    /* Right-click on a sidebar entry. */
+    void onContactContextMenu(const QPoint &pos) {
+        QListWidgetItem *item = m_sideList->itemAt(pos);
+        if (!item) return;
+        QString key = item->data(Qt::UserRole).toString();
+        if (key.isEmpty()) return;
+        QString name = item->data(Qt::UserRole + 1).toString();
+        bool group = key.startsWith('#');
+
+        QMenu menu(this);
+        QAction *open = menu.addAction("Open conversation");
+        QAction *verify = nullptr, *copy = nullptr, *add = nullptr;
+        if (!group) {
+            verify = menu.addAction("Verify safety number…");
+            copy = menu.addAction("Copy username");
+            if (!m_friends.contains(name)) add = menu.addAction("Send friend request…");
+        } else {
+            copy = menu.addAction("Copy group ID");
+        }
+        menu.addSeparator();
+        QAction *clear = menu.addAction("Clear conversation on this PC");
+        clear->setEnabled(!m_conv.value(key).isEmpty());
+        QAction *chosen = menu.exec(m_sideList->mapToGlobal(pos));
+        if (!chosen) return;
+        if (chosen == open) sideSelect(item);
+        else if (chosen == verify) showSafetyNumber(name);
+        else if (chosen == copy) {
+            QApplication::clipboard()->setText(group ? item->data(Qt::UserRole + 2).toString() : name);
+            notify("Copied to clipboard.", 3000);
+        }
+        else if (chosen == add) sendFriendRequest(name);
+        else if (chosen == clear) {
+            m_conv.remove(key);
+            m_unread.remove(key);
+            if (key == m_currentConv) renderConversation();
+            refreshSidebarBadges();
+            updateWindowTitle();
         }
     }
 
-    /* Right-click on a contact → "Verify safety number".
-     * Pulls the contact's X25519 ratchet identity from the server,
-     * combines with ours, and shows the 30-digit number. Users compare
-     * out-of-band to defeat MITM. */
-    void onContactContextMenu(const QPoint &pos) {
-        QListWidgetItem *item = m_sideList->itemAt(pos);
-        if (!item || m_tabGroups) return;
-        QString uname = item->text();
-
-        QMenu menu(this);
-        QAction *verify = menu.addAction("Verify safety number…");
-        QAction *chosen = menu.exec(m_sideList->mapToGlobal(pos));
-        if (chosen != verify) return;
-
+    /* Pulls the contact's X25519 ratchet identity from the server,
+     * combines it with ours, and shows the 30-digit number. Users
+     * compare out-of-band to defeat MITM. */
+    void showSafetyNumber(const QString &uname) {
         QString did = resolveUsernameToDevice(uname);
         if (did.isEmpty()) {
             QMessageBox::information(this, "Safety number",
-                "That contact isn't online — try again when their device is reachable.");
+                QString("%1 has no active device right now. Try again once they've been online.").arg(uname));
             return;
         }
-        QByteArray b = httpGet(QString("/api/v1/ratchet/bundle/%1").arg(did).toUtf8().constData());
+        QByteArray b = httpGet(QString("/api/v1/ratchet/identity/%1").arg(did).toUtf8().constData());
         QString theirPubHex = jsonStr(b, "x25519_pub");
         if (theirPubHex.isEmpty()) {
             QMessageBox::information(this, "Safety number",
-                "That contact hasn't published a ratchet bundle yet (pre-v1.6 client).");
+                QString("%1 is using an older SHROUD version that doesn't publish a safety number yet.").arg(uname));
             return;
         }
         QByteArray theirPub = QByteArray::fromHex(theirPubHex.toUtf8());
-
-        /* Read our own X25519 pub from the DPAPI-wrapped identity blob. */
-        std::wstring wIdPath = (ratchetKeyDir() + "/identity.x25519").toStdWString();
-        BYTE *plain = NULL; DWORD plainLen = 0;
-        if (!storage_load_blob(wIdPath.c_str(), &plain, &plainLen) || plainLen < 64) {
+        if (theirPub.size() != 32) {
             QMessageBox::warning(this, "Safety number",
-                "Your local ratchet identity isn't readable. Re-login to regenerate.");
+                "The relay returned a malformed key for this contact. Don't trust this conversation until it's resolved.");
             return;
         }
-        BYTE myPub[32]; memcpy(myPub, plain + 32, 32);
-        free(plain);
+
+        /* Read our own X25519 pub from the DPAPI-wrapped identity blob. */
+        BYTE myPriv[32], myPub[32];
+        if (!loadMyX25519Identity(myPriv, myPub)) {
+            QMessageBox::warning(this, "Safety number",
+                "Your own encryption identity on this PC couldn't be read. Signing out and back in regenerates it.");
+            return;
+        }
+        SecureZeroMemory(myPriv, sizeof(myPriv));
 
         char *fp = safety_number_compute(myPub, (const BYTE*)theirPub.constData());
-        QString number = fp ? QString::fromUtf8(fp) : "(unavailable)";
+        QString number = fp ? QString::fromUtf8(fp) : QString();
         free(fp);
+        if (number.isEmpty()) {
+            QMessageBox::warning(this, "Safety number", "Couldn't compute the safety number.");
+            return;
+        }
 
-        QString html = QString(
-            "<div style='font-family:Consolas,monospace;text-align:center'>"
-            "<div style='font-size:28px;letter-spacing:2px;margin:14px 0;color:#ff8c1e'>%1</div>"
-            "<div style='color:#888;font-size:11px;max-width:380px'>"
-            "Compare this number with %2 in person, over a phone call, or any other "
-            "trusted channel. If both sides see the SAME number, the connection is "
-            "free of MITM. If they differ, do not trust this conversation.</div></div>"
-        ).arg(number, uname);
-
-        QMessageBox box(this);
-        box.setWindowTitle(QString("Safety number for %1").arg(uname));
-        box.setTextFormat(Qt::RichText);
-        box.setText(html);
-        box.setStandardButtons(QMessageBox::Ok);
-        box.exec();
+        QDialog dlg(this);
+        dlg.setWindowTitle(QString("Verify %1").arg(uname));
+        dlg.setMinimumWidth(460);
+        auto *l = new QVBoxLayout(&dlg);
+        l->setContentsMargins(24, 20, 24, 16);
+        l->setSpacing(10);
+        auto *hdr = new QLabel(QString("Safety number with <b>%1</b>").arg(uname.toHtmlEscaped()));
+        hdr->setObjectName("subheading");
+        l->addWidget(hdr);
+        auto *num = new QLabel(number);
+        num->setAlignment(Qt::AlignCenter);
+        num->setWordWrap(true);
+        num->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        num->setStyleSheet(QString("font-family: Consolas, monospace; font-size: 20pt; letter-spacing: 2px; "
+                                   "color: %1; padding: 14px; border: 1px solid %2; border-radius: 10px;")
+                               .arg(cN(gTheme.accent), cN(gTheme.border)));
+        l->addWidget(num);
+        auto *how = new QLabel(QString(
+            "Compare this number with %1 in person, on a call, or over any other channel you trust. "
+            "<br><br><b>Same number on both screens:</b> nobody is in the middle.<br>"
+            "<b>Different numbers:</b> don't trust this conversation.").arg(uname.toHtmlEscaped()));
+        how->setWordWrap(true);
+        how->setObjectName("muted");
+        l->addWidget(how);
+        auto *btns = new QHBoxLayout;
+        auto *copyBtn = new QPushButton("Copy number");
+        auto *okBtn = new QPushButton("Done");
+        okBtn->setObjectName("primary");
+        okBtn->setDefault(true);
+        btns->addWidget(copyBtn);
+        btns->addStretch();
+        btns->addWidget(okBtn);
+        l->addLayout(btns);
+        connect(copyBtn, &QPushButton::clicked, [number, copyBtn]() {
+            QApplication::clipboard()->setText(number);
+            copyBtn->setText("Copied");
+        });
+        connect(okBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+        dlg.exec();
     }
 
     /* ===============================================================
@@ -2511,7 +3439,8 @@ private:
      * =============================================================== */
     void sendMessage() {
         QString body = m_msgInput->text().trimmed();
-        if (body.isEmpty() || m_selectedRecip.isEmpty()) return;
+        if (body.isEmpty() || m_selectedRecip.isEmpty() || m_currentIsGroup || m_maintenanceMode) return;
+        const QString conv = m_currentConv;
 
         qint64 ts = QDateTime::currentSecsSinceEpoch();
         QByteArray pl = jsonBody({
@@ -2590,8 +3519,9 @@ private:
                                               ? gDisappearSeconds : 0);
                 SecureZeroMemory(&ctx, sizeof(ctx));
                 if (sent) {
-                    m_chatLog->append(QString("<b>[%1]</b> %2")
-                        .arg(m_username.toHtmlEscaped(), mdToHtml(body)));
+                    ChatMsg m; m.from = "You"; m.mine = true; m.timed = timerOn();
+                    m.html = mdToHtml(body);
+                    appendMessage(conv, m);
                     m_msgInput->clear();
                     return;
                 }
@@ -2599,8 +3529,7 @@ private:
                  * the legacy path rather than silently losing the
                  * message — the user still gets delivery, and the status
                  * bar records that this one was not anonymous. */
-                m_statusBar->setText("Sealed send failed — retried on the legacy path");
-                m_statusBar->setStyleSheet("color: #ffc048; font-size: 11px; font-weight: bold;");
+                notify("Anonymous delivery failed, so this message was retried on the older, less private path.", 10000);
             }
         }
 
@@ -2614,13 +3543,18 @@ private:
          * flips red even if the heartbeat poll hasn't fired yet. */
         if (sendResp.contains("\"detail\":\"maintenance\"")) {
             setMaintenanceMode(true);
-            m_statusBar->setText("Send refused — server in maintenance");
-            m_statusBar->setStyleSheet("color: #ff8a8a; font-size: 11px; font-weight: bold;");
+            notify("Not sent: the relay is in maintenance. Your text is still in the box.");
             return;
         }
 
-        m_chatLog->append(QString("<b>[%1]</b> %2")
-            .arg(m_username.toHtmlEscaped(), mdToHtml(body)));
+        ChatMsg m; m.from = "You"; m.mine = true; m.timed = timerOn();
+        m.html = mdToHtml(body);
+        m.failed = !sendResp.contains("\"message_id\"");
+        appendMessage(conv, m);
+        if (m.failed)
+            notify(sendResp.isEmpty()
+                ? QString("Couldn't reach the relay; the message was not delivered.")
+                : QString("The relay didn't accept the message: %1").arg(jsonDetail(sendResp, "unknown error")), 12000);
         m_msgInput->clear();
     }
 
@@ -2736,12 +3670,12 @@ private:
             if (env.isEmpty()) continue;
             QString sender = env.value("sender").toString();
             QJsonObject plain = decryptEnvelope(env, sender);
-            QString senderName = plain.value("name").toString();
-            if (senderName.isEmpty()) senderName = sender.left(12);
+            if (plain.isEmpty()) { reportUndecryptable(); continue; }
+            QString senderName = senderLabelFor(plain, sender);
             QString body = plain.value("body").toString();
             if (!body.isEmpty()) {
-                m_chatLog->append(QString("<b>[%1]</b> %2")
-                    .arg(senderName.toHtmlEscaped(), mdToHtml(body)));
+                ChatMsg cm; cm.from = senderName; cm.html = mdToHtml(body);
+                appendMessage(senderName, cm);
             }
         }
     }
@@ -2750,8 +3684,6 @@ private:
         if (m_deviceId.isEmpty()) return;
         fetchAnonMessages();
         QByteArray r = httpPost("/api/v1/messages/fetch", jsonBody({{"device_id", m_deviceId}}));
-        m_statusBar->setText("Online — AES-256-GCM | ECDH P-384");
-        m_statusBar->setStyleSheet("color: #2ed573; font-size: 11px; font-weight: bold;");
         QJsonObject root = QJsonDocument::fromJson(r).object();
         QJsonArray msgs = root.value("messages").toArray();
         for (const QJsonValue &mv : msgs) {
@@ -2759,8 +3691,8 @@ private:
             QString sender = m.value("sender_device_id").toString();
             QJsonObject env = m.value("envelope").toObject();
             QJsonObject plain = decryptEnvelope(env, sender);
-            QString senderName = plain.value("name").toString();
-            if (senderName.isEmpty()) senderName = sender.left(12);
+            if (plain.isEmpty()) { reportUndecryptable(); continue; }
+            QString senderName = senderLabelFor(plain, sender);
             QString body = plain.value("body").toString();
             QString type = plain.value("type").toString();
             QString fileId = plain.value("file_id").toString();
@@ -2768,13 +3700,13 @@ private:
             if (isImage && !fileId.isEmpty()) {
                 QString localPath = downloadAndDecryptImage(fileId, sender, plain.value("name").toString());
                 if (!localPath.isEmpty()) {
-                    insertImageBubble(fileId, localPath, senderName);
+                    insertImageBubble(senderName, fileId, localPath, senderName, false);
                     continue;
                 }
             }
             if (!body.isEmpty()) {
-                m_chatLog->append(QString("<b>[%1]</b> %2")
-                    .arg(senderName.toHtmlEscaped(), mdToHtml(body)));
+                ChatMsg cm; cm.from = senderName; cm.html = mdToHtml(body);
+                appendMessage(senderName, cm);
             }
         }
     }
@@ -2782,13 +3714,19 @@ private:
     /* ===============================================================
      *  FILE ATTACH
      * =============================================================== */
-    void attachFile() {
-        QString path = QFileDialog::getOpenFileName(this, "Select File to Send (Encrypted)",
-            QString(), "All Files (*.*);;Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)");
-        if (path.isEmpty() || m_selectedRecip.isEmpty()) return;
+    void attachFile(QString path = QString()) {
+        if (m_selectedRecip.isEmpty() || m_currentIsGroup || m_maintenanceMode) return;
+        const QString conv = m_currentConv;
+        if (path.isEmpty())
+            path = QFileDialog::getOpenFileName(this, QString("Send a file to %1 (encrypted)").arg(m_currentName),
+                QString(), "All files (*.*);;Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)");
+        if (path.isEmpty()) return;
 
         QFile f(path);
-        if (!f.open(QIODevice::ReadOnly)) return;
+        if (!f.open(QIODevice::ReadOnly)) {
+            notify(QString("Couldn't open %1: %2").arg(QFileInfo(path).fileName(), f.errorString()));
+            return;
+        }
         QByteArray data = f.readAll();
         f.close();
 
@@ -2801,7 +3739,10 @@ private:
             crypto_sha256(cfg.identity_key.pub.data, cfg.identity_key.pub.len, sk);
 
         BYTE *enc = nullptr; DWORD elen = 0;
-        if (!crypto_encrypt_file_data(sk, (const BYTE*)data.constData(), data.size(), &enc, &elen)) return;
+        if (!crypto_encrypt_file_data(sk, (const BYTE*)data.constData(), data.size(), &enc, &elen)) {
+            notify("Couldn't encrypt that file, so nothing was sent.");
+            return;
+        }
 
         QString mime = isImage ? QString("image/") + QFileInfo(path).suffix().toLower() : QString();
         QByteArray meta = jsonBody({
@@ -2809,13 +3750,15 @@ private:
             {"mime", mime}, {"is_image", isImage}
         });
 
-        m_statusBar->setText("Uploading encrypted file...");
+        notify(QString("Encrypting and uploading %1…").arg(fname), 0);
+        QApplication::setOverrideCursor(Qt::BusyCursor);
         QApplication::processEvents();
 
         HttpResponse *ur = network_upload_file("/api/v1/files/upload", enc, elen,
             m_deviceId.toUtf8().constData(), m_selectedRecip.toUtf8().constData(),
             meta.constData());
         free(enc);
+        QApplication::restoreOverrideCursor();
 
         QString fileId;
         if (ur && ur->len > 0) {
@@ -2823,7 +3766,10 @@ private:
             fileId = QJsonDocument::fromJson(ub).object().value("file_id").toString();
             network_free_response(ur);
         }
-        if (fileId.isEmpty()) { m_statusBar->setText("Upload failed"); return; }
+        if (fileId.isEmpty()) {
+            notify(QString("Upload of %1 failed. Check your connection and try again.").arg(fname), 12000);
+            return;
+        }
 
         /* Cache plaintext locally so the sender can view + the viewer can
            open it from disk later. */
@@ -2872,20 +3818,23 @@ private:
         QByteArray imgResp = httpPost("/api/v1/messages/send", jb, expHdr2);
         if (imgResp.contains("\"detail\":\"maintenance\"")) {
             setMaintenanceMode(true);
-            m_statusBar->setText("Upload refused — server in maintenance");
-            m_statusBar->setStyleSheet("color: #ff8a8a; font-size: 11px; font-weight: bold;");
+            notify("Not sent: the relay is in maintenance.");
             return;
         }
+        bool delivered = imgResp.contains("\"message_id\"");
 
-        if (isImage && !localPath.isEmpty()) {
-            insertImageBubble(fileId, localPath, m_username);
+        if (isImage && !localPath.isEmpty() && delivered) {
+            insertImageBubble(conv, fileId, localPath, "You", true);
         } else {
-            m_chatLog->append(QString("<b>[%1]</b> [FILE] %2 (%3 bytes)")
-                .arg(m_username.toHtmlEscaped(), fname.toHtmlEscaped()).arg(data.size()));
+            ChatMsg m; m.from = "You"; m.mine = true; m.timed = timerOn(); m.failed = !delivered;
+            m.html = QString("📄 <b>%1</b> <span style='color:%2'>(%3)</span>")
+                .arg(fname.toHtmlEscaped(), cN(gTheme.dim), QLocale::system().formattedDataSize(data.size()));
+            appendMessage(conv, m);
         }
-        m_statusBar->setText(isImage
-            ? QString("Image sent: %1").arg(fname)
-            : QString("File sent: %1").arg(fname));
+        notify(delivered
+            ? QString("%1 sent: %2").arg(isImage ? "Image" : "File", fname)
+            : QString("%1 was uploaded but the notice to %2 wasn't delivered: %3")
+                  .arg(fname, m_currentName, jsonDetail(imgResp, "no response from the relay")), 12000);
     }
 
     /* ===============================================================
@@ -3079,10 +4028,11 @@ private:
     /* ===============================================================
      *  SETTINGS
      * =============================================================== */
-    void openSettings() {
+    void openSettings(int initialTab = 0) {
         QDialog dlg(this);
         dlg.setWindowTitle("SHROUD Settings");
-        dlg.setFixedSize(620, 560);
+        dlg.resize(660, 580);
+        dlg.setMinimumSize(560, 480);
         auto *lay = new QVBoxLayout(&dlg);
         auto *tabs = new QTabWidget;
 
@@ -3197,7 +4147,7 @@ private:
 
         auto *disBox = new QGroupBox("Disappearing messages");
         auto *disLayout = new QVBoxLayout(disBox);
-        auto *disChk = new QCheckBox("Enable — outgoing messages auto-delete after the timer");
+        auto *disChk = new QCheckBox("Delete the messages I send after a set time");
         disChk->setChecked(gDisappearEnabled);
         disLayout->addWidget(disChk);
         auto *timerRow = new QHBoxLayout;
@@ -3230,7 +4180,9 @@ private:
         rtChk->setChecked(gRichText);
         connect(rtChk, &QCheckBox::toggled, [](bool c) { gRichText = c; });
         rtL->addWidget(rtChk);
-        rtL->addWidget(new QLabel("Tip: press Win + .  to open Windows' emoji panel while typing."));
+        auto *emojiTip = new QLabel("Tip: press Win + . to open the Windows emoji panel while typing.");
+        emojiTip->setObjectName("hint");
+        rtL->addWidget(emojiTip);
         auto *emojiBtn = new QPushButton("Open emoji panel now");
         connect(emojiBtn, &QPushButton::clicked, [this]() {
             INPUT in[4] = {};
@@ -3242,6 +4194,19 @@ private:
         });
         rtL->addWidget(emojiBtn);
         mlv->addWidget(rtBox);
+
+        auto *ntBox = new QGroupBox("Notifications");
+        auto *ntL = new QVBoxLayout(ntBox);
+        auto *flashChk = new QCheckBox("Flash the taskbar button when a message arrives");
+        flashChk->setChecked(gFlashOnMessage);
+        connect(flashChk, &QCheckBox::toggled, [](bool c) { gFlashOnMessage = c; });
+        ntL->addWidget(flashChk);
+        auto *ntNote = new QLabel("SHROUD never shows message text in Windows notifications, "
+                                  "so nothing leaks onto the lock screen or into Action Center.");
+        ntNote->setObjectName("hint");
+        ntNote->setWordWrap(true);
+        ntL->addWidget(ntNote);
+        mlv->addWidget(ntBox);
         mlv->addStretch();
         tabs->addTab(ms, "Messages");
 
@@ -3350,15 +4315,23 @@ private:
 
         /* ──────────── Password tab ──────────── */
         auto *pw = new QWidget; auto *pl = new QVBoxLayout(pw);
+        auto *pwIntro = new QLabel("Change the password for <b>" + m_username.toHtmlEscaped() + "</b>. "
+                                   "Your other devices will need the new password next time they sign in.");
+        pwIntro->setWordWrap(true);
+        pl->addWidget(pwIntro);
         auto *oldPw = new QLineEdit; oldPw->setEchoMode(QLineEdit::Password); oldPw->setPlaceholderText("Current password");
         auto *newPw = new QLineEdit; newPw->setEchoMode(QLineEdit::Password); newPw->setPlaceholderText("New password (12+ chars)");
         auto *cfmPw = new QLineEdit; cfmPw->setEchoMode(QLineEdit::Password); cfmPw->setPlaceholderText("Confirm new password");
         attachPasswordReveal(oldPw); attachPasswordReveal(newPw); attachPasswordReveal(cfmPw);
         pl->addWidget(oldPw); pl->addWidget(newPw); pl->addWidget(cfmPw);
-        auto *chBtn = new QPushButton("Change Password");
+        auto *chBtn = new QPushButton("Change password");
+        chBtn->setObjectName("primary");
         connect(chBtn, &QPushButton::clicked, [=, &dlg]() {
-            if (newPw->text().length() < 12 || newPw->text() != cfmPw->text()) {
-                QMessageBox::warning(&dlg, "Error", "Password must be 12+ chars and match"); return;
+            if (newPw->text().length() < 12) {
+                QMessageBox::warning(&dlg, "Change password", "The new password needs at least 12 characters."); return;
+            }
+            if (newPw->text() != cfmPw->text()) {
+                QMessageBox::warning(&dlg, "Change password", "The new password and its confirmation don't match."); return;
             }
             QByteArray b = jsonBody({
                 {"username", m_username},
@@ -3366,7 +4339,14 @@ private:
                 {"new_password", newPw->text()}
             });
             QByteArray r = httpPost("/api/v1/change-password", b);
-            QMessageBox::information(&dlg, "Password", r.contains("\"changed\":true") ? "Changed!" : "Failed");
+            if (r.contains("\"changed\":true")) {
+                oldPw->clear(); newPw->clear(); cfmPw->clear();
+                QMessageBox::information(&dlg, "Change password", "Your password has been changed.");
+            } else {
+                QMessageBox::warning(&dlg, "Change password", r.isEmpty()
+                    ? QString("Couldn't reach the relay. Your password was not changed.")
+                    : QString("Your password was not changed: %1").arg(jsonDetail(r, "the relay refused the request.")));
+            }
         });
         pl->addWidget(chBtn); pl->addStretch();
         tabs->addTab(pw, "Password");
@@ -3389,8 +4369,9 @@ server as well.</p>
 
 <h3 style='color:%1'>Verifying you're talking to the right person</h3>
 <ul>
-<li><b>Right-click any contact</b> in the sidebar → <i>Verify safety
-number…</i>. A 30-digit number appears. Read it out to your contact in
+<li>Open a conversation and click <b>🛡 Verify</b> in its header (or
+right-click the contact → <i>Verify safety number…</i>). A 30-digit
+number appears. Read it out to your contact in
 person, on a phone call, or any trusted channel. Same number on both
 sides → no man-in-the-middle. Different number → do not trust the
 conversation, and rotate the server's identity if you administer it.</li>
@@ -3400,8 +4381,9 @@ the client will refuse to authenticate.</li>
 </ul>
 
 <h3 style='color:%1'>Disappearing messages</h3>
-<p>Open <b>Settings → Messages</b>. Tick <i>Enable</i> and pick how long
-a message lives. Outgoing messages carry an <code>X-Expires-In</code>
+<p>Click the <b>⏱</b> timer in a conversation's header and pick how long
+the messages you send should live, or set a custom time in
+<b>Settings → Messages</b>. Outgoing messages carry an <code>X-Expires-In</code>
 header; the server's background sweep deletes them after the timer.
 Default is OFF. Setting the timer to zero disables the feature even if
 the checkbox stays on.</p>
@@ -3434,7 +4416,7 @@ also call the panic endpoint manually — the server returns a generic
 200 either way so a coercer can't tell whether it succeeded.</p>
 
 <h3 style='color:%1'>Files &amp; images</h3>
-<p>Drop or attach any file. Encrypted client-side with AES-256-GCM, the
+<p>Drag a file onto the window, or click the 📎 paperclip. Encrypted client-side with AES-256-GCM, the
 key derived from the sender's public-key blob so the recipient can
 decrypt without any extra handshake. Images appear inline; click for
 full-screen view. Either sender or recipient can delete an image — the
@@ -3446,8 +4428,8 @@ delete cascades to the server.</p>
 server is running and reachable on port 58443.</li>
 <li><b>Key derivation failed</b> — fixed in v2.0.0+. Update the client.</li>
 <li><b>Server identity changed</b> — either the operator rotated the
-identity (verify out of band) or you're being MITM'd. Delete the pin file
-at <code>%APPDATA%\SHROUD\server.pin</code> and try again only if
+identity (verify out of band) or you're being MITM'd. Delete that relay's
+pin file in <code>%APPDATA%\SHROUD\SHROUD\pins\</code> and try again only if
 you've confirmed the rotation is legitimate.</li>
 <li><b>Server is in onion-only mode</b> — the operator restricted
 connections to Tor hidden services. Connect via the .onion address.</li>
@@ -3461,14 +4443,19 @@ connections to Tor hidden services. Connect via the .onion address.</li>
 
         /* ──────────── Danger tab ──────────── */
         auto *dz = new QWidget; auto *dlay = new QVBoxLayout(dz);
-        dlay->addWidget(new QLabel("Permanently destroy all data and the application:"));
-        auto *nukeBtn = new QPushButton("NUKE MY DATA");
-        QString dgr = cN(gTheme.danger);
-        nukeBtn->setStyleSheet(QString("QPushButton { background-color: %1; color: white; font-weight: bold; }").arg(dgr));
+        auto *dzInfo = new QLabel(
+            "<b>Erase SHROUD from this PC.</b><br><br>"
+            "This deletes your keys, settings and SHROUD's data on this computer, then "
+            "closes the app. Nothing it deletes can be recovered. Use it if you think "
+            "this device is about to be taken or inspected.");
+        dzInfo->setWordWrap(true);
+        dlay->addWidget(dzInfo);
+        auto *nukeBtn = new QPushButton("Erase everything on this PC");
+        nukeBtn->setObjectName("danger");
         connect(nukeBtn, &QPushButton::clicked, [&dlg]() {
-            if (QMessageBox::question(&dlg, "Confirm Nuke",
-                "Delete ALL data and the SHROUD executable?\nThis is IRREVERSIBLE.",
-                QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+            if (QMessageBox::warning(&dlg, "Erase everything?",
+                "Delete ALL SHROUD data on this PC and close the app?\n\nThis cannot be undone.",
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes) {
                 storage_delete_all();
                 QApplication::quit();
             }
@@ -3477,11 +4464,25 @@ connections to Tor hidden services. Connect via the .onion address.</li>
         tabs->addTab(dz, "Danger");
 
         lay->addWidget(tabs);
-        auto *closeBtn = new QPushButton("Close & save");
+        tabs->setCurrentIndex(qBound(0, initialTab, tabs->count() - 1));
+        auto *closeRow = new QHBoxLayout;
+        auto *saveNote = new QLabel("Changes apply immediately.");
+        saveNote->setObjectName("hint");
+        auto *closeBtn = new QPushButton("Done");
+        closeBtn->setObjectName("primary");
+        closeBtn->setDefault(true);
         connect(closeBtn, &QPushButton::clicked, [&dlg]() { saveUserPrefs(); dlg.accept(); });
-        lay->addWidget(closeBtn);
+        closeRow->addWidget(saveNote);
+        closeRow->addStretch();
+        closeRow->addWidget(closeBtn);
+        lay->addLayout(closeRow);
         dlg.exec();
         saveUserPrefs();   /* save again even if window is X'd */
+        /* Theme and timer changes bake into rendered content. */
+        if (m_chatLog) {
+            onThemeChanged();
+            updateChatHeader();
+        }
     }
 };
 
@@ -3748,8 +4749,10 @@ int main(int argc, char *argv[]) {
      * faults during window construction get captured. The pubkey is
      * checked for non-zero inside install(); zero pubkey means the
      * filter is wired but submission is skipped. */
+#ifndef SHROUD_UI_PREVIEW
     error_reporter_install(g_operator_diag_pubkey,
                            "https://100.30.51.8:58443");
+#endif
 
     CryptoSplash splash;
     splash.show();

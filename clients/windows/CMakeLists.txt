@@ -62,3 +62,36 @@ target_compile_definitions(shroud PRIVATE
     CLIENT_VERSION="${PROJECT_VERSION}"
 )
 set_target_properties(shroud PROPERTIES WIN32_EXECUTABLE TRUE)
+
+# main.cpp is UTF-8 without a BOM. Without /utf-8, MSVC reads it in the
+# system code page, and characters such as emoji (whose UTF-8 bytes
+# include ones cp1252 leaves undefined) come out mangled in the UI.
+if(MSVC)
+    target_compile_options(shroud PRIVATE /utf-8)
+endif()
+
+# UI preview builds (developers only). To look at UI changes without
+# signing in to a real account on a production relay, run a throwaway
+# relay locally (server/server.py with SHROUD_DB_PATH / SHROUD_DATA_DIR
+# pointing at a scratch directory, plus --ssl-keyfile/--ssl-certfile)
+# and configure a separate build tree with:
+#   -DSHROUD_UI_PREVIEW=ON -DSHROUD_PREVIEW_PORT=58555
+# The preview binary talks to 127.0.0.1, leaves the window capturable
+# so screenshots work, and never submits crash reports. Setting
+# SHROUD_PREVIEW_DEMO=1 when running it adds local sample conversations.
+#
+# It is NOT isolated from your real install: the device config and
+# keypair live in HKCU\SOFTWARE\SHROUD (back it up with `reg export`
+# first and restore afterwards), and the pin / ratchet folders come from
+# QStandardPaths, which ignores an overridden APPDATA. Running it under a
+# separate Windows user account is the clean option.
+option(SHROUD_UI_PREVIEW "Developer UI preview build against a local relay" OFF)
+if(SHROUD_UI_PREVIEW)
+    if(NOT SHROUD_PREVIEW_PORT)
+        set(SHROUD_PREVIEW_PORT 58443)
+    endif()
+    target_compile_definitions(shroud PRIVATE
+        SHROUD_UI_PREVIEW
+        "SERVER_HOST=L\"127.0.0.1\""
+        SERVER_PORT=${SHROUD_PREVIEW_PORT})
+endif()
