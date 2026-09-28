@@ -4,48 +4,59 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>SHROUD Admin</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2300a8cc' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z'/%3E%3C/svg%3E">
+  <script>
+    /* Apply the saved theme before first paint so there is no flash. */
+    try { var t = localStorage.getItem('shroud.admin.theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
   <link rel="stylesheet" href="/admin/static/admin.css">
 </head>
 <body>
 
 <!-- ─── Top bar ───────────────────────────────────────────────────── -->
 <div class="top">
-  <h1 onclick="goTab('overview')">SHROUD</h1>
-  <span class="meta" id="metaUptime">uptime —</span>
-  <span class="meta" id="metaTime">—</span>
-  <span class="meta" id="metaVer">—</span>
-  <span class="ws-status" id="wsStatus" title="WebSocket live tail status"><span class="dot"></span><span id="wsLabel">connecting</span></span>
+  <h1 onclick="goTab('overview')" title="Back to overview"><span data-icon="shield"></span>SHROUD</h1>
+  <span class="meta-wrap">
+    <span class="meta" id="metaUptime" title="How long this relay process has been running">uptime —</span>
+    <span class="meta" id="metaTime">—</span>
+    <span class="meta" id="metaVer">—</span>
+    <span class="ws-status" id="wsStatus" title="Live event stream: audit entries, errors and failed logins arrive instantly while this is green"><span class="dot"></span><span id="wsLabel">connecting</span></span>
+    <span class="fresh" id="freshness" title="Time since the numbers on screen were last fetched">—</span>
+  </span>
   <span class="spacer"></span>
-  <span class="toggle" id="regToggle" onclick="toggleSetting('registration', !state.regOn)"><span class="dot"></span><span id="regLbl">Registration —</span></span>
-  <span class="toggle" id="mntToggle" onclick="toggleSetting('maintenance', !state.mntOn)"><span class="dot"></span><span id="mntLbl">Maintenance —</span></span>
-  <span class="toggle" id="onionToggle" onclick="toggleSetting('onion-only', !state.onionOn)"><span class="dot"></span><span id="onionLbl">Onion —</span></span>
-  <select class="interval" id="refreshInterval" title="Auto-refresh cadence">
+  <button class="btn search-btn" onclick="openPalette()" title="Search users, devices, tabs and actions (Ctrl+K)"><span style="display:inline-flex;gap:6px;align-items:center"><span data-icon="search"></span><span class="lbl">Search or jump to</span></span><span class="kbd">Ctrl K</span></button>
+  <span class="toggle" id="regToggle" role="switch" tabindex="0" onclick="confirmToggle('registration')" title="Whether new accounts can be created on this relay"><span class="dot"></span><span id="regLbl">Registration —</span></span>
+  <span class="toggle" id="mntToggle" role="switch" tabindex="0" onclick="confirmToggle('maintenance')" title="Maintenance mode refuses new messages while you work on the relay"><span class="dot"></span><span id="mntLbl">Maintenance —</span></span>
+  <span class="toggle" id="onionToggle" role="switch" tabindex="0" onclick="confirmToggle('onion-only')" title="Onion-only refuses every client request that does not arrive over Tor"><span class="dot"></span><span id="onionLbl">Onion —</span></span>
+  <select class="interval" id="refreshInterval" title="How often the dashboard refreshes. Pauses while this browser tab is hidden.">
     <option value="2000">2s</option>
     <option value="5000">5s</option>
     <option value="8000" selected>8s</option>
     <option value="30000">30s</option>
     <option value="0">off</option>
   </select>
-  <button class="btn" onclick="refresh()" title="Refresh now (r)">Refresh</button>
-  <button class="btn" onclick="showCheatsheet()" title="Keyboard shortcuts (?)">?</button>
-  <button class="btn danger" onclick="logout()">Logout</button>
+  <button class="btn" onclick="refresh(true)" title="Refresh now (r)"><span data-icon="refresh"></span><span class="lbl-r">Refresh</span></button>
+  <button class="btn theme-btn" id="themeBtn" onclick="cycleTheme()" title="Theme: follow system"><span data-icon="monitor"></span></button>
+  <button class="btn theme-btn" onclick="showCheatsheet()" title="Keyboard shortcuts (?)"><span data-icon="keyboard"></span></button>
+  <button class="btn danger" onclick="logout()" title="Sign out of the admin panel"><span data-icon="logout"></span><span class="lbl-r">Sign out</span></button>
 </div>
 
 <!-- ─── Tab bar ───────────────────────────────────────────────────── -->
 <div class="tabs">
-  <div class="tab active" data-tab="overview" onclick="goTab('overview')">Overview</div>
-  <div class="tab" data-tab="users"    onclick="goTab('users')">Users <span class="badge" id="userBadge">—</span></div>
-  <div class="tab" data-tab="devices"  onclick="goTab('devices')">Devices <span class="badge" id="deviceBadge">—</span></div>
-  <div class="tab" data-tab="crypto"   onclick="goTab('crypto')">Crypto</div>
-  <div class="tab" data-tab="files"    onclick="goTab('files')">Files <span class="badge" id="fileBadge">—</span></div>
-  <div class="tab" data-tab="audit"    onclick="goTab('audit')">Audit <span class="badge" id="auditBadge">—</span></div>
-  <div class="tab" data-tab="activity" onclick="goTab('activity')">Activity</div>
-  <div class="tab" data-tab="federation" onclick="goTab('federation')">Federation <span class="badge" id="fedBadge">—</span></div>
-  <div class="tab" data-tab="bans"       onclick="goTab('bans')">Bans <span class="badge" id="banCountPill">—</span></div>
+  <div class="tab active" data-tab="overview" data-icon-tab="grid" tabindex="0" onclick="goTab('overview')">Overview</div>
+  <div class="tab" data-tab="users" data-icon-tab="users" tabindex="0"    onclick="goTab('users')">Users <span class="badge" id="userBadge">—</span></div>
+  <div class="tab" data-tab="devices" data-icon-tab="devices" tabindex="0"  onclick="goTab('devices')">Devices <span class="badge" id="deviceBadge">—</span></div>
+  <div class="tab" data-tab="crypto" data-icon-tab="key" tabindex="0"   onclick="goTab('crypto')">Crypto</div>
+  <div class="tab" data-tab="files" data-icon-tab="file" tabindex="0"    onclick="goTab('files')">Files <span class="badge" id="fileBadge">—</span></div>
+  <div class="tab" data-tab="audit" data-icon-tab="list" tabindex="0"    onclick="goTab('audit')">Audit <span class="badge" id="auditBadge">—</span></div>
+  <div class="tab" data-tab="activity" data-icon-tab="activity" tabindex="0" onclick="goTab('activity')">Activity</div>
+  <div class="tab" data-tab="federation" data-icon-tab="globe" tabindex="0" onclick="goTab('federation')">Federation <span class="badge" id="fedBadge">—</span></div>
+  <div class="tab" data-tab="bans" data-icon-tab="ban" tabindex="0"       onclick="goTab('bans')">Bans <span class="badge" id="banCountPill">—</span></div>
 </div>
 
 <!-- ─── Overview ──────────────────────────────────────────────────── -->
 <div class="section active" data-section="overview">
+  <div class="health" id="health"><div class="hi"><span data-icon="check"></span></div><div><h2>Checking relay health…</h2></div></div>
   <div class="kpi-row" id="kpis"></div>
   <div id="groups"></div>
 
@@ -105,7 +116,7 @@
     <div class="panel-hdr">Users <span class="pill" id="userCountPill">—</span>
       <div class="actions">
         <input type="text" class="search" data-target="userTable" placeholder="Filter username / id…">
-        <span style="color:var(--dim);font-size:10px;margin-left:8px">click row to drill down · X to nuke + all data</span>
+        <span class="hint muted" style="font-size:10.5px;margin-left:8px">Click a row for details · right-click for more</span>
       </div>
     </div>
     <div class="body tall"><table>
@@ -159,7 +170,7 @@
     <div class="panel-hdr">Devices <span class="pill" id="deviceCountPill">—</span>
       <div class="actions">
         <input type="text" class="search" data-target="devTable" placeholder="Filter device-id / platform / name…">
-        <span style="color:var(--dim);font-size:10px;margin-left:8px">click row to drill down · X to delete</span>
+        <span class="hint muted" style="font-size:10.5px;margin-left:8px">Click a row for details</span>
       </div>
     </div>
     <div class="body tall"><table>
@@ -357,7 +368,7 @@
     <div style="padding:8px 14px;color:var(--dim);font-size:11px">
       Each relay's <code>/api/v1/relay-stats</code> is polled in parallel — a peer that 503s or times out shows up as unreachable rather than blanking the panel. No PII is fetched; counters only.
     </div>
-    <div class="grid" id="fedGrid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;padding:10px 14px"></div>
+    <div class="grid" id="fedGrid" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;padding:10px 14px"></div>
   </div>
 
   <div class="panel">
@@ -388,27 +399,29 @@
 <!-- ─── Bans ──────────────────────────────────────────────────────── -->
 <div class="section" data-section="bans">
   <div class="panel">
-    <div class="panel-hdr">Add ban
-      <div style="font-size:11px;color:var(--dim);font-weight:normal">Banning a username cascades to every linked HWID. Reason is shown to the user on next login attempt.</div>
-    </div>
-    <div style="padding:10px 14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <select id="banKindInput" style="padding:6px">
-        <option value="username">username</option>
-        <option value="hwid">hwid</option>
-        <option value="ip">ip</option>
+    <div class="panel-hdr">Add a ban</div>
+    <form class="form-row" onsubmit="event.preventDefault(); addBanCustom()">
+      <select id="banKindInput" class="field" aria-label="What to ban" onchange="banKindChanged()">
+        <option value="username">Username</option>
+        <option value="hwid">Hardware ID</option>
+        <option value="ip">IP address</option>
       </select>
-      <input id="banValueInput"  placeholder="username | hwid hex | IP"   style="flex:1;min-width:180px;padding:6px">
-      <input id="banReasonInput" placeholder="Reason shown to banned user (optional)" style="flex:2;min-width:240px;padding:6px">
-      <button onclick="addBanCustom()" style="background:#b00020;color:white">Add</button>
-    </div>
+      <input id="banValueInput" class="field" placeholder="Username to ban" style="flex:1;min-width:180px" aria-label="Value" autocomplete="off" spellcheck="false">
+      <input id="banReasonInput" class="field" placeholder="Reason shown to them (optional)" style="flex:2;min-width:220px" aria-label="Reason">
+      <button type="submit" class="b danger-o"><span data-icon="ban"></span>Add ban</button>
+    </form>
+    <div class="form-help" id="banHelp">Banning a username also bans every hardware ID that account has signed in from, so a new account on the same machine is refused too. The reason is shown to them the next time they try to sign in.</div>
   </div>
   <div class="panel">
     <div class="panel-hdr">Active bans <span class="pill" id="banCountPill2">—</span>
-      <div class="actions"><button onclick="loadBans()">Refresh</button></div>
+      <div class="actions">
+        <input type="text" class="search" data-target="banTable" placeholder="Filter bans…">
+        <button onclick="loadBans()">Refresh</button>
+      </div>
     </div>
     <div class="body"><table>
       <thead><tr>
-        <th>id</th><th>kind</th><th>value</th><th>reason</th><th>by</th><th>at</th><th>origin / actions</th>
+        <th>Type</th><th>Value</th><th>Reason</th><th>Banned by</th><th>When</th><th>From account</th><th></th>
       </tr></thead>
       <tbody id="banTable"></tbody>
     </table></div>
@@ -433,7 +446,9 @@
     <h2>Keyboard shortcuts</h2>
     <div class="body">
       <div class="cheatsheet-grid">
-        <span class="kbd">/</span>             <span>Focus the search box on the current tab</span>
+        <span class="kbd">Ctrl K</span>        <span>Search users, devices, tabs and actions</span>
+        <span class="kbd">/</span>             <span>Focus the filter box on the current tab</span>
+        <span class="kbd">t</span>             <span>Switch theme (system, light, dark)</span>
         <span class="kbd">r</span>             <span>Refresh now</span>
         <span class="kbd">?</span>             <span>Show this cheatsheet</span>
         <span class="kbd">Esc</span>           <span>Close modal / clear focused search</span>
@@ -445,6 +460,8 @@
         <span class="kbd">g</span> <span class="kbd">f</span> <span>Files</span>
         <span class="kbd">g</span> <span class="kbd">a</span> <span>Audit</span>
         <span class="kbd">g</span> <span class="kbd">y</span> <span>Activity</span>
+        <span class="kbd">g</span> <span class="kbd">n</span> <span>Federation</span>
+        <span class="kbd">g</span> <span class="kbd">b</span> <span>Bans</span>
       </div>
     </div>
     <div class="actions">
@@ -453,7 +470,14 @@
   </div>
 </div>
 
-<div class="toast-stack" id="toastStack"></div>
+<div class="toast-stack" id="toastStack" aria-live="polite"></div>
+
+<div class="palette-bg" id="paletteBg" onclick="if(event.target===this) closePalette()">
+  <div class="palette" role="dialog" aria-label="Search">
+    <div class="pin"><span data-icon="search"></span><input id="paletteInput" placeholder="Search users, devices, tabs, actions…" autocomplete="off" spellcheck="false"><span class="kbd">Esc</span></div>
+    <div class="res" id="paletteRes"></div>
+  </div>
+</div>
 
 <script src="/admin/static/admin.js"></script>
 </body>

@@ -113,3 +113,30 @@ function closeModal(result) {
   if (bg) bg.classList.remove('show');
   if (_modalResolver) { _modalResolver(result === true); _modalResolver = null; }
 }
+
+/* ─── Row navigation and actions without inline JavaScript ──────────
+ * Rows used to carry onclick="location='/admin/device/<esc(id)>'" and
+ * onclick="deleteDevice('<esc(name)>')". The HTML parser decodes esc()'s
+ * &#39; back into a quote before the handler runs, so a device name
+ * chosen by a user could break out and run script in the admin's
+ * browser. Navigation now reads data-href (URL-encoded) and actions
+ * read JSON arguments from data-args; neither is ever executed. */
+const DRILL_ACTIONS = ['deleteDevice'];
+document.addEventListener('click', e => {
+  const btn = e.target.closest('[data-act]');
+  if (btn && DRILL_ACTIONS.includes(btn.dataset.act) && typeof window[btn.dataset.act] === 'function') {
+    e.stopPropagation();
+    let args = [];
+    try { args = JSON.parse(btn.dataset.args || '[]'); } catch (_) { return; }
+    window[btn.dataset.act](...args);
+    return;
+  }
+  const row = e.target.closest('[data-href]');
+  if (row && row.dataset.href.startsWith('/admin/')) location = row.dataset.href;
+});
+
+/* Follow the theme the operator picked on the dashboard. */
+try {
+  const t = localStorage.getItem('shroud.admin.theme');
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+} catch (e) {}

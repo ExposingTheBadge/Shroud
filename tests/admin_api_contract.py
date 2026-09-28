@@ -36,7 +36,31 @@ BINDINGS = [
     ("renderTopBar",     "/api/v1/admin/stats/overview"),
     ("renderToggles",    "/api/v1/admin/stats/overview"),
     ("renderFederation", "/api/v1/admin/federation"),
+    ("renderHealth",     "/api/v1/admin/stats/overview"),
+    ("renderBans",       "/api/v1/admin/bans"),
 ]
+
+ADMIN_DIR = os.path.join(REPO, "server", "admin")
+
+# An inline handler whose argument is spliced in by string concatenation,
+# e.g.  '<tr onclick="openUser(\'' + esc(u.user_id) + '\')">'.  esc() does
+# not protect this: the HTML parser decodes &#39; back into a quote before
+# the handler runs, so an unrestricted value such as a username breaks out
+# of the string and runs script with the admin's session. Rows must use
+# data-act / data-args (admin.js) or data-href (shared.js) instead.
+INLINE_HANDLER_FROM_DATA = re.compile(r"""\bon[a-z]+=\\?["'].*(\+|\$\{)""")
+
+
+def inline_handlers_built_from_data() -> list[str]:
+    bad = []
+    for name in sorted(os.listdir(ADMIN_DIR)):
+        if not name.endswith(".js"):
+            continue
+        with open(os.path.join(ADMIN_DIR, name), encoding="utf-8") as f:
+            for n, line in enumerate(f, 1):
+                if INLINE_HANDLER_FROM_DATA.search(line):
+                    bad.append(f"{name}:{n}: {line.strip()[:100]}")
+    return bad
 
 # Reads that are guarded or come from nested/derived objects rather than
 # the top-level payload. Listing them explicitly keeps the test honest
@@ -109,6 +133,14 @@ def main() -> int:
         print(f"{failed} renderer(s) read fields the API does not return.")
         return 1
     print("Every field the admin UI reads is returned by the API.")
+
+    bad = inline_handlers_built_from_data()
+    if bad:
+        print("\nInline event handlers built from data (script injection):")
+        for b in bad:
+            print("  " + b)
+        return 1
+    print("No inline event handlers are built from data.")
     return 0
 
 
