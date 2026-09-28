@@ -883,119 +883,6 @@ function renderFederation(d) {
   $('fedReqTotal').textContent = reqTotal.toLocaleString();
   $('fedAnonPending').textContent = anonPending.toLocaleString();
   $('fedDiagPending').textContent = diagPending.toLocaleString();
-  renderAws(d.aws);
-}
-
-function renderAws(aws) {
-  const body = document.getElementById('awsBody');
-  const pill = document.getElementById('awsSummaryPill');
-  const hint = document.getElementById('awsHint');
-  if (!body || !pill || !hint) return;
-
-  if (!aws || !aws.available) {
-    pill.textContent = 'unavailable';
-    pill.style.background = '#3a1010';
-    pill.style.color = '#ff8a8a';
-    hint.innerHTML = `<span style="color:#ff8a8a">${escapeHtml((aws && aws.error) || 'AWS inventory unavailable')}</span>`;
-    body.innerHTML = '';
-    return;
-  }
-
-  pill.style.background = '';
-  pill.style.color = '';
-  const s = aws.summary || {};
-  pill.textContent = `${s.running}/${s.total} running`;
-  hint.textContent = `${s.running} running · ${s.stopped} stopped · ${s.other || 0} other across ${s.regions_with_assets} region(s).`;
-
-  const regions = Object.keys(aws.regions || {}).sort();
-  if (regions.length === 0) {
-    body.innerHTML = `<div style="padding:14px;color:var(--dim);font-size:12px">No EC2 instances found in any region.</div>`;
-    return;
-  }
-
-  let html = '';
-  for (const rg of regions) {
-    const rgData = aws.regions[rg] || {};
-    const items = rgData.instances || [];
-    const err = rgData.error;
-    html += `<div style="margin:14px 0 6px 0;display:flex;align-items:center;gap:8px">
-      <div style="color:var(--accent);font-size:11px;letter-spacing:0.08em;text-transform:uppercase;font-weight:700">${escapeHtml(rg)}</div>
-      <div style="color:var(--dim);font-size:11px">${items.length} instance${items.length === 1 ? '' : 's'}</div>
-      ${err ? `<div style="color:#ff8a8a;font-size:11px">${escapeHtml(err)}</div>` : ''}
-    </div>`;
-    if (items.length === 0) continue;
-    html += `<table class="aws-tbl">
-      <thead><tr>
-        <th>Name</th>
-        <th>Instance ID</th>
-        <th>State</th>
-        <th>Type</th>
-        <th>Public IP</th>
-        <th>AZ</th>
-        <th class="act">Actions</th>
-      </tr></thead><tbody>`;
-    for (const i of items) {
-      const st = i.state;
-      const stCls = st === 'running' ? 'run'
-                  : st === 'stopped' ? 'stop'
-                  : (st === 'pending' || st === 'stopping' || st === 'shutting-down' || st === 'rebooting') ? 'pend'
-                  : 'bad';
-      // is_self marks the instance this relay is running on. The server
-      // refuses stop/reboot on it (Rule 0); disable rather than let the
-      // button imply otherwise.
-      const self = !!i.is_self;
-      const a = (a_, label, cls, enabled) => enabled
-        ? `<button class="aws-btn ${cls}" ${act('awsAction', a_, i.id, rg, i.name || '')}>${label}</button>`
-        : `<button class="aws-btn ${cls}" disabled title="${self ? 'This is the relay serving the admin panel' : 'Not available in state: ' + escapeHtml(st)}">${label}</button>`;
-      html += `<tr${self ? ' class="self"' : ''}>
-        <td>${escapeHtml(i.name || '—')}${self ? '<span class="selftag">this relay</span>' : ''}</td>
-        <td class="dim">${escapeHtml(i.id)}</td>
-        <td><span class="st ${stCls}">${escapeHtml(st)}</span></td>
-        <td>${escapeHtml(i.type)}</td>
-        <td>${i.pub_ip ? escapeHtml(i.pub_ip) : '<span class="dim">—</span>'}</td>
-        <td class="dim">${escapeHtml(i.az)}</td>
-        <td class="act">
-          ${a('start', 'Start', 'go', st === 'stopped')}
-          ${a('stop', 'Stop', 'no', st === 'running' && !self)}
-          ${a('reboot', 'Reboot', 'wr', st === 'running' && !self)}
-        </td>
-      </tr>`;
-    }
-    html += `</tbody></table>`;
-  }
-  body.innerHTML = html;
-}
-
-/* Start / stop / reboot an EC2 instance. Confirmed through the same
- * modal every other destructive control uses. The relay re-checks
- * everything server-side — including refusing to stop itself — so a
- * stale render can't be used to take the fleet down. */
-async function awsAction(action, instanceId, region, name) {
-  const verb = action === 'start' ? 'Start' : action === 'stop' ? 'Stop' : 'Reboot';
-  const who = name ? `${name} (${instanceId})` : instanceId;
-  const ok = await showModal({
-    title: `${verb} EC2 instance?`,
-    body: `<div style="font-family:Consolas,monospace;font-size:12px">${escapeHtml(who)}<br>` +
-          `<span style="color:var(--dim)">region ${escapeHtml(region)}</span></div>`,
-    impact: action === 'start'
-      ? 'The instance will boot and start billing.'
-      : `The instance will ${action}. If it hosts a relay, that relay leaves the federation until it returns.`,
-    impactClass: action === 'start' ? 'warn' : 'danger',
-    confirmText: verb,
-    confirmClass: action === 'start' ? 'primary' : 'danger',
-  });
-  if (!ok) return;
-  try {
-    const r = await api('POST', '/api/v1/admin/aws/instance/action',
-                        { action, instance_id: instanceId, region });
-    const j = await r.json();
-    toast(`${verb} ${instanceId}: ${j.prev_state || '?'} → ${j.curr_state || '?'}`, 'ok');
-  } catch (e) {
-    toast(`${verb} failed: ${e.message}`, 'err');
-    return;
-  }
-  // EC2 state changes lag the API call; give it a beat before re-reading.
-  setTimeout(loadFederation, 2500);
 }
 
 function fmtUptime(secs) {
@@ -1782,7 +1669,7 @@ window.addEventListener('keydown', e => {
 
   Object.assign(ACTIONS, {
     openUser, openDevice, banUserPrompt, delUser, delDev, killSess,
-    liftBan, liftUserCascade, awsAction, goTab, confirmToggle, ctrlConfirm,
+    liftBan, liftUserCascade, goTab, confirmToggle, ctrlConfirm,
     userMenu: userContextMenu,
   });
   hydrateIcons();

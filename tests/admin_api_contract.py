@@ -65,9 +65,7 @@ def inline_handlers_built_from_data() -> list[str]:
 # Reads that are guarded or come from nested/derived objects rather than
 # the top-level payload. Listing them explicitly keeps the test honest
 # instead of loosening the matcher until everything passes.
-EXEMPT = {
-    "renderFederation": {"aws"},          # optional; absent without boto3
-}
+EXEMPT: dict[str, set[str]] = {}
 
 
 def _fields_read(js: str, fn: str) -> set[str]:
