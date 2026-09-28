@@ -1,34 +1,10 @@
-# Live federation deployment
+# Running a federation
 
-This document describes the running 4-region production federation, the
-operational procedures for managing it, and the gotchas worth remembering.
-
-It's the operator runbook. The protocol spec lives in
-[`anon-routing-protocol.md`](anon-routing-protocol.md).
-
----
-
-## Roster (production)
-
-| Region | Public IP | Operator | Endpoint |
-|---|---|---|---|
-| us-east-1 (Virginia) | `100.30.51.8` | Brent Gordon | `https://100.30.51.8:58443` |
-| us-east-2 (Ohio) | `18.222.72.227` | Brent Gordon | `https://18.222.72.227:58443` |
-| us-west-2 (Oregon) | `52.38.93.230` | Brent Gordon | `https://52.38.93.230:58443` |
-| eu-west-1 (Ireland) | `52.50.29.221` | Brent Gordon | `https://52.50.29.221:58443` |
-
-All four:
-
-- Run identical SHROUD master from `/opt/shroud/src`
-- t3.micro (1 vCPU, 1 GiB RAM) — free tier eligible for first 12 months
-- Self-signed TLS at port 58443
-- `SHROUD_FEDERATION=1` enabled via systemd drop-in
-- Have **all other relays' operator pubkeys** in their local `federation_peers`
-  table (operator-vetted; not auto-trusted)
-
-Operator Ed25519 pubkeys and instance metadata are checked into `SESSION_NOTES.md`
-(operator-only; they're public information by design — vetting is the operator's
-private decision, not the pubkey's secrecy).
+SHROUD's public relay is a single machine (`173.245.244.180:58443`), and
+federation is off by default (`SHROUD_FEDERATION` unset). Everything below
+applies only if you choose to link several independently-operated relays.
+The four-region AWS federation this document used to describe has been
+retired.
 
 ## Gossip behavior
 
@@ -47,26 +23,10 @@ When a relay delivers a message (drops it from `anon_messages` on
 peers so they too clear the row. This preserves Rule 2 (delete on delivery)
 across the entire federation, not just the home relay.
 
-**Measured propagation:** ~3 seconds round-trip, all 4 regions, verified by
-`tests/federation_live.py`. Geographic latency dominates; the gossip loop
-itself runs every second.
+**Propagation:** a few seconds between relays; the gossip loop runs every
+second and `tests/federation_e2e.py` checks it with two local relays.
 
 ## Verifying federation health
-
-### From any operator workstation
-
-```pwsh
-python -m tests.federation_live
-```
-
-This:
-
-1. Health-checks all 4 relays
-2. Posts a sealed envelope to us-east-1
-3. Polls the same routing tag at the other 3 relays for up to 30s
-4. PASSes iff all three peers serve back the envelope and successfully unseal
-
-Expected: `PASS  gossip reached all 3 peers` with each peer under ~5s.
 
 ### Per-relay diagnostics
 
@@ -74,7 +34,7 @@ Expected: `PASS  gossip reached all 3 peers` with each peer under ~5s.
 # Show this relay's view of the federation roster
 curl -k https://<relay-ip>:58443/api/v1/federation/peers
 
-# Should return ~3 entries, all with active=true and recent ts
+# One entry per peer, each with a recent ts
 ```
 
 ## Operator-vetted peer onboarding
@@ -141,34 +101,12 @@ operator must rotate:
    `federation_peers` table (UPDATE, not INSERT — keep the row's other
    metadata)
 4. After all peers have updated, securely delete the old private key
-5. Run `python -m tests.federation_live` to confirm gossip still flows
+5. Check `/api/v1/federation/peers` on each relay to confirm the new key is listed
 
 There is no automated rotation — by design, rotation is a coordinated
 operator action.
 
 ## Gotchas worth remembering
-
-### us-east-2 default subnet missing IGW route
-
-When spinning up a new t3.micro in us-east-2 (Ohio) using the default VPC,
-the subnet's custom route table may be missing the `0.0.0.0/0 → IGW` route.
-Symptom: instance accepts SSH key on creation but every connection times
-out; cloud-init hangs.
-
-**Fix:**
-```pwsh
-aws ec2 create-route --region us-east-2 `
-    --route-table-id rtb-0369c2dbabadba03b `
-    --destination-cidr-block 0.0.0.0/0 `
-    --gateway-id igw-09a8298a9fbc7e535
-```
-
-Adjust `--route-table-id` and `--gateway-id` for the actual VPC. List
-them with:
-```pwsh
-aws ec2 describe-route-tables --region us-east-2 --filters Name=vpc-id,Values=<vpc-id>
-aws ec2 describe-internet-gateways --region us-east-2 --filters Name=attachment.vpc-id,Values=<vpc-id>
-```
 
 ### Multi-instance testing collides on shroud.db
 
@@ -195,29 +133,10 @@ sudo chown ec2-user:ec2-user /opt/shroud/data/operator_ed25519.json
 sudo chmod 600 /opt/shroud/data/operator_ed25519.json
 ```
 
-## Tearing down a relay
-
-```pwsh
-# Identify the instance, then:
-aws ec2 terminate-instances --region <region> --instance-ids <i-...>
-```
-
-Other relays will continue to gossip among themselves. Their
-`federation_peers` rows for the terminated relay will eventually be
-purged when the TTL expires (default 24h) — or operators can remove
-the row manually:
-
-```bash
-sudo sqlite3 /opt/shroud/data/shroud.db \
-    "DELETE FROM federation_peers WHERE pubkey_hex='<terminated-relay-pub>';"
-sudo systemctl restart shroud-relay.service
-```
-
 ## See also
 
 - [`anon-routing-protocol.md`](anon-routing-protocol.md) — wire format
 - [`security-faq.md`](security-faq.md) — threat model
 - [`aws-nitro.md`](aws-nitro.md) — Nitro enclave deployment (alternative)
 - [`SESSION_NOTES.md`](../SESSION_NOTES.md) — current operator-only state
-- [`tests/federation_live.py`](../tests/federation_live.py) — health smoke test
 - [`tools/federation_join.py`](../tools/federation_join.py) — peer onboarding helper

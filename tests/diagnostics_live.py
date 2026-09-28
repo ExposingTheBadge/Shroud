@@ -9,7 +9,7 @@ Procedure
 2. Build a synthetic DiagnosticReport with PII embedded in every field
    we care about scrubbing.
 3. Seal it to the operator pubkey, pad to 4096 bytes, POST to
-   ``/api/v1/diagnostics/report`` at us-east-1.
+   ``/api/v1/diagnostics/report`` on the relay.
 4. Poll ``/api/v1/diagnostics/fetch`` with the routing-tag window and
    confirm the operator can decrypt + recover the report.
 5. Verify PII fields were scrubbed (UUID -> ``<UUID>``, email ->
@@ -22,7 +22,7 @@ Usage::
 
     python -m tests.diagnostics_live
     python -m tests.diagnostics_live --keyfile path/to/diag.keypair.json
-    python -m tests.diagnostics_live --relay-url https://18.222.72.227:58443
+    python -m tests.diagnostics_live --relay-url https://173.245.244.180:58443
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ from crypto.error_reporting import (  # noqa: E402
     seal_report,
 )
 
-DEFAULT_RELAY = "https://100.30.51.8:58443"
+DEFAULT_RELAY = "https://173.245.244.180:58443"
 DEFAULT_KEYFILE = os.path.expanduser("~/.config/shroud/diag.keypair.json")
 PAD_BUCKET = 4096
 

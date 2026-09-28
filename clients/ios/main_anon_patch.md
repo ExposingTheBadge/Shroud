@@ -158,6 +158,6 @@ xcodebuild -scheme Shroud -configuration Release
 ```
 
 Test against the live AWS relay
-`https://100.30.51.8:58443`. Verify the app's outbound traffic
+`https://173.245.244.180:58443`. Verify the app's outbound traffic
 arrives as sealed envelopes addressed to routing tags rather than
 plaintext sender_device_id headers.

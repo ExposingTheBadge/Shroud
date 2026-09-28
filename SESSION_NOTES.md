@@ -1,5 +1,10 @@
 # SHROUD session notes (handoff before context compaction)
 
+> **2026-09-28: the AWS infrastructure described below is retired.** The
+> four EC2 relays and the federation between them are gone. SHROUD now runs
+> as a single relay at `173.245.244.180:58443` on the operator's own
+> machine, with federation off. The AWS sections are kept only as history.
+
 ## Where things stand
 
 The SHROUD project (renamed from GHOSTLINK earlier this session) now
