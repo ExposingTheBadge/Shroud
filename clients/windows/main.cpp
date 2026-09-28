@@ -66,6 +66,20 @@ static Theme gTheme = THEME_PRESETS[0];
 
 static QString cN(const QColor &c) { return c.name(QColor::HexRgb); }
 
+static bool isDarkTheme(const Theme &t) {
+    return (t.bg.red() * 299 + t.bg.green() * 587 + t.bg.blue() * 114) / 1000 < 128;
+}
+
+/* Status colours (0 = ok, 1 = warn, 2 = error) tuned per background so
+ * they stay readable on both light and dark palettes. Error reuses the
+ * theme's own danger colour. */
+static QColor statusColor(const Theme &t, int level) {
+    bool dark = isDarkTheme(t);
+    if (level == 0) return dark ? QColor("#3ddc84") : QColor("#1e8e3e");
+    if (level == 1) return dark ? QColor("#ffb74d") : QColor("#b26a00");
+    return t.danger;
+}
+
 QString themeQSS(const Theme &t) {
     QString s;
     QString bg = cN(t.bg), su = cN(t.surface), in = cN(t.input), bd = cN(t.border);
@@ -73,43 +87,153 @@ QString themeQSS(const Theme &t) {
     /* On-accent text: pick black or white based on accent luminance.   */
     int lum = (t.accent.red() * 299 + t.accent.green() * 587 + t.accent.blue() * 114) / 1000;
     QString onAc = (lum > 160) ? "#1a1a1a" : "#ffffff";
-    s += QString("* { background-color: %1; color: %2; font-family: \"Segoe UI\", \"Segoe UI Emoji\", \"Noto Color Emoji\"; }").arg(bg, tx);
+    QString dg = cN(t.danger);
+    s += QString("* { background-color: %1; color: %2; font-family: \"Segoe UI\", \"Segoe UI Emoji\", \"Noto Color Emoji\"; font-size: 10pt; }").arg(bg, tx);
     s += QString("QMainWindow { background-color: %1; }").arg(bg);
-    s += QString("QMenuBar { background-color: %1; color: %2; border-bottom: 1px solid %3; }").arg(su, tx, bd);
+    s += QString("QMenuBar { background-color: %1; color: %2; border-bottom: 1px solid %3; padding: 2px; }").arg(su, tx, bd);
+    s += QString("QMenuBar::item { padding: 4px 10px; border-radius: 4px; background: transparent; }");
     s += QString("QMenuBar::item:selected { background-color: %1; color: %2; }").arg(ac, onAc);
-    s += QString("QMenu { background-color: %1; color: %2; border: 1px solid %3; }").arg(su, tx, bd);
+    s += QString("QMenu { background-color: %1; color: %2; border: 1px solid %3; padding: 4px; }").arg(su, tx, bd);
+    s += QString("QMenu::item { padding: 6px 22px; border-radius: 4px; background: transparent; }");
     s += QString("QMenu::item:selected { background-color: %1; color: %2; }").arg(ac, onAc);
-    s += QString("QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox { background-color: %1; color: %2; border: 1px solid %3; padding: 6px; border-radius: 4px; selection-background-color: %4; selection-color: %5; }").arg(in, tx, bd, ac, onAc);
+    s += QString("QMenu::separator { height: 1px; background: %1; margin: 4px 8px; }").arg(bd);
+    s += QString("QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox { background-color: %1; color: %2; border: 1px solid %3; padding: 7px 9px; border-radius: 8px; selection-background-color: %4; selection-color: %5; }").arg(in, tx, bd, ac, onAc);
+    s += QString("QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QComboBox:focus { border: 1px solid %1; }").arg(ac);
+    s += QString("QLineEdit:disabled { color: %1; }").arg(dm);
+    s += QString("QLineEdit[invalid=\"true\"] { border: 1px solid %1; }").arg(dg);
     s += QString("QSpinBox::up-button, QSpinBox::down-button { background-color: %1; border: 0; width: 16px; }").arg(su);
+    s += QString("QComboBox::drop-down { border: 0; width: 22px; }");
     s += QString("QComboBox QAbstractItemView { background-color: %1; color: %2; border: 1px solid %3; selection-background-color: %4; selection-color: %5; }").arg(su, tx, bd, ac, onAc);
-    s += QString("QPushButton { background-color: %1; color: %2; border: 1px solid %3; padding: 6px 16px; border-radius: 4px; }").arg(in, tx, bd);
+    s += QString("QPushButton { background-color: %1; color: %2; border: 1px solid %3; padding: 7px 16px; border-radius: 8px; }").arg(in, tx, bd);
     s += QString("QPushButton:hover { background-color: %1; border-color: %2; }").arg(su, ac);
     s += QString("QPushButton:pressed { background-color: %1; color: %2; }").arg(ac, onAc);
-    s += QString("QPushButton:disabled { background-color: %1; color: %2; }").arg(bg, dm);
-    s += QString("QListWidget { background-color: %1; color: %2; border: 1px solid %3; }").arg(su, tx, bd);
+    s += QString("QPushButton:disabled { background-color: %1; color: %2; border-color: %3; }").arg(bg, dm, bd);
+    /* Primary call-to-action: filled with the accent colour. */
+    s += QString("QPushButton#primary { background-color: %1; color: %2; border: 1px solid %1; font-weight: 600; }").arg(ac, onAc);
+    s += QString("QPushButton#primary:hover { background-color: %1; border-color: %1; }").arg(cN(t.accent.lighter(115)));
+    s += QString("QPushButton#primary:pressed { background-color: %1; }").arg(cN(t.accent.darker(120)));
+    s += QString("QPushButton#primary:disabled { background-color: %1; color: %2; border-color: %3; }").arg(su, dm, bd);
+    /* Text-only link button. */
+    s += QString("QPushButton#link { background: transparent; border: none; color: %1; padding: 4px; }").arg(lk);
+    s += QString("QPushButton#link:hover { text-decoration: underline; background: transparent; }");
+    /* Destructive action. */
+    s += QString("QPushButton#danger { background-color: %1; color: #ffffff; border: 1px solid %1; font-weight: 600; }").arg(dg);
+    /* Segmented toggle (Contacts / Groups) and small icon buttons. */
+    s += QString("QPushButton#segment { border-radius: 8px; padding: 6px 10px; background: transparent; border: 1px solid transparent; color: %1; }").arg(dm);
+    s += QString("QPushButton#segment:checked { background-color: %1; color: %2; border: 1px solid %3; font-weight: 600; }").arg(in, tx, bd);
+    s += QString("QPushButton#iconBtn { padding: 6px 10px; border-radius: 8px; background: transparent; border: 1px solid transparent; }");
+    s += QString("QPushButton#iconBtn:hover { background-color: %1; border-color: %2; }").arg(in, bd);
+    s += QString("QPushButton#iconBtn:checked { background-color: %1; color: %2; border-color: %1; }").arg(ac, onAc);
+    s += QString("QListWidget { background-color: %1; color: %2; border: none; outline: 0; }").arg(su, tx);
+    s += QString("QListWidget::item { padding: 6px 8px; border-radius: 8px; margin: 1px 2px; }");
+    s += QString("QListWidget::item:hover { background-color: %1; }").arg(in);
     s += QString("QListWidget::item:selected { background-color: %1; color: %2; }").arg(ac, onAc);
-    s += QString("QCheckBox, QRadioButton { color: %1; }").arg(tx);
-    s += QString("QGroupBox { color: %1; border: 1px solid %2; border-radius: 4px; margin-top: 8px; padding-top: 16px; }").arg(tx, bd);
-    s += QString("QGroupBox::title { color: %1; }").arg(dm);
+    s += QString("QCheckBox, QRadioButton { color: %1; spacing: 8px; background: transparent; }").arg(tx);
+    s += QString("QGroupBox { color: %1; border: 1px solid %2; border-radius: 10px; margin-top: 14px; padding: 14px 10px 10px 10px; }").arg(tx, bd);
+    s += QString("QGroupBox::title { color: %1; subcontrol-origin: margin; left: 12px; padding: 0 4px; font-weight: 600; }").arg(dm);
     s += QString("QLabel { color: %1; background: transparent; }").arg(tx);
-    s += QString("QTabWidget::pane { border: 1px solid %1; background-color: %2; }").arg(bd, bg);
-    s += QString("QTabBar::tab { background-color: %1; color: %2; padding: 6px 12px; border: 1px solid %3; }").arg(su, dm, bd);
-    s += QString("QTabBar::tab:selected { background-color: %1; color: %2; border-bottom-color: %1; }").arg(bg, tx);
-    s += QString("QScrollBar:vertical { background: %1; width: 10px; border: 0; }").arg(bg);
-    s += QString("QScrollBar::handle:vertical { background: %1; border-radius: 5px; min-height: 20px; }").arg(bd);
-    s += QString("QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }");
+    s += QString("QLabel#muted { color: %1; }").arg(dm);
+    s += QString("QLabel#heading { font-size: 18pt; font-weight: 700; }");
+    s += QString("QLabel#subheading { font-size: 12pt; font-weight: 600; }");
+    s += QString("QLabel#hint { color: %1; font-size: 9pt; }").arg(dm);
+    /* Status pills — state property is set by setStatusLabel(). */
+    s += QString("QLabel[state=\"ok\"]   { color: %1; font-weight: 600; }").arg(cN(statusColor(t, 0)));
+    s += QString("QLabel[state=\"warn\"] { color: %1; font-weight: 600; }").arg(cN(statusColor(t, 1)));
+    s += QString("QLabel[state=\"err\"]  { color: %1; font-weight: 600; }").arg(cN(statusColor(t, 2)));
+    s += QString("QLabel[state=\"info\"] { color: %1; }").arg(dm);
+    s += QString("QWidget#sidebar { background-color: %1; border-right: 1px solid %2; }").arg(su, bd);
+    s += QString("QWidget#sidebar QLabel, QWidget#sidebar QCheckBox { background: transparent; }");
+    s += QString("QWidget#chatHeader { background-color: %1; border-bottom: 1px solid %2; }").arg(bg, bd);
+    s += QString("QWidget#composer { background-color: %1; border-top: 1px solid %2; }").arg(bg, bd);
+    s += QString("QWidget#card { background-color: %1; border: 1px solid %2; border-radius: 14px; }").arg(su, bd);
+    s += QString("QWidget#card QLabel, QWidget#card QCheckBox { background: transparent; }");
+    s += QString("QFrame#banner { background-color: %1; border: 1px solid %2; border-radius: 8px; }").arg(in, bd);
+    s += QString("QTextBrowser#chatLog { border: none; background-color: %1; padding: 6px 10px; }").arg(bg);
+    s += QString("QProgressBar { background-color: %1; border: none; border-radius: 3px; max-height: 6px; }").arg(in);
+    s += QString("QProgressBar::chunk { border-radius: 3px; background-color: %1; }").arg(ac);
+    s += QString("QTabWidget::pane { border: 1px solid %1; background-color: %2; border-radius: 8px; top: -1px; }").arg(bd, bg);
+    s += QString("QTabBar::tab { background-color: transparent; color: %1; padding: 7px 14px; border: none; border-bottom: 2px solid transparent; }").arg(dm);
+    s += QString("QTabBar::tab:hover { color: %1; }").arg(tx);
+    s += QString("QTabBar::tab:selected { color: %1; border-bottom: 2px solid %2; }").arg(tx, ac);
+    s += QString("QScrollBar:vertical { background: transparent; width: 10px; border: 0; margin: 2px; }");
+    s += QString("QScrollBar::handle:vertical { background: %1; border-radius: 4px; min-height: 24px; }").arg(bd);
+    s += QString("QScrollBar::handle:vertical:hover { background: %1; }").arg(dm);
+    s += QString("QScrollBar:horizontal { background: transparent; height: 10px; border: 0; margin: 2px; }");
+    s += QString("QScrollBar::handle:horizontal { background: %1; border-radius: 4px; min-width: 24px; }").arg(bd);
+    s += QString("QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }");
+    s += QString("QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }");
     s += QString("QStatusBar { background-color: %1; color: %2; border-top: 1px solid %3; }").arg(su, dm, bd);
-    s += QString("QToolTip { background-color: %1; color: %2; border: 1px solid %3; padding: 4px; }").arg(su, tx, bd);
+    s += QString("QStatusBar QLabel { color: %1; padding: 0 6px; }").arg(dm);
+    s += QString("QToolTip { background-color: %1; color: %2; border: 1px solid %3; padding: 5px 8px; border-radius: 6px; }").arg(su, tx, bd);
+    s += QString("QDialog { background-color: %1; }").arg(bg);
     return s;
 }
 
-/* Legacy adapter so existing call sites keep working until they're
- * migrated to themeQSS(gTheme) directly. */
-QString themeCSS(bool dark) {
-    if (gTheme.name == "SHROUD Dark" || gTheme.name == "SHROUD Light") {
-        gTheme = dark ? THEME_PRESETS[0] : THEME_PRESETS[1];
+static const Theme *findPreset(const QString &name) {
+    for (const Theme &t : THEME_PRESETS) if (t.name == name) return &t;
+    return nullptr;
+}
+
+/* Quick light/dark flip. Presets with a named counterpart ("X Dark" <->
+ * "X Light") swap to it; everything else (Nord, Dracula, Custom...) goes
+ * to the SHROUD pair, so the toggle always does something visible
+ * instead of only working on the two default themes. */
+static void toggleLightDark() {
+    bool dark = isDarkTheme(gTheme);
+    QString name = gTheme.name;
+    QString twin = dark ? QString(name).replace("Dark", "Light")
+                        : QString(name).replace("Light", "Dark");
+    const Theme *t = (twin != name) ? findPreset(twin) : nullptr;
+    if (!t) t = findPreset(dark ? "SHROUD Light" : "SHROUD Dark");
+    if (t) gTheme = *t;
+    gDark = isDarkTheme(gTheme);
+    qApp->setStyleSheet(themeQSS(gTheme));
+}
+
+/* Set a label's text plus a state ("ok"/"warn"/"err"/"info") that the
+ * stylesheet colours, so status text follows the active theme instead of
+ * carrying hard-coded colours. */
+static void setStatusLabel(QLabel *l, const QString &text, const char *state) {
+    if (!l) return;
+    l->setText(text);
+    if (l->property("state").toString() != QLatin1String(state)) {
+        l->setProperty("state", state);
+        l->style()->unpolish(l);
+        l->style()->polish(l);
     }
-    return themeQSS(gTheme);
+}
+
+/* Mark an input as invalid (red border) or clear the mark. */
+static void setInvalid(QWidget *w, bool bad) {
+    if (!w || w->property("invalid").toBool() == bad) return;
+    w->setProperty("invalid", bad);
+    w->style()->unpolish(w);
+    w->style()->polish(w);
+}
+
+/* Round letter avatar with a colour derived from the name, so each
+ * contact is recognisable at a glance without any profile picture (and
+ * therefore without any extra data leaving the device). */
+static QIcon avatarIcon(const QString &name, int size = 32, bool group = false) {
+    QPixmap pm(size * 2, size * 2);
+    pm.setDevicePixelRatio(2.0);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    uint h = qHash(name.toLower());
+    QColor c = QColor::fromHsl((int)(h % 360), 150, 110);
+    p.setBrush(c);
+    p.setPen(Qt::NoPen);
+    if (group) p.drawRoundedRect(QRectF(0, 0, size, size), size * 0.28, size * 0.28);
+    else       p.drawEllipse(QRectF(0, 0, size, size));
+    QString letter = group ? QString("#") : name.left(1).toUpper();
+    if (letter.isEmpty()) letter = "?";
+    QFont f("Segoe UI", 1, QFont::DemiBold);
+    f.setPixelSize(int(size * 0.46));
+    p.setFont(f);
+    p.setPen(Qt::white);
+    p.drawText(QRectF(0, 0, size, size), Qt::AlignCenter, letter);
+    return QIcon(pm);
 }
 
 /* ── User preferences (theme, disappearing messages, rich text) ─── */
@@ -211,6 +335,8 @@ static void loadUserPrefs() {
         loadColor("Custom_danger", gTheme.danger);
     }
     RegCloseKey(hk);
+    /* The theme is the source of truth for light vs dark. */
+    gDark = isDarkTheme(gTheme);
 }
 
 static void saveUserPrefs() {
@@ -577,8 +703,7 @@ private:
         QAction *st = sett->addAction("&Settings..."); connect(st, &QAction::triggered, this, &ShroudWindow::openSettings);
         QAction *th = sett->addAction(gDark ? "Switch to &Light Mode" : "Switch to &Dark Mode");
         connect(th, &QAction::triggered, [this, th]() {
-            gDark = !gDark;
-            qApp->setStyleSheet(themeCSS(gDark));
+            toggleLightDark();
             th->setText(gDark ? "Switch to &Light Mode" : "Switch to &Dark Mode");
         });
 
@@ -1135,7 +1260,7 @@ private:
         });
         connect(reqBtn, &QPushButton::clicked, this, &ShroudWindow::openRequestsDialog);
         connect(themeBtn, &QPushButton::clicked, [=]() {
-            gDark = !gDark; qApp->setStyleSheet(themeCSS(gDark));
+            toggleLightDark();
             themeBtn->setText(gDark ? "Light Mode" : "Dark Mode");
         });
         connect(m_sideList, &QListWidget::itemDoubleClicked, this, &ShroudWindow::sideSelect);
