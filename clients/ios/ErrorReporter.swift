@@ -19,11 +19,12 @@ import AppKit
 public enum ErrorReporter {
 
     private static let schema = "shroud.diag.v1"
-    private static let appVersion = "2.5.0" // keep in sync with VERSION file
+    private static let appVersion =
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "unknown"
 
     /// Operator diagnostics X25519 pubkey (32 bytes). Set via install().
     private static var operatorDiagPubkey: Data?
-    private static var relayBaseURL: URL = URL(string: "https://173.245.244.180:58443")!
+    private static var relayBaseURL: URL = URL(string: Relay.shared.baseURL) ?? URL(string: Relay.defaultURL)!
     private static var previousHandler: (@convention(c) (NSException) -> Void)?
 
     /// Call once during app launch, after the user has configured the
@@ -155,7 +156,9 @@ public enum ErrorReporter {
         // handler where we want to finish before the process dies.
         let sem = DispatchSemaphore(value: 0)
         var success = false
-        let task = URLSession.shared.uploadTask(with: req, from: padded) { _, resp, _ in
+        // The pinned session: the relay's certificate is self-signed, so
+        // URLSession.shared refused every report.
+        let task = Relay.shared.session.uploadTask(with: req, from: padded) { _, resp, _ in
             if let http = resp as? HTTPURLResponse,
                (200..<300).contains(http.statusCode) {
                 success = true
