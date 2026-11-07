@@ -439,6 +439,32 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
         return pd
     }
 
+    /** Device id -> username, filled from /contacts/devices lookups. */
+    private val deviceOwners = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private suspend fun deviceBelongsTo(did: String, name: String): Boolean {
+        if (deviceOwners[did] == name) return true
+        return try {
+            val r = NetworkClient.post("/api/v1/contacts/devices", JSONObject().apply {
+                put("device_id", deviceID); put("contact_username", name)
+            })
+            val devs = r.optJSONArray("devices")
+            var found = false
+            if (devs != null) for (i in 0 until devs.length()) {
+                val id = devs.getJSONObject(i).optString("id")
+                if (id.isNotBlank()) { deviceOwners[id] = name; if (id == did) found = true }
+            }
+            found
+        } catch (_: Throwable) { false }
+    }
+
+    /** Which contact owns this device, checking each contact at most once. */
+    private suspend fun ownerOf(did: String): String? {
+        deviceOwners[did]?.let { return it }
+        for (c in contacts) if (deviceBelongsTo(did, c.username)) return c.username
+        return null
+    }
+
     /** Safety number for the open conversation. */
     fun computeSafetyNumber(onResult: (String?) -> Unit) {
         val peer = openPeer ?: run { onResult(null); return }
@@ -541,7 +567,11 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
                     }
                     if (peers.isNotEmpty()) {
                         for ((_, bytes) in NetworkClient.fetchAnonForContacts(myPriv, myPub, peers)) {
-                            val env = try { JSONObject(String(bytes, Charsets.UTF_8)) } catch (_: Throwable) { continue }
+                            val outer = try { JSONObject(String(bytes, Charsets.UTF_8)) } catch (_: Throwable) { continue }
+                            // Windows seals {"envelope": env, "ts"}; Android and iOS seal
+                            // the envelope itself. Accept both, or messages from Windows
+                            // over the anonymous path were dropped.
+                            val env = outer.optJSONObject("envelope") ?: outer
                             incoming += env.optString("sender", "") to env
                         }
                     }
@@ -592,7 +622,16 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
         }
         val obj = JSONObject(String(plain))
         val name = obj.optString("name", "").trim().lowercase()
-        val peer = name.ifBlank { sender }
+        // "name" is chosen by the sender. Only file the message under that
+        // contact when the sending device really belongs to the account;
+        // otherwise anyone could write as "alice" into Alice's chat.
+        val isFile = obj.optString("file_id", "").isNotBlank()
+        val peer = when {
+            name.isNotBlank() && !isFile && deviceBelongsTo(sender, name) -> name
+            isFile -> ownerOf(sender) ?: "device ${sender.take(8)}"
+            name.isNotBlank() -> "$name (unverified)"
+            else -> "device ${sender.take(8)}"
+        }
         val body = obj.optString("body", "")
         val ts = obj.optLong("ts", 0L).let { if (it > 0) it * 1000 else System.currentTimeMillis() }
         val isImage = obj.optBoolean("is_image", false) || obj.optString("type", "") == "image"
@@ -600,13 +639,13 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
             val fid = obj.optString("file_id", "")
             val localPath = if (fid.isNotBlank()) decryptInlineImage(sender, fid, obj.optString("name", "")) else null
             if (localPath != null) {
-                addMsg(peer, Msg(sender, "", imagePath = localPath, fileId = fid, name = name.ifBlank { null }, ts = ts))
+                addMsg(peer, Msg(sender, "", imagePath = localPath, fileId = fid, name = peer, ts = ts))
             } else {
-                addMsg(peer, Msg(sender, "An image arrived but couldn't be downloaded.", name = name.ifBlank { null }, ts = ts, system = true))
+                addMsg(peer, Msg(sender, "An image arrived but couldn't be downloaded.", name = peer, ts = ts, system = true))
             }
         } else if (body.isNotBlank()) {
             val gid = obj.optString("group_id", "")
-            addMsg(peer, Msg(sender, if (gid.isNotBlank()) "[group] $body" else body, name = name.ifBlank { null }, ts = ts))
+            addMsg(peer, Msg(sender, if (gid.isNotBlank()) "[group] $body" else body, name = peer, ts = ts))
         }
     }
 
