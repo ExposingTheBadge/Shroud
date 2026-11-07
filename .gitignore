@@ -52,6 +52,11 @@ server/identity.key
 server/audit.log
 server/anon_creds.key
 server/data.key
+# Relay TLS material and local backups. The private key must never be pushed.
+server/tls.key
+server/tls.crt
+server/tls/
+server/backups/
 
 # Android build
 clients/android/app/build/
@@ -103,3 +108,14 @@ clients/rust_sdk/target/
 
 clients/windows/tests/*.exe
 clients/windows/tests/*.obj
+
+# Local tooling caches
+node_modules/
+.ruff_cache/
+.codex/
+
+# Xcode project is generated from clients/ios/project.yml
+clients/ios/*.xcodeproj/
+clients/ios/Shroud.entitlements
+clients/ios/Info.plist
+DerivedData/

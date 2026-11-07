@@ -5,6 +5,33 @@
 > as a single relay at `173.245.244.180:58443` on the operator's own
 > machine, with federation off. The AWS sections are kept only as history.
 
+## Current status (2026-11-07)
+
+Everything below this section is history from September. What is true now:
+
+- One relay at `173.245.244.180:58443`, federation off.
+- The "outstanding user asks" further down are all closed:
+  1. MSI: done (`clients/windows/installer/`, uploaded by `tools/make-msi-release.ps1`).
+  2. Diagnostics key: real key `7191a786…fd54` is in Android, iOS and Windows.
+  3. Windows anon routing: text, images and file notices all go sealed.
+  4. iOS: now a complete client (sign-in, contacts, Double Ratchet, anon
+     routing, TLS pinning), shared with macOS. See `clients/ios/README.md`.
+  5. Federation gossip on live relays: moot while federation is off; the
+     two-relay test (`tests.federation_e2e`) covers it.
+- Anonymous payload shape differs by sender: Windows seals
+  `{"envelope": env, "ts"}`, Android and iOS seal `env` itself. Every
+  receiver accepts both. Keep it that way, or pick one and change all three.
+- A message's `name` field is sender-chosen. Clients file a message under a
+  contact only if the sending device belongs to that account
+  (`/contacts/devices`); otherwise it shows as "(unverified)".
+- Static-key fallback envelopes are not interoperable across platforms
+  (Android HMAC-SHA256(label, ecdh), Python HKDF, Windows SHA-256(ecdh)).
+  It only matters when a peer never published a ratchet bundle, which every
+  current client does on sign-in.
+- Not built or run here: the Swift, Kotlin and C++ changes. CI covers the
+  Python relay; the clients need a build on a machine with Xcode, the
+  Android SDK, and Qt6/MSVC.
+
 ## Where things stand
 
 The SHROUD project (renamed from GHOSTLINK earlier this session) now

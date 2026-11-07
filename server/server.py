@@ -2271,7 +2271,6 @@ async def register_device(req: RegisterDeviceRequest):
     """Register a new device. Returns device ID, server's public key for ECDH."""
     # Auth user
     norm = norm_user(req.username)
-    print(f"[DEVICE REG] username={norm} platform={req.platform} pw_len={len(req.password)} hwid={req.hwid[:16] if req.hwid else 'none'}")
     # v2.6.0: ban enforcement BEFORE password check so a banned user can't
     # even probe whether their old password is still valid. The ban's
     # `reason` field is surfaced to the user when the admin sets one;
@@ -2282,13 +2281,11 @@ async def register_device(req: RegisterDeviceRequest):
         (norm,)
     ).fetchone()
     if not user:
-        print(f"[DEVICE REG] FAIL: username '{norm}' not found")
         _raise_bad_credentials(norm, "no such user")
 
     # Verify password
     derived, _ = derive_key(req.password, user[2])
     if not hmac.compare_digest(derived.hex(), user[1]):
-        print(f"[DEVICE REG] FAIL: password mismatch for '{req.username}' (pw_len={len(req.password)})")
         _raise_bad_credentials(norm, "password mismatch", _auth_pw_shape(req.password))
 
     # Check platform
@@ -2327,8 +2324,7 @@ async def register_device(req: RegisterDeviceRequest):
             pub_key_bytes = bytes.fromhex(req.public_key)
             deserialize_public_key(pub_key_bytes)
         except Exception as e:                               # noqa: BLE001
-            print(f"[DEVICE REG] FAIL: key format error on re-register "
-                  f"for '{req.username}': {e}")
+            print(f"[DEVICE REG] FAIL: key format error on re-register: {type(e).__name__}")
             raise HTTPException(400, "Invalid public key format")
 
         db.execute(
@@ -2342,7 +2338,7 @@ async def register_device(req: RegisterDeviceRequest):
             pub_key_bytes = bytes.fromhex(req.public_key)
             deserialize_public_key(pub_key_bytes)
         except Exception as e:
-            print(f"[DEVICE REG] FAIL: key format error for '{req.username}': {e}")
+            print(f"[DEVICE REG] FAIL: key format error: {type(e).__name__}")
             raise HTTPException(400, "Invalid public key format")
 
         db.execute(
@@ -2358,7 +2354,6 @@ async def register_device(req: RegisterDeviceRequest):
             "hwid":           req.hwid or "",
         })
     db.commit()
-    print(f"[DEVICE REG] SUCCESS: {req.username} device={device_id} platform={req.platform}")
 
     # Generate server-side ephemeral keypair for this device's ECDH
     _server_priv, server_pub = generate_keypair()
@@ -4222,11 +4217,14 @@ async def delete_file(file_id: str, device_id: str = Header(default="", alias="X
     db.commit()
     return {"deleted": True, "file_id": file_id}
 
-@app.get("/api/v1/devices/{device_id}/pubkey")
+@app.api_route("/api/v1/devices/{device_id}/pubkey", methods=["GET", "POST"])
 async def device_pubkey(device_id: str):
     """Return a device's public key blob (hex). Public information used by
     the recipient to derive the symmetric key matching the sender's, so
-    image/file payloads can be decrypted cross-device."""
+    image/file payloads can be decrypted cross-device.
+
+    POST is accepted too: the Android app has always POSTed here, got 405,
+    and so could never open a static-key message or an image."""
     row = db.execute("SELECT public_key FROM devices WHERE id=?", (device_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Device not found")

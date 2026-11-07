@@ -1,5 +1,9 @@
 # SHROUD macOS client
 
+> **Superseded.** The full client now builds for macOS from the shared
+> SwiftUI codebase in [`../ios`](../ios/README.md) (choose *My Mac* as the
+> destination). This AppKit sketch is kept for reference only.
+
 The macOS desktop client. Shares the Swift `AnonRouting` port with
 the iOS client (CryptoKit is identical on both platforms), wraps it
 in an AppKit-based UI.

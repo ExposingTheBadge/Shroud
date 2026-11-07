@@ -91,7 +91,7 @@ public struct NetworkClientAnon {
             req.setValue(String(secs), forHTTPHeaderField: "X-Expires-In")
         }
 
-        let (_, resp) = try await URLSession.shared.upload(for: req, from: padded)
+        let (_, resp) = try await Relay.shared.session.upload(for: req, from: padded)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
         guard code == 200 else { throw NetworkClientAnonError.badResponse(code) }
     }
@@ -119,7 +119,7 @@ public struct NetworkClientAnon {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body = try JSONSerialization.data(withJSONObject: ["tags": tagsHex])
 
-        let (data, resp) = try await URLSession.shared.upload(for: req, from: body)
+        let (data, resp) = try await Relay.shared.session.upload(for: req, from: body)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
         guard code == 200 else { throw NetworkClientAnonError.badResponse(code) }
 
