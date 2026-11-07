@@ -627,7 +627,9 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
         // otherwise anyone could write as "alice" into Alice's chat.
         val isFile = obj.optString("file_id", "").isNotBlank()
         val peer = when {
-            name.isNotBlank() && !isFile && deviceBelongsTo(sender, name) -> name
+            // Only contacts are looked up, so a stranger's message can't make
+            // us ask the relay about an arbitrary account right after a fetch.
+            !isFile && contacts.any { it.username == name } && deviceBelongsTo(sender, name) -> name
             isFile -> ownerOf(sender) ?: "device ${sender.take(8)}"
             name.isNotBlank() -> "$name (unverified)"
             else -> "device ${sender.take(8)}"

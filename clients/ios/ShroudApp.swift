@@ -471,7 +471,9 @@ final class ShroudClient: ObservableObject {
         let isFile = !(obj["file_id"] as? String ?? "").isEmpty
         if isFile {
             peer = await owner(of: sender) ?? "device \(sender.prefix(8))"
-        } else if !name.isEmpty, await device(sender, belongsTo: name) {
+        } else if contacts.contains(name), await device(sender, belongsTo: name) {
+            // Only contacts are looked up, so a stranger's message can't make
+            // us ask the relay about an arbitrary account right after a fetch.
             peer = name
         } else {
             peer = name.isEmpty ? "device \(sender.prefix(8))" : "\(name) (unverified)"
