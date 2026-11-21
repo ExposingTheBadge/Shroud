@@ -1138,8 +1138,11 @@ class AuthRequest(BaseModel):
 # ── FIPS Self-Test ───────────────────────────────────────────────────
 # (now in lifespan handler above)
 
+_LANDING_PATH = os.path.join(ADMIN_DIR, "landing.html")
+
+
 @app.get("/")
-async def root():
+async def root(request: Request):
     """Pointer page for anything that reaches the relay root.
 
     A bare {"detail":"Not Found"} is what an operator saw when they put
@@ -1148,6 +1151,18 @@ async def root():
     beyond what /health and /api/v1/relay-stats already publish — no
     counts, no identifiers, nothing that could speak to Rules 1-3.
     """
+    # Browsers get a real page; API clients and scripts keep the JSON.
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept and os.path.isfile(_LANDING_PATH):
+        with open(_LANDING_PATH, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read(), headers={
+                "Content-Security-Policy": (
+                    "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                    "script-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                    "connect-src 'self'; object-src 'none'; base-uri 'none'; "
+                    "frame-ancestors 'none'"),
+                "Cache-Control": "no-cache",
+            })
     return {
         "service": "SHROUD relay",
         "version": SERVER_VERSION,

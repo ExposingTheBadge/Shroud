@@ -1693,6 +1693,62 @@ window.addEventListener('keydown', e => {
   connectWS();
 })();
 
+/* ─── Relay policy panel (v2.7) ──────────────────────────────────── */
+let policyState = null;
+function renderPolicy(p) {
+  policyState = p;
+  const on = !!p.require_device_tokens;
+  $('policyTokens').classList.toggle('on', on);
+  $('policyTokens').setAttribute('aria-checked', on ? 'true' : 'false');
+  $('policyTokensLbl').textContent = on ? 'Required' : 'Optional';
+  const pct = p.devices_total ? Math.round(100 * p.devices_with_token / p.devices_total) : 0;
+  $('policyTokenPill').textContent = p.devices_with_token + ' / ' + p.devices_total + ' devices use a token (' + pct + '%)';
+  if (document.activeElement !== $('policyRetention')) $('policyRetention').value = p.undelivered_retention_days;
+  if (document.activeElement !== $('policyUpload')) $('policyUpload').value = p.max_upload_mb;
+}
+async function loadPolicy() {
+  try { renderPolicy(await (await api('GET', '/api/v1/admin/control/policy')).json()); }
+  catch (e) { $('policyStatus').textContent = 'Could not load policy: ' + e.message; }
+}
+async function savePolicy(extra) {
+  const body = Object.assign({
+    undelivered_retention_days: parseInt($('policyRetention').value, 10),
+    max_upload_mb: parseInt($('policyUpload').value, 10),
+  }, extra || {});
+  try {
+    renderPolicy(await (await api('POST', '/api/v1/admin/control/policy', body)).json());
+    $('policyStatus').textContent = 'Saved';
+    toast('Relay policy saved', 'ok');
+  } catch (e) {
+    toast('Policy not saved: ' + e.message, 'danger');
+  }
+}
+async function togglePolicyTokens() {
+  if (!policyState) return;
+  const next = !policyState.require_device_tokens;
+  if (next) {
+    const left = policyState.devices_total - policyState.devices_with_token;
+    const ok = await showModal({
+      title: 'Require device tokens?',
+      body: 'Devices that have not signed in with an updated app will be refused until they sign in again.',
+      impact: left + ' device(s) without a token will have to sign in again.',
+      impactClass: left ? 'danger' : '',
+      confirmText: 'Require tokens', confirmClass: 'danger',
+    });
+    if (!ok) return;
+  }
+  savePolicy({ require_device_tokens: next });
+}
+(function initPolicyPanel() {
+  const t = $('policyTokens');
+  if (!t) return;
+  t.addEventListener('click', (e) => { e.preventDefault(); togglePolicyTokens(); });
+  t.addEventListener('keydown', (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); togglePolicyTokens(); } });
+  $('policySave').addEventListener('click', (e) => { e.preventDefault(); savePolicy(); });
+  loadPolicy();
+  setInterval(() => { if (!document.hidden && state.tab === 'overview') loadPolicy(); }, 30000);
+})();
+
 /* Expose handlers used by inline onclick attributes */
 window.goTab            = goTab;
 window.refresh          = refresh;
