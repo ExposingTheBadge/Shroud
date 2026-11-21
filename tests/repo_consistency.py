@@ -44,7 +44,7 @@ def check_no_retired_relays() -> None:
                            check=True).stdout.split()
     hits = []
     for f in files:
-        if f.startswith(("releases/", "CHANGELOG", "SESSION_NOTES")) or f.endswith(
+        if f == "tests/repo_consistency.py" or f.startswith(("releases/", "CHANGELOG", "SESSION_NOTES")) or f.endswith(
                 (".png", ".ico", ".zip", ".apk", ".exe", ".jar", ".so", ".dll")):
             continue
         p = os.path.join(REPO, f)
