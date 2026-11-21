@@ -142,9 +142,12 @@ final class ShroudClient: ObservableObject {
             default: throw AuthError.message(r.detail)
             }
         }
-        // The password is not stored: every later call authenticates with the device id.
+        // The password is not stored: later calls authenticate with the device token.
         KeychainStore.saveString(key: "device_id", value: did)
         KeychainStore.saveString(key: "last_device_id", value: did)
+        let token = r.json["device_token"] as? String ?? ""
+        KeychainStore.saveString(key: "device_token", value: token)
+        relay.deviceToken = token
         KeychainStore.saveString(key: "username", value: user)
         deviceID = did
         username = user
@@ -162,6 +165,8 @@ final class ShroudClient: ObservableObject {
     func signOut() {
         pause()
         KeychainStore.delete(key: "device_id")
+        KeychainStore.delete(key: "device_token")
+        relay.deviceToken = nil
         KeychainStore.delete(key: "username")
         RatchetSession.wipe()
         try? FileManager.default.removeItem(at: Self.conversationsURL)

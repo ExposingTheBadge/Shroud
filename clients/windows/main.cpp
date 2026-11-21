@@ -562,6 +562,8 @@ public:
         tpm_detect();
         kyber_init();
 
+        loadDeviceToken();
+
         /* Check saved identity */
         DeviceConfig cfg; ZeroMemory(&cfg, sizeof(cfg));
         if (storage_exists() && storage_load_config(&cfg) && storage_load_keypair(cfg.id, &cfg.identity_key)) {
@@ -671,6 +673,38 @@ private:
         QByteArray data;
         if (r && r->len > 0) { data = QByteArray(r->data, (int)r->len); network_free_response(r); }
         return data;
+    }
+
+    /* Device token: %APPDATA%\SHROUD\device_token.bin, DPAPI-sealed to
+     * this Windows user. "Erase everything" removes it with the rest of
+     * the folder. */
+    static QString deviceTokenPath() {
+        return QDir(qEnvironmentVariable("APPDATA")).filePath("SHROUD/device_token.bin");
+    }
+    static void saveDeviceToken(const QString &token) {
+        network_set_device_token(token.toUtf8().constData());
+        QFile f(deviceTokenPath());
+        if (token.isEmpty()) { f.remove(); return; }
+        QByteArray plain = token.toUtf8();
+        DATA_BLOB in{ (DWORD)plain.size(), (BYTE*)plain.data() }, out{};
+        if (!CryptProtectData(&in, L"SHROUD device token", nullptr, nullptr, nullptr,
+                              CRYPTPROTECT_UI_FORBIDDEN, &out)) return;
+        QDir().mkpath(QFileInfo(f).absolutePath());
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            f.write(reinterpret_cast<const char*>(out.pbData), (qint64)out.cbData);
+        LocalFree(out.pbData);
+    }
+    static void loadDeviceToken() {
+        QFile f(deviceTokenPath());
+        if (!f.open(QIODevice::ReadOnly)) return;
+        QByteArray sealed = f.readAll();
+        DATA_BLOB in{ (DWORD)sealed.size(), (BYTE*)sealed.data() }, out{};
+        if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr,
+                                CRYPTPROTECT_UI_FORBIDDEN, &out)) return;
+        QByteArray tok(reinterpret_cast<const char*>(out.pbData), (int)out.cbData);
+        SecureZeroMemory(out.pbData, out.cbData);
+        LocalFree(out.pbData);
+        network_set_device_token(tok.constData());
     }
 
     QString jsonStr(const QByteArray &j, const char *k) {
@@ -1053,6 +1087,14 @@ private:
 
         /* Plain-English message for "we never got an answer". */
         auto unreachable = [&]() {
+            if (network_tls_pin_mismatch()) {
+                setStatusLabel(status,
+                    "The relay's certificate has changed since this PC last connected, which can "
+                    "mean someone is intercepting the connection. Not signing in. If you replaced "
+                    "the relay's certificate yourself, delete %APPDATA%\\SHROUD\\tls_pin.txt and try again.",
+                    "err");
+                return;
+            }
             setStatusLabel(status,
                 gTransport == Transport::Tor
                     ? "Can't reach the SHROUD relay through Tor. Make sure Tor is running "
@@ -1242,6 +1284,7 @@ private:
         QString did = jsonStr(resp, "device_id");
         if (!did.isEmpty()) {
             m_deviceId = did; m_username = u; m_deviceName = d; m_platform = "windows"; m_password = p;
+            saveDeviceToken(jsonStr(resp, "device_token"));
             DeviceConfig scSave; ZeroMemory(&scSave, sizeof(scSave));
             strncpy(scSave.id, did.toUtf8().constData(), sizeof(scSave.id)-1);
             strncpy(scSave.username, u.toUtf8().constData(), sizeof(scSave.username)-1);

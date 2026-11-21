@@ -84,6 +84,9 @@ final class Relay: NSObject, URLSessionDelegate {
 
     // MARK: Requests
 
+    /// Secret the relay issued to this device at sign-in (keychain-backed).
+    var deviceToken: String? = KeychainStore.loadString(key: "device_token")
+
     struct Response {
         let status: Int
         let json: [String: Any]
@@ -110,6 +113,9 @@ final class Relay: NSObject, URLSessionDelegate {
             req.httpBody = r
             req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         }
+        // Proves this app may act as its device; the device id alone is
+        // known to every friend. Set at sign-in, cleared at sign-out.
+        if let tok = deviceToken, !tok.isEmpty { req.setValue(tok, forHTTPHeaderField: "X-Device-Token") }
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
         do {
             let (data, resp) = try await session.data(for: req)

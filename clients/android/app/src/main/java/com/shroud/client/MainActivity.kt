@@ -325,6 +325,7 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
             // Out — wipe local session state and force a fresh login.
             isRegistered = false
             deviceID = ""; username = ""; savedPassword = ""
+            NetworkClient.deviceToken = ""
             pinHash = null; pinFailCount = 0; pinLocked = false
             prefs.edit().clear().apply()
         }
@@ -387,6 +388,7 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
         val sid = prefs.getString("device_id", "") ?: ""
         val su = prefs.getString("username", "") ?: ""
         val sp = prefs.getString("password", "") ?: ""
+        NetworkClient.deviceToken = prefs.getString("device_token", "") ?: ""
         if (sid.isNotEmpty() && su.isNotEmpty() && sp.isNotEmpty() && identityKey != null) {
             deviceID = sid; username = su; savedPassword = sp; isRegistered = true
             startHeartbeat()
@@ -874,7 +876,10 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
                 val did = authR.optString("device_id", "")
                 if (did.isNotEmpty()) {
                     deviceID = did; username = u; savedPassword = p; isRegistered = true
-                    prefs.edit().putString("device_id", did).putString("username", u).putString("password", p).apply()
+                    val tok = authR.optString("device_token", "")
+                    NetworkClient.deviceToken = tok
+                    prefs.edit().putString("device_id", did).putString("username", u).putString("password", p)
+                        .putString("device_token", tok).apply()
                     publishRatchetBundle(did)
                     startHeartbeat()
                     refreshContacts()
@@ -1082,6 +1087,7 @@ class ShroudVM(application: Application) : AndroidViewModel(application) {
     fun signOut() {
         isRegistered = false
         deviceID = ""; username = ""; savedPassword = ""
+        NetworkClient.deviceToken = ""
         pinHash = null; pinFailCount = 0; pinLocked = false
         conversations = emptyMap(); unread = emptyMap(); contacts = emptyList(); openPeer = null
         incomingRequests = emptyList(); outgoingPending = emptyList()

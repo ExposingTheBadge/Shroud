@@ -93,6 +93,100 @@ static void allow_self_signed(HINTERNET hRequest) {
     WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &opts, sizeof(opts));
 }
 
+/* ── Device token ─────────────────────────────────────────────────
+ * The relay issues a secret token at sign-in. Every request that acts
+ * for this device carries it, because the device id alone is known to
+ * every friend and used to be enough to read our mail or wipe us. */
+static char g_device_token[192] = { 0 };
+
+void network_set_device_token(const char *token) {
+    strncpy_s(g_device_token, sizeof(g_device_token), token ? token : "", _TRUNCATE);
+}
+
+static void add_device_token(HINTERNET hRequest) {
+    if (!hRequest || !g_device_token[0]) return;
+    WCHAR wtok[200], hdr[240];
+    MultiByteToWideChar(CP_UTF8, 0, g_device_token, -1, wtok, 200);
+    swprintf_s(hdr, 240, L"X-Device-Token: %s", wtok);
+    WinHttpAddRequestHeaders(hRequest, hdr, (DWORD)-1L,
+                             WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+}
+
+/* ── TLS certificate pinning (trust on first use) ────────────────────
+ * The relay's certificate is self-signed, so the CA checks above are
+ * off. Without a pin, anyone on the network path could present their
+ * own certificate and read the device token and every request. The
+ * SHA-256 of the relay's leaf certificate is saved on first contact in
+ * %APPDATA%\SHROUD\tls_pin.txt; a different certificate afterwards is
+ * refused. Delete that file after deliberately replacing the relay's
+ * certificate. */
+static BOOL g_pin_mismatch = FALSE;
+
+BOOL network_tls_pin_mismatch(void) { return g_pin_mismatch; }
+
+static BOOL pin_path(WCHAR *out, DWORD cap) {
+    WCHAR appdata[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH)) return FALSE;
+    WCHAR dir[MAX_PATH];
+    swprintf_s(dir, MAX_PATH, L"%s\\SHROUD", appdata);
+    CreateDirectoryW(dir, NULL);
+    swprintf_s(out, cap, L"%s\\tls_pin.txt", dir);
+    return TRUE;
+}
+
+static BOOL tls_pin_ok(HINTERNET hRequest) {
+    if (!SERVER_USE_TLS) return TRUE;
+    PCCERT_CONTEXT cert = NULL;
+    DWORD sz = sizeof(cert);
+    if (!WinHttpQueryOption(hRequest, WINHTTP_OPTION_SERVER_CERT_CONTEXT, &cert, &sz) || !cert)
+        return FALSE;
+    BYTE hash[SHA256_LEN];
+    BOOL hashed = crypto_sha256(cert->pbCertEncoded, cert->cbCertEncoded, hash);
+    CertFreeCertificateContext(cert);
+    if (!hashed) return FALSE;
+    char hex[SHA256_LEN * 2 + 1];
+    for (int i = 0; i < SHA256_LEN; i++) sprintf_s(hex + i * 2, 3, "%02x", hash[i]);
+
+    WCHAR path[MAX_PATH];
+    if (!pin_path(path, MAX_PATH)) return TRUE;   /* nowhere to pin; don't lock the user out */
+    char saved[SHA256_LEN * 2 + 8] = { 0 };
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        DWORD got = 0;
+        ReadFile(f, saved, SHA256_LEN * 2, &got, NULL);
+        CloseHandle(f);
+        saved[got] = 0;
+    }
+    if (saved[0] == 0) {
+        f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (f != INVALID_HANDLE_VALUE) {
+            DWORD put = 0;
+            WriteFile(f, hex, SHA256_LEN * 2, &put, NULL);
+            CloseHandle(f);
+        }
+        return TRUE;
+    }
+    if (_strnicmp(saved, hex, SHA256_LEN * 2) != 0) {
+        g_pin_mismatch = TRUE;
+        return FALSE;
+    }
+    g_pin_mismatch = FALSE;
+    return TRUE;
+}
+
+/* Every request: certificate policy + device token. */
+static void prepare_request(HINTERNET hRequest) {
+    allow_self_signed(hRequest);
+    add_device_token(hRequest);
+}
+
+/* WinHttpReceiveResponse, then refuse the response if the certificate
+ * does not match the pin. */
+static BOOL receive_pinned(HINTERNET hRequest) {
+    if (!WinHttpReceiveResponse(hRequest, NULL)) return FALSE;
+    return tls_pin_ok(hRequest);
+}
+
 HttpResponse* network_post_h(const char *path, const char *json_body, const char *extra_header) {
     if (!hSession) return NULL;
 
@@ -115,7 +209,7 @@ HttpResponse* network_post_h(const char *path, const char *json_body, const char
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
-    allow_self_signed(hRequest);
+    prepare_request(hRequest);
 
     /* Set JSON content type + optional caller-supplied extras like X-Expires-In. */
     WCHAR headers[1024];
@@ -133,7 +227,7 @@ HttpResponse* network_post_h(const char *path, const char *json_body, const char
         WinHttpCloseHandle(hConnect);
         return NULL;
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    if (!receive_pinned(hRequest)) {
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
         return NULL;
@@ -188,7 +282,7 @@ HttpResponse* network_post_bytes(const char *path, const BYTE *data, DWORD data_
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
-    allow_self_signed(hRequest);
+    prepare_request(hRequest);
 
     WCHAR headers[256];
     WCHAR ctw[64];
@@ -199,7 +293,7 @@ HttpResponse* network_post_bytes(const char *path, const BYTE *data, DWORD data_
     if (!WinHttpSendRequest(hRequest, headers, -1, (LPVOID)data, data_len, data_len, 0)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    if (!receive_pinned(hRequest)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
     }
 
@@ -243,12 +337,12 @@ HttpResponse* network_get(const char *path) {
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
-    allow_self_signed(hRequest);
+    prepare_request(hRequest);
 
     if (!WinHttpSendRequest(hRequest, NULL, 0, NULL, 0, 0, 0)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    if (!receive_pinned(hRequest)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
     }
 
@@ -294,7 +388,7 @@ HttpResponse* network_upload_file(const char *path, const BYTE *data, DWORD data
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
-    allow_self_signed(hRequest);
+    prepare_request(hRequest);
 
     /* Custom headers for file transfer */
     WCHAR headers[1024], senderW[128], recipW[128], metaW[512];
@@ -307,7 +401,7 @@ HttpResponse* network_upload_file(const char *path, const BYTE *data, DWORD data
     if (!WinHttpSendRequest(hRequest, headers, -1, (LPVOID)data, data_len, data_len, 0)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    if (!receive_pinned(hRequest)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
     }
 
@@ -353,7 +447,7 @@ HttpResponse* network_download_file(const char *path, const char *device_id,
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
-    allow_self_signed(hRequest);
+    prepare_request(hRequest);
 
     WCHAR headers[256], devW[128];
     MultiByteToWideChar(CP_UTF8, 0, device_id, -1, devW, 128);
@@ -362,7 +456,7 @@ HttpResponse* network_download_file(const char *path, const char *device_id,
     if (!WinHttpSendRequest(hRequest, headers, -1, NULL, 0, 0, 0)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    if (!receive_pinned(hRequest)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
     }
 
@@ -408,7 +502,7 @@ HttpResponse* network_delete(const char *path, const char *device_id) {
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         SERVER_USE_TLS ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) { WinHttpCloseHandle(hConnect); return NULL; }
-    allow_self_signed(hRequest);
+    prepare_request(hRequest);
 
     WCHAR headers[256], devW[128];
     MultiByteToWideChar(CP_UTF8, 0, device_id ? device_id : "", -1, devW, 128);
@@ -417,7 +511,7 @@ HttpResponse* network_delete(const char *path, const char *device_id) {
     if (!WinHttpSendRequest(hRequest, headers, -1, NULL, 0, 0, 0)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
     }
-    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    if (!receive_pinned(hRequest)) {
         WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); return NULL;
     }
 
