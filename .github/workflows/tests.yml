@@ -48,6 +48,11 @@ jobs:
       - name: Mobile client contract
         run: python -m tests.mobile_client_contract
 
+      # Extension's vendored routing library, manifest icons, no
+      # references to retired relays.
+      - name: Repository consistency
+        run: python -m tests.repo_consistency
+
   cross-client-vectors:
     name: Cross-client protocol vectors
     runs-on: ubuntu-latest
