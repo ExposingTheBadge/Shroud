@@ -13,6 +13,7 @@ Run::
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -57,6 +58,7 @@ class Ctx:
             "username": username, "password": password, "device_name": "t",
             "platform": "android", "public_key": serialize_public_key(pub).hex()})
         assert r.status_code == 200, r.text
+        self.last_token = r.json().get("device_token", "")
         return r.json()["device_id"]
 
     def admin_client(self):
@@ -285,6 +287,120 @@ def check_rate_limit_is_429(x: Ctx):
     assert x.srv._rate_limit_for("/api/v1/devices/list", "POST")[0] != "register", \
         "/devices/list shares the 20/hour registration budget"
     assert x.srv._rate_limit_for("/api/v1/files/" + "a" * 32, "GET")[0] == "/api/v1/files/:id"
+
+
+def _befriend(x: Ctx, a_user, a_dev, b_user, b_dev):
+    rid = x.c.post("/api/v1/friends/request", json={
+        "device_id": a_dev, "target_username": b_user}).json()["request_id"]
+    r = x.c.post("/api/v1/friends/respond", json={
+        "device_id": b_dev, "request_id": rid, "accept": True})
+    assert r.status_code == 200, r.text
+
+
+def check_device_token_binds_and_is_enforced(x: Ctx):
+    """A device id was the only credential, and friends learn it from
+    /contacts/devices: holding it let anyone fetch and delete the
+    owner's mail, replace their ratchet key, or panic-wipe the account."""
+    u, pw = x.user("tok")
+    did = x.device(u, pw)
+    tok = x.last_token
+    assert tok, "registration must return a device_token"
+    # Unbound (legacy) device: still works without a token.
+    assert x.c.post("/api/v1/heartbeat", json={"device_id": did}).status_code == 200
+    # A wrong token never binds and is refused.
+    assert x.c.post("/api/v1/heartbeat", json={"device_id": did},
+                    headers={"X-Device-Token": "nope"}).status_code == 401
+    # The right token binds the device...
+    assert x.c.post("/api/v1/heartbeat", json={"device_id": did},
+                    headers={"X-Device-Token": tok}).status_code == 200
+    # ...after which the bare device id is not enough anywhere.
+    assert x.c.post("/api/v1/messages/fetch", json={"device_id": did}).status_code == 401
+    assert x.c.get(f"/api/v1/devices/{did}/pickup-token").status_code == 401
+    r = x.c.post("/api/v1/ratchet/publish-key", json={"device_id": did, "x25519_pub": "11" * 32})
+    assert r.status_code == 401, r.status_code
+    r = x.c.post("/api/v1/panic", json={"device_id": did})
+    assert r.json() == {"wiped": False}, r.text
+    assert x.c.post("/api/v1/messages/fetch", json={"device_id": did},
+                    headers={"X-Device-Token": tok}).status_code == 200
+
+
+def check_require_device_tokens_setting(x: Ctx):
+    """With the operator switch on, unbound devices must sign in again."""
+    u, pw = x.user("req")
+    did = x.device(u, pw)
+    x.srv.setting_set("require_device_tokens", "1")
+    try:
+        assert x.c.post("/api/v1/heartbeat", json={"device_id": did}).status_code == 401
+        assert x.c.post("/api/v1/heartbeat", json={"device_id": did},
+                        headers={"X-Device-Token": x.last_token}).status_code == 200
+    finally:
+        x.srv.setting_set("require_device_tokens", "0")
+
+
+def check_contact_devices_friends_only(x: Ctx):
+    """Any signed-in stranger could list anyone's device ids."""
+    a, apw = x.user("cda"); ad = x.device(a, apw)
+    b, bpw = x.user("cdb"); bd = x.device(b, bpw)
+    r = x.c.post("/api/v1/contacts/devices", json={"device_id": ad, "contact_username": b})
+    assert r.status_code == 404, r.status_code
+    _befriend(x, a, ad, b, bd)
+    r = x.c.post("/api/v1/contacts/devices", json={"device_id": ad, "contact_username": b})
+    assert r.status_code == 200 and r.json()["devices"][0]["id"] == bd, r.text
+    r = x.c.post("/api/v1/contacts/devices", json={"device_id": ad, "contact_username": a})
+    assert r.status_code == 200, "an account may list its own devices"
+
+
+def check_websocket_deletes_on_delivery(x: Ctx):
+    """The WebSocket marked messages delivered and kept the rows."""
+    a, apw = x.user("wsa"); ad = x.device(a, apw)
+    b, bpw = x.user("wsb"); bd = x.device(b, bpw)
+    env = {"nonce": "00", "ciphertext": "00", "sig": "00", "sender": a, "ts": 1}
+    r = x.c.post("/api/v1/messages/send", json={
+        "sender_device_id": ad, "recipient_device_id": bd, "envelope": json.dumps(env)})
+    assert r.status_code == 200, r.text
+    with x.c.websocket_connect(f"/ws/{bd}") as ws:
+        got = ws.receive_json()
+    assert got["sender_device_id"] == ad, got
+    left = x.srv.db.execute("SELECT COUNT(*) FROM messages WHERE recipient_device_id=?",
+                            (bd,)).fetchone()[0]
+    assert left == 0, f"{left} delivered row(s) kept"
+
+
+def check_upload_limit(x: Ctx):
+    """Uploads had no size limit, and a rejected upload left its blob."""
+    a, apw = x.user("upa"); ad = x.device(a, apw)
+    b, bpw = x.user("upb"); bd = x.device(b, bpw)
+    x.srv.setting_set("max_upload_mb", "1")
+    try:
+        before = set(os.listdir(x.srv.FILE_DIR))
+        r = x.c.post("/api/v1/files/upload", content=b"\0" * (1024 * 1024 + 1),
+                     headers={"X-Device-ID": ad, "X-Recipient-ID": bd})
+        assert r.status_code == 413, r.status_code
+        assert set(os.listdir(x.srv.FILE_DIR)) == before, "partial blob left on disk"
+    finally:
+        x.srv.setting_set("max_upload_mb", "100")
+
+
+def check_anon_expiry_swept(x: Ctx):
+    """Expired anonymous messages were never removed."""
+    r = x.c.post("/api/v1/messages/send-anon", content=b"x" * 4096,
+                 headers={"X-Routing-Tag": "ab" * 32, "X-Expires-In": "1"})
+    assert r.status_code == 200, r.text
+    x.srv.db.execute("UPDATE anon_messages SET expires_at='2000-01-01 00:00:00' WHERE id=?",
+                     (r.json()["message_id"],))
+    x.srv.db.commit()
+    x.srv._sweep_expired_once()
+    n = x.srv.db.execute("SELECT COUNT(*) FROM anon_messages WHERE id=?",
+                         (r.json()["message_id"],)).fetchone()[0]
+    assert n == 0
+
+
+def check_cors_allows_client_headers(x: Ctx):
+    """The browser client's preflight failed: X-Routing-Tag wasn't allowed."""
+    r = x.c.options("/api/v1/messages/send-anon", headers={
+        "Origin": "https://example.org", "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "x-routing-tag,x-device-token"})
+    assert r.status_code == 200, r.status_code
 
 
 CHECKS = [v for k, v in list(globals().items()) if k.startswith("check_")]
