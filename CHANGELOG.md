@@ -34,7 +34,30 @@ calls are now signed, and relays running older code are refused.
   half-written transaction for the next request to commit.
 - Bans, backups and federation sync-now now require the CSRF token.
 
+- `/devices/{id}/pubkey` accepts POST as well as GET. Android always
+  POSTed and got 405, so it could never open a static-key message or an
+  image.
+- `/devices` registration no longer prints usernames, password lengths or
+  device ids to the relay's stdout log.
+
 **Crypto / clients**
+
+- **iOS and macOS:** a complete client in place of the placeholder screens
+  (sending did nothing, and nothing could be received). Encrypted sign-in,
+  contacts and requests, Double Ratchet with X3DH, anonymous routing, TLS
+  pinning, safety numbers, disappearing messages, and an XcodeGen project
+  that builds for both iPhone and Mac. See `clients/ios/README.md`.
+- Anonymous messages between Windows and Android/iOS were silently dropped:
+  Windows sealed `{"envelope": …}` and the phones sealed the envelope
+  itself, and each side discarded the other's. All clients now read both.
+- A message landed in whichever conversation its sender-chosen `name` said.
+  Windows, Android and iOS now file it under a contact only when the sending
+  device belongs to that account, and mark anything else "(unverified)".
+  Android also filed every incoming image under the image's file name.
+- Windows sends image and file notices over anonymous routing, like text,
+  and renders images that arrive that way. A very long file name no longer
+  overruns a fixed buffer.
+- Android takes its version from `VERSION` (it still said 2.4.5).
 
 - Double Ratchet (Python, Android, Windows): a replayed or forged
   message no longer breaks the session, because state is committed only

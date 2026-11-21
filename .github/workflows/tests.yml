@@ -44,6 +44,10 @@ jobs:
       - name: Two-relay federation
         run: python -m tests.federation_e2e
 
+      # The endpoints and formats the Android and iOS apps rely on.
+      - name: Mobile client contract
+        run: python -m tests.mobile_client_contract
+
   cross-client-vectors:
     name: Cross-client protocol vectors
     runs-on: ubuntu-latest

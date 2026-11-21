@@ -3,6 +3,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// One version for every client: the repo's VERSION file. This used to be
+// hard-coded and had drifted to 2.4.5 while the project shipped 2.6.x.
+val shroudVersion: String = rootProject.file("../../VERSION").readText().trim()
+val shroudVersionCode: Int = shroudVersion.split(".").map { it.toInt() }
+    .let { (major, minor, patch) -> major * 10000 + minor * 100 + patch }
+
 android {
     namespace = "com.shroud.client"
     compileSdk = 34
@@ -11,8 +17,8 @@ android {
         applicationId = "com.shroud.client"
         minSdk = 26
         targetSdk = 34
-        versionCode = 19
-        versionName = "2.4.5"
+        versionCode = shroudVersionCode   // 2.6.7 -> 20607, always above the old 19
+        versionName = shroudVersion
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
