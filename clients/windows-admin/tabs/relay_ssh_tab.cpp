@@ -3,127 +3,144 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
+#include <QFormLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QComboBox>
 #include <QLineEdit>
 #include <QProcess>
-#include <QDir>
+#include <QFileDialog>
 #include <QFileInfo>
+#include <QSettings>
+#include <QApplication>
 
-struct RelayDef {
-    QString label;
-    QString key;
-    QString ip;
-};
+namespace {
+constexpr const char *kDefaultHost = "173.245.244.180";
 
-static const RelayDef RELAYS[] = {
-    {"us-east-1", "shroud-relay.pem",         "100.30.51.8"},
-    {"us-east-2", "shroud-relay-useast2.pem", "3.142.185.104"},
-    {"us-west-2", "shroud-relay-uswest2.pem", "54.214.75.14"},
-    {"eu-west-1", "shroud-relay-euwest1.pem", "54.171.165.223"},
+struct Preset { const char *label; const char *cmd; };
+// Linux relay host commands. On a Windows relay host use the custom box.
+const Preset PRESETS[] = {
+    {"git pull",              "cd /opt/shroud/src && sudo git pull --ff-only"},
+    {"Restart relay",         "sudo systemctl restart shroud-relay.service && sudo systemctl is-active shroud-relay.service"},
+    {"Relay status",          "sudo systemctl status shroud-relay.service --no-pager -n 5"},
+    {"Tor status",            "sudo systemctl is-active tor && cat /opt/shroud/data/onion_hostname.txt 2>/dev/null || echo '(no onion hostname)'"},
+    {"Disk usage",            "df -h / /opt/shroud 2>/dev/null"},
+    {"Tail journal (40)",     "sudo journalctl -u shroud-relay.service -n 40 --no-pager"},
 };
-static const int RELAY_COUNT = sizeof(RELAYS) / sizeof(RELAYS[0]);
+}
 
 RelaySshTab::RelaySshTab(AdminClient *client, QWidget *parent)
     : QWidget(parent), m_client(client) {
     auto *l = new QVBoxLayout(this);
 
     auto *info = new QLabel(
-        "Run shell commands across the production relays. Uses each "
-        "region's SSH key from <code>~/Documents/AWS-Keys/</code>. "
-        "Target dropdown picks 'all' to fan out, or a single region.");
+        "Run maintenance commands on the relay host over SSH. Set the host, "
+        "user and private key once; they are remembered on this PC. The "
+        "host key is pinned on first connect (accept-new).");
     info->setWordWrap(true);
-    info->setStyleSheet("padding:6px;color:#bbb;background:#222;border-left:3px solid #ffb74d");
+    info->setStyleSheet("padding:8px;color:#c9d1d9;background:#161b22;"
+                        "border-left:3px solid #7c5cff;border-radius:4px");
     l->addWidget(info);
 
-    auto *bar = new QHBoxLayout;
-    m_targetBox = new QComboBox;
-    m_targetBox->addItem("all");
-    for (int i = 0; i < RELAY_COUNT; ++i) m_targetBox->addItem(RELAYS[i].label);
-    bar->addWidget(new QLabel("Target:"));
-    bar->addWidget(m_targetBox);
-    bar->addStretch();
-    l->addLayout(bar);
+    QSettings st;
+    auto *form = new QFormLayout;
+    m_hostEdit = new QLineEdit(st.value("ssh/host", kDefaultHost).toString());
+    m_userEdit = new QLineEdit(st.value("ssh/user", "shroud").toString());
+    m_keyEdit  = new QLineEdit(st.value("ssh/key").toString());
+    m_keyEdit->setPlaceholderText("Path to the SSH private key (optional if ssh-agent has it)");
+    auto *keyRow = new QHBoxLayout;
+    auto *browse = new QPushButton("Browse…");
+    keyRow->addWidget(m_keyEdit, 1);
+    keyRow->addWidget(browse);
+    form->addRow("Host", m_hostEdit);
+    form->addRow("User", m_userEdit);
+    form->addRow("Key", keyRow);
+    l->addLayout(form);
+    connect(browse, &QPushButton::clicked, this, &RelaySshTab::browseKey);
+    for (auto *e : {m_hostEdit, m_userEdit, m_keyEdit})
+        connect(e, &QLineEdit::editingFinished, this, &RelaySshTab::saveTarget);
 
     auto *grid = new QGridLayout;
-    int r = 0;
-    auto addBtn = [&](QPushButton *&out, const QString &lbl, const QString &cmd) {
-        out = new QPushButton(lbl);
-        out->setMinimumHeight(36);
-        connect(out, &QPushButton::clicked, [this, cmd, lbl]() { runOnAll(cmd, lbl); });
-        grid->addWidget(out, r / 3, r % 3); r++;
-    };
-    addBtn(m_pullBtn,      "git pull origin master",
-           "cd /opt/shroud/src && sudo git pull origin master");
-    addBtn(m_restartBtn,   "Restart relay service",
-           "sudo systemctl restart shroud-relay.service && sudo systemctl is-active shroud-relay.service");
-    addBtn(m_torStatusBtn, "Tor status",
-           "sudo systemctl is-active tor && cat /opt/shroud/data/onion_hostname.txt 2>/dev/null || echo '(no hostname file)'");
-    addBtn(m_vacuumBtn,    "VACUUM DB",
-           "sudo sqlite3 /opt/shroud/data/shroud.db 'VACUUM;' && echo VACUUM done");
-    addBtn(m_journalBtn,   "Tail relay journal (20)",
-           "sudo journalctl -u shroud-relay.service -n 20 --no-pager");
+    int i = 0;
+    for (const auto &p : PRESETS) {
+        auto *b = new QPushButton(p.label);
+        b->setMinimumHeight(34);
+        const QString cmd = p.cmd, lbl = p.label;
+        connect(b, &QPushButton::clicked, this, [this, cmd, lbl]() { run(cmd, lbl); });
+        grid->addWidget(b, i / 3, i % 3);
+        ++i;
+    }
     l->addLayout(grid);
 
     auto *cbar = new QHBoxLayout;
     m_customCmd = new QLineEdit;
-    m_customCmd->setPlaceholderText("Custom command (runs via sudo bash -c)…");
+    m_customCmd->setPlaceholderText("Custom command…");
     m_customRunBtn = new QPushButton("Run");
     cbar->addWidget(m_customCmd, 1);
     cbar->addWidget(m_customRunBtn);
     l->addLayout(cbar);
     connect(m_customRunBtn, &QPushButton::clicked, this, &RelaySshTab::runCustom);
+    connect(m_customCmd, &QLineEdit::returnPressed, this, &RelaySshTab::runCustom);
 
     m_output = new QPlainTextEdit;
     m_output->setReadOnly(true);
-    m_output->setStyleSheet("font-family:Consolas,monospace;font-size:11px;background:#0a0a0a;color:#e0e0e0");
+    m_output->setStyleSheet("font-family:Consolas,monospace;font-size:11px;"
+                            "background:#0d1117;color:#e6edf3");
     l->addWidget(m_output, 1);
+}
 
-    m_proc = new QProcess(this);
-    m_proc->setProcessChannelMode(QProcess::MergedChannels);
-    connect(m_proc, &QProcess::readyReadStandardOutput, this, &RelaySshTab::onOutput);
+void RelaySshTab::browseKey() {
+    QString f = QFileDialog::getOpenFileName(this, "SSH private key", m_keyEdit->text());
+    if (!f.isEmpty()) { m_keyEdit->setText(f); saveTarget(); }
+}
+
+void RelaySshTab::saveTarget() {
+    QSettings st;
+    st.setValue("ssh/host", m_hostEdit->text().trimmed());
+    st.setValue("ssh/user", m_userEdit->text().trimmed());
+    st.setValue("ssh/key",  m_keyEdit->text().trimmed());
 }
 
 void RelaySshTab::runCustom() {
-    QString cmd = m_customCmd->text();
-    if (cmd.isEmpty()) return;
-    runOnAll(cmd, "custom");
+    QString cmd = m_customCmd->text().trimmed();
+    if (!cmd.isEmpty()) run(cmd, "custom");
 }
 
-void RelaySshTab::runOnAll(const QString &cmd, const QString &label) {
-    QString target = m_targetBox->currentText();
-    QString keyDir = QDir::home().filePath("Documents/AWS-Keys");
-    for (int i = 0; i < RELAY_COUNT; ++i) {
-        if (target != "all" && target != RELAYS[i].label) continue;
-        QString keyfile = keyDir + "/" + RELAYS[i].key;
-        m_output->appendPlainText(QString("\n=== %1 (%2) — %3 ===")
-            .arg(RELAYS[i].label, RELAYS[i].ip, label));
-        if (!QFileInfo(keyfile).exists()) {
-            m_output->appendPlainText("[skip] SSH key missing: " + keyfile);
-            continue;
-        }
-        QStringList args = {
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-            "-i", keyfile,
-            QString("ec2-user@%1").arg(RELAYS[i].ip),
-            cmd,
-        };
-        QProcess p;
-        p.setProcessChannelMode(QProcess::MergedChannels);
-        p.start("ssh", args);
-        if (!p.waitForFinished(60000)) {
-            m_output->appendPlainText("[timeout]");
-            p.kill();
-            continue;
-        }
-        m_output->appendPlainText(QString::fromUtf8(p.readAllStandardOutput()).trimmed());
+void RelaySshTab::run(const QString &cmd, const QString &label) {
+    const QString host = m_hostEdit->text().trimmed();
+    const QString user = m_userEdit->text().trimmed();
+    const QString key  = m_keyEdit->text().trimmed();
+    if (host.isEmpty() || user.isEmpty()) {
+        m_output->appendPlainText("[error] set a host and user first");
+        return;
     }
-}
+    m_output->appendPlainText(QString("\n=== %1@%2 — %3 ===").arg(user, host, label));
+    QStringList args = {"-o", "StrictHostKeyChecking=accept-new",
+                        "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                        "-o", "LogLevel=ERROR"};
+    if (!key.isEmpty()) {
+        if (!QFileInfo::exists(key)) {
+            m_output->appendPlainText("[error] key file not found: " + key);
+            return;
+        }
+        args << "-i" << key;
+    }
+    args << QString("%1@%2").arg(user, host) << cmd;
 
-void RelaySshTab::onOutput() {
-    m_output->appendPlainText(QString::fromUtf8(m_proc->readAllStandardOutput()).trimmed());
+    // Asynchronous: the old tab blocked the whole window for up to a
+    // minute per relay while ssh ran.
+    auto *p = new QProcess(this);
+    p->setProcessChannelMode(QProcess::MergedChannels);
+    connect(p, &QProcess::readyReadStandardOutput, this, [this, p]() {
+        m_output->appendPlainText(QString::fromUtf8(p->readAllStandardOutput()).trimmed());
+    });
+    connect(p, &QProcess::finished, this, [this, p](int code, QProcess::ExitStatus) {
+        m_output->appendPlainText(QString("[exit %1]").arg(code));
+        p->deleteLater();
+    });
+    connect(p, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
+        if (e == QProcess::FailedToStart)
+            m_output->appendPlainText("[error] could not start ssh; is OpenSSH installed?");
+    });
+    p->start("ssh", args);
 }

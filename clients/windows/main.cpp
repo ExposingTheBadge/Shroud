@@ -562,6 +562,8 @@ public:
         tpm_detect();
         kyber_init();
 
+        loadDeviceToken();
+
         /* Check saved identity */
         DeviceConfig cfg; ZeroMemory(&cfg, sizeof(cfg));
         if (storage_exists() && storage_load_config(&cfg) && storage_load_keypair(cfg.id, &cfg.identity_key)) {
@@ -671,6 +673,38 @@ private:
         QByteArray data;
         if (r && r->len > 0) { data = QByteArray(r->data, (int)r->len); network_free_response(r); }
         return data;
+    }
+
+    /* Device token: %APPDATA%\SHROUD\device_token.bin, DPAPI-sealed to
+     * this Windows user. "Erase everything" removes it with the rest of
+     * the folder. */
+    static QString deviceTokenPath() {
+        return QDir(qEnvironmentVariable("APPDATA")).filePath("SHROUD/device_token.bin");
+    }
+    static void saveDeviceToken(const QString &token) {
+        network_set_device_token(token.toUtf8().constData());
+        QFile f(deviceTokenPath());
+        if (token.isEmpty()) { f.remove(); return; }
+        QByteArray plain = token.toUtf8();
+        DATA_BLOB in{ (DWORD)plain.size(), (BYTE*)plain.data() }, out{};
+        if (!CryptProtectData(&in, L"SHROUD device token", nullptr, nullptr, nullptr,
+                              CRYPTPROTECT_UI_FORBIDDEN, &out)) return;
+        QDir().mkpath(QFileInfo(f).absolutePath());
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            f.write(reinterpret_cast<const char*>(out.pbData), (qint64)out.cbData);
+        LocalFree(out.pbData);
+    }
+    static void loadDeviceToken() {
+        QFile f(deviceTokenPath());
+        if (!f.open(QIODevice::ReadOnly)) return;
+        QByteArray sealed = f.readAll();
+        DATA_BLOB in{ (DWORD)sealed.size(), (BYTE*)sealed.data() }, out{};
+        if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr,
+                                CRYPTPROTECT_UI_FORBIDDEN, &out)) return;
+        QByteArray tok(reinterpret_cast<const char*>(out.pbData), (int)out.cbData);
+        SecureZeroMemory(out.pbData, out.cbData);
+        LocalFree(out.pbData);
+        network_set_device_token(tok.constData());
     }
 
     QString jsonStr(const QByteArray &j, const char *k) {
@@ -1053,6 +1087,14 @@ private:
 
         /* Plain-English message for "we never got an answer". */
         auto unreachable = [&]() {
+            if (network_tls_pin_mismatch()) {
+                setStatusLabel(status,
+                    "The relay's certificate has changed since this PC last connected, which can "
+                    "mean someone is intercepting the connection. Not signing in. If you replaced "
+                    "the relay's certificate yourself, delete %APPDATA%\\SHROUD\\tls_pin.txt and try again.",
+                    "err");
+                return;
+            }
             setStatusLabel(status,
                 gTransport == Transport::Tor
                     ? "Can't reach the SHROUD relay through Tor. Make sure Tor is running "
@@ -1242,6 +1284,7 @@ private:
         QString did = jsonStr(resp, "device_id");
         if (!did.isEmpty()) {
             m_deviceId = did; m_username = u; m_deviceName = d; m_platform = "windows"; m_password = p;
+            saveDeviceToken(jsonStr(resp, "device_token"));
             DeviceConfig scSave; ZeroMemory(&scSave, sizeof(scSave));
             strncpy(scSave.id, did.toUtf8().constData(), sizeof(scSave.id)-1);
             strncpy(scSave.username, u.toUtf8().constData(), sizeof(scSave.username)-1);
@@ -2405,10 +2448,14 @@ private:
         bool isFileNotice = !plain.value("file_id").toString().isEmpty()
                          || type == "image" || type == "file";
         QString owner = m_deviceOwner.value(senderDevice);
-        if (isFileNotice) return owner.isEmpty() ? QString("Unknown sender") : owner;
+        /* The relay's device -> account mapping wins. The "name" inside the
+         * message is chosen by the sender, so trusting it let anyone write
+         * as "alice" and land in Alice's conversation. */
+        if (!owner.isEmpty()) return owner;
+        if (isFileNotice) return QString("Unknown sender");
         QString name = plain.value("name").toString();
-        if (!name.isEmpty()) return name;
-        return owner.isEmpty() ? QString("Unknown sender") : owner;
+        if (!name.isEmpty()) return name + " (unverified)";
+        return QString("Unknown sender");
     }
 
     /* A message arrived but couldn't be opened: say so instead of
@@ -3666,17 +3713,39 @@ private:
             QJsonObject outer = QJsonDocument::fromJson(
                 QByteArray((const char *)msg.plaintext.data(),
                            (int)msg.plaintext.size())).object();
+            /* Windows seals {"envelope": env, "ts"}; Android and iOS seal
+             * the envelope itself. Accept both, or messages between the
+             * platforms are silently dropped. */
             QJsonObject env = outer.value("envelope").toObject();
+            if (env.isEmpty() && outer.contains("ciphertext")) env = outer;
             if (env.isEmpty()) continue;
             QString sender = env.value("sender").toString();
-            QJsonObject plain = decryptEnvelope(env, sender);
-            if (plain.isEmpty()) { reportUndecryptable(); continue; }
-            QString senderName = senderLabelFor(plain, sender);
-            QString body = plain.value("body").toString();
-            if (!body.isEmpty()) {
-                ChatMsg cm; cm.from = senderName; cm.html = mdToHtml(body);
-                appendMessage(senderName, cm);
+            if (sender.isEmpty()) continue;
+            handleIncoming(env, sender);
+        }
+    }
+
+    /* Decrypt one envelope and show it: text, or an image/file notice.
+     * Shared by the anonymous and legacy delivery paths, so images that
+     * arrive sealed are rendered too. */
+    void handleIncoming(const QJsonObject &env, const QString &sender) {
+        QJsonObject plain = decryptEnvelope(env, sender);
+        if (plain.isEmpty()) { reportUndecryptable(); return; }
+        QString senderName = senderLabelFor(plain, sender);
+        QString body = plain.value("body").toString();
+        QString type = plain.value("type").toString();
+        QString fileId = plain.value("file_id").toString();
+        bool isImage = plain.value("is_image").toBool() || type == "image";
+        if (isImage && !fileId.isEmpty()) {
+            QString localPath = downloadAndDecryptImage(fileId, sender, plain.value("name").toString());
+            if (!localPath.isEmpty()) {
+                insertImageBubble(senderName, fileId, localPath, senderName, false);
+                return;
             }
+        }
+        if (!body.isEmpty()) {
+            ChatMsg cm; cm.from = senderName; cm.html = mdToHtml(body);
+            appendMessage(senderName, cm);
         }
     }
 
@@ -3689,25 +3758,14 @@ private:
         for (const QJsonValue &mv : msgs) {
             QJsonObject m = mv.toObject();
             QString sender = m.value("sender_device_id").toString();
-            QJsonObject env = m.value("envelope").toObject();
-            QJsonObject plain = decryptEnvelope(env, sender);
-            if (plain.isEmpty()) { reportUndecryptable(); continue; }
-            QString senderName = senderLabelFor(plain, sender);
-            QString body = plain.value("body").toString();
-            QString type = plain.value("type").toString();
-            QString fileId = plain.value("file_id").toString();
-            bool isImage = plain.value("is_image").toBool() || type == "image";
-            if (isImage && !fileId.isEmpty()) {
-                QString localPath = downloadAndDecryptImage(fileId, sender, plain.value("name").toString());
-                if (!localPath.isEmpty()) {
-                    insertImageBubble(senderName, fileId, localPath, senderName, false);
-                    continue;
-                }
-            }
-            if (!body.isEmpty()) {
-                ChatMsg cm; cm.from = senderName; cm.html = mdToHtml(body);
-                appendMessage(senderName, cm);
-            }
+            QJsonValue ev = m.value("envelope");
+            /* The relay returns the envelope as JSON, or as the original
+             * string when it was not valid JSON on the way in. */
+            QJsonObject env = ev.isObject() ? ev.toObject()
+                : QJsonDocument::fromJson(ev.toString().toUtf8()).object();
+            if (sender.isEmpty()) sender = env.value("sender").toString();
+            if (env.isEmpty() || sender.isEmpty()) continue;
+            handleIncoming(env, sender);
         }
     }
 
@@ -3792,6 +3850,11 @@ private:
         });
 
         BYTE iv[12], ct[5000], tag[16];
+        if (plb.size() > (int)sizeof(ct)) {
+            /* A very long file name would overrun ct. */
+            notify("That file name is too long to send. Rename the file and try again.", 10000);
+            return;
+        }
         crypto_random_bytes(iv, 12);
         crypto_aes_gcm_encrypt(sk, (const BYTE*)plb.constData(), plb.size(), iv, ct, tag);
         char *ih = crypto_hex_encode(iv, 12);
@@ -3807,21 +3870,44 @@ private:
         };
         free(ih); free(ch); free(th); free(sh);
 
-        QByteArray jb = jsonBody({
-            {"sender_device_id", m_deviceId}, {"recipient_device_id", m_selectedRecip},
-            {"envelope", envelopeString(env)}
-        });
-        QByteArray expHdr2;
-        if (gDisappearEnabled && gDisappearSeconds > 0) {
-            expHdr2 = QByteArray("X-Expires-In: ") + QByteArray::number(gDisappearSeconds);
+        /* The notice that points at the uploaded file goes the same way as
+         * text: sealed to a per-pair routing tag when we can, so the
+         * message queue holds no sender or recipient id. It used to always
+         * take the identified /messages/send path. (The upload itself still
+         * names both devices, because downloads are authorised by party.) */
+        bool delivered = false;
+        QByteArray imgResp;
+        if (m_anonRouting) {
+            shroud::RoutingContext ctx;
+            if (buildRoutingContext(m_selectedRecip, ctx)) {
+                QByteArray inner = jsonBody({{"envelope", env}, {"ts", ts}});
+                shroud::AnonClient ac = makeAnonClient();
+                delivered = ac.sendSealed(ctx, (const BYTE *)inner.constData(),
+                                          (DWORD)inner.size(),
+                                          (gDisappearEnabled && gDisappearSeconds > 0)
+                                              ? gDisappearSeconds : 0);
+                SecureZeroMemory(&ctx, sizeof(ctx));
+                if (!delivered)
+                    notify("Anonymous delivery failed, so the file notice was retried on the older, less private path.", 10000);
+            }
         }
-        QByteArray imgResp = httpPost("/api/v1/messages/send", jb, expHdr2);
-        if (imgResp.contains("\"detail\":\"maintenance\"")) {
-            setMaintenanceMode(true);
-            notify("Not sent: the relay is in maintenance.");
-            return;
+        if (!delivered) {
+            QByteArray jb = jsonBody({
+                {"sender_device_id", m_deviceId}, {"recipient_device_id", m_selectedRecip},
+                {"envelope", envelopeString(env)}
+            });
+            QByteArray expHdr2;
+            if (gDisappearEnabled && gDisappearSeconds > 0) {
+                expHdr2 = QByteArray("X-Expires-In: ") + QByteArray::number(gDisappearSeconds);
+            }
+            imgResp = httpPost("/api/v1/messages/send", jb, expHdr2);
+            if (imgResp.contains("\"detail\":\"maintenance\"")) {
+                setMaintenanceMode(true);
+                notify("Not sent: the relay is in maintenance.");
+                return;
+            }
+            delivered = imgResp.contains("\"message_id\"");
         }
-        bool delivered = imgResp.contains("\"message_id\"");
 
         if (isImage && !localPath.isEmpty() && delivered) {
             insertImageBubble(conv, fileId, localPath, "You", true);

@@ -9,8 +9,11 @@
 </head>
 <body>
 <div class="card">
-  <h1>SHROUD Admin</h1>
-  <p class="sub">3 failed attempts = permanent IP ban</p>
+  <div class="brand">
+    <span class="mark"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></svg></span>
+    <h1>SHROUD relay console</h1>
+  </div>
+  <p class="sub">Sign in with your admin fingerprint and password. Three failed attempts block this IP.</p>
 
   <div class="error" id="err"></div>
 
@@ -25,7 +28,7 @@
     <label>Setup token</label>
     <input type="text" class="text" id="setupToken" placeholder="from admin_setup_token on the relay" autocomplete="off">
     <p class="fp-status" style="margin-top:-4px">
-      <code>sudo cat /opt/shroud/data/admin_setup_token</code>
+      In the relay's data folder: <code>admin_setup_token</code>
     </p>
   </div>
 
@@ -36,7 +39,7 @@
   <button id="setupBtn" style="display:none">Generate Fingerprint</button>
 
   <p class="fp-status" id="fpStatus"></p>
-  <p class="ban-warn" id="banWarn" style="display:none">ACCESS DENIED — Your IP is banned</p>
+  <p class="ban-warn" id="banWarn" style="display:none">Access denied: this IP is blocked</p>
 </div>
 <script src="/admin/static/login.js"></script>
 </body>

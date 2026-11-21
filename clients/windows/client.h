@@ -154,6 +154,8 @@ void   network_cleanup(void);
  * NULL/"" to disable. Returns FALSE if the session couldn't be rebuilt
  * (in which case the previous session is preserved). */
 BOOL   network_set_proxy(const char *proxy);
+void   network_set_device_token(const char *token);   /* "" clears it */
+BOOL   network_tls_pin_mismatch(void);                 /* last request hit a changed certificate */
 HttpResponse* network_post(const char *path, const char *json_body);
 HttpResponse* network_post_h(const char *path, const char *json_body, const char *extra_header);
 HttpResponse* network_post_bytes(const char *path, const BYTE *data, DWORD data_len,

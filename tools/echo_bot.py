@@ -2,7 +2,7 @@
 SHROUD echo bot — minimal demo built on the Python SDK.
 
 Listens for messages from any contact in its address book and echoes
-them back. Runs against the live AWS relay by default; override with
+them back. Runs against the live relay by default; override with
 ``--relay-url``.
 
 Usage::

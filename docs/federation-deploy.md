@@ -3,8 +3,8 @@
 SHROUD's public relay is a single machine (`173.245.244.180:58443`), and
 federation is off by default (`SHROUD_FEDERATION` unset). Everything below
 applies only if you choose to link several independently-operated relays.
-The four-region AWS federation this document used to describe has been
-retired.
+SHROUD does not use any cloud provider; every relay is a machine its
+operator runs.
 
 ## Gossip behavior
 
@@ -68,7 +68,7 @@ is a two-step manual ceremony:
    ```pwsh
    python -m tools.federation_join `
        --my-endpoint https://<new-relay>:58443 `
-       --existing-relay-url https://100.30.51.8:58443 `
+       --existing-relay-url https://173.245.244.180:58443 `
        --keyfile ~/.config/shroud/operator.ed25519.json
    ```
 
@@ -119,17 +119,17 @@ The same env var works in production; default is `/opt/shroud/src/server/shroud.
 
 The operator key must be `chmod 600`. If you `sudo systemctl restart`
 the relay but the key file is owned by `root:root`, the relay
-(`User=ec2-user` in the service unit) can't read it and federation
+(`User=shroud` in the service unit) can't read it and federation
 broadcasts will silently no-op.
 
 **Check:**
 ```bash
-sudo -u ec2-user /opt/shroud/venv/bin/python -c "import json; print(json.load(open('/opt/shroud/data/operator_ed25519.json'))['pub_hex'][:16] + '...')"
+sudo -u shroud /opt/shroud/venv/bin/python -c "import json; print(json.load(open('/opt/shroud/data/operator_ed25519.json'))['pub_hex'][:16] + '...')"
 ```
 
 If this fails with PermissionError, fix:
 ```bash
-sudo chown ec2-user:ec2-user /opt/shroud/data/operator_ed25519.json
+sudo chown shroud:shroud /opt/shroud/data/operator_ed25519.json
 sudo chmod 600 /opt/shroud/data/operator_ed25519.json
 ```
 
@@ -137,6 +137,5 @@ sudo chmod 600 /opt/shroud/data/operator_ed25519.json
 
 - [`anon-routing-protocol.md`](anon-routing-protocol.md) — wire format
 - [`security-faq.md`](security-faq.md) — threat model
-- [`aws-nitro.md`](aws-nitro.md) — Nitro enclave deployment (alternative)
 - [`SESSION_NOTES.md`](../SESSION_NOTES.md) — current operator-only state
 - [`tools/federation_join.py`](../tools/federation_join.py) — peer onboarding helper

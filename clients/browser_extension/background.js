@@ -10,7 +10,7 @@
  * NEVER sent to a remote server — only the message ciphertext is.
  */
 
-import { seal, routingTag, pairId, epochFor, Hex } from '../web/anon_routing.js';
+import { seal, routingTag, pairId, epochFor, Hex } from './lib/anon_routing.js';
 
 const RELAY_URL_KEY = 'shroud_relay_url';
 const IDENTITY_KEY = 'shroud_identity';

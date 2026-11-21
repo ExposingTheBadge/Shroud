@@ -55,8 +55,7 @@ clients/linux/         Linux client (rewrite roadmap in docs/)
 clients/python_sdk/    High-level Python client SDK + reference impl
 server/                FastAPI relay server
 release/               Release signing tooling
-deploy/aws-nitro/      Terraform + Docker for Nitro Enclave deployment
-deploy/aws-simple/     Plain t3.micro deploy (no enclave)
+deploy/docker-compose/ Self-hosted relay + SFU with Docker Compose
 docs/                  Specs, runbooks, FAQs
 tests/                 Self-test runner + e2e integration tests
 tools/                 Demo bots / CLI utilities
@@ -75,7 +74,7 @@ pip install argon2-cffi liboqs-python
 # Run every module self-test in one shot
 python -m tests.run_all
 
-# Run the e2e tests against the live AWS relay
+# Run the e2e tests against the live relay (173.245.244.180)
 python -m tests.e2e_anon_protocol
 ```
 

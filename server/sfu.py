@@ -9,7 +9,7 @@ initiator) and the participant's ephemeral routing token; it never
 touches the SRTP payload.
 
 This module is a runnable FastAPI app — small enough to deploy on
-the same EC2 instance as the SHROUD relay, or to bring up separately
+the same machine as the SHROUD relay, or to bring up separately
 on a per-region basis.
 
 Topology

@@ -11,11 +11,10 @@
   </script>
   <link rel="stylesheet" href="/admin/static/admin.css">
 </head>
-<body>
+<body class="console">
 
 <!-- ─── Top bar ───────────────────────────────────────────────────── -->
 <div class="top">
-  <h1 onclick="goTab('overview')" title="Back to overview"><span data-icon="shield"></span>SHROUD</h1>
   <span class="meta-wrap">
     <span class="meta" id="metaUptime" title="How long this relay process has been running">uptime —</span>
     <span class="meta" id="metaTime">—</span>
@@ -42,17 +41,25 @@
 </div>
 
 <!-- ─── Tab bar ───────────────────────────────────────────────────── -->
-<div class="tabs">
+<nav class="tabs" aria-label="Sections">
+  <div class="brand" onclick="goTab('overview')" title="Back to overview">
+    <span class="mark"><span data-icon="shield"></span></span>
+    <span class="name">SHROUD<small>Relay console</small></span>
+  </div>
+  <div class="nav-label">Monitor</div>
   <div class="tab active" data-tab="overview" data-icon-tab="grid" tabindex="0" onclick="goTab('overview')">Overview</div>
+  <div class="nav-label">People</div>
   <div class="tab" data-tab="users" data-icon-tab="users" tabindex="0"    onclick="goTab('users')">Users <span class="badge" id="userBadge">—</span></div>
   <div class="tab" data-tab="devices" data-icon-tab="devices" tabindex="0"  onclick="goTab('devices')">Devices <span class="badge" id="deviceBadge">—</span></div>
+  <div class="nav-label">Relay</div>
   <div class="tab" data-tab="crypto" data-icon-tab="key" tabindex="0"   onclick="goTab('crypto')">Crypto</div>
   <div class="tab" data-tab="files" data-icon-tab="file" tabindex="0"    onclick="goTab('files')">Files <span class="badge" id="fileBadge">—</span></div>
   <div class="tab" data-tab="audit" data-icon-tab="list" tabindex="0"    onclick="goTab('audit')">Audit <span class="badge" id="auditBadge">—</span></div>
   <div class="tab" data-tab="activity" data-icon-tab="activity" tabindex="0" onclick="goTab('activity')">Activity</div>
   <div class="tab" data-tab="federation" data-icon-tab="globe" tabindex="0" onclick="goTab('federation')">Federation <span class="badge" id="fedBadge">—</span></div>
   <div class="tab" data-tab="bans" data-icon-tab="ban" tabindex="0"       onclick="goTab('bans')">Bans <span class="badge" id="banCountPill">—</span></div>
-</div>
+  <div class="nav-foot">End-to-end encrypted · the relay never sees message content, senders or recipients.</div>
+</nav>
 
 <!-- ─── Overview ──────────────────────────────────────────────────── -->
 <div class="section active" data-section="overview">
@@ -107,6 +114,28 @@
       </button>
     </div>
     <div style="padding:4px 16px 14px;color:var(--dim);font-size:11px">Every control action is recorded in the audit log. Destructive actions show an exact impact preview before they fire.</div>
+  </div>
+
+  <div class="panel" id="policyPanel">
+    <div class="panel-hdr">Relay Policy <span class="pill" id="policyTokenPill">—</span></div>
+    <div class="policy-grid">
+      <label class="policy-item">
+        <span class="n">Require device tokens</span>
+        <span class="d">Refuse requests that act for a device without its sign-in token. Turn on once most devices show a token; devices still on an old app must sign in again.</span>
+        <span class="toggle" id="policyTokens" role="switch" tabindex="0"><span class="dot"></span><span id="policyTokensLbl">—</span></span>
+      </label>
+      <label class="policy-item">
+        <span class="n">Undelivered mail kept for</span>
+        <span class="d">Queued messages nobody collects are deleted after this many days. 0 keeps them until they are fetched.</span>
+        <span class="policy-input"><input type="number" class="field" id="policyRetention" min="0" max="365" step="1"> days</span>
+      </label>
+      <label class="policy-item">
+        <span class="n">Largest file upload</span>
+        <span class="d">Per encrypted file. Uploads also stop when the relay disk drops below 512 MB free.</span>
+        <span class="policy-input"><input type="number" class="field" id="policyUpload" min="1" max="4096" step="1"> MB</span>
+      </label>
+    </div>
+    <div class="policy-actions"><button class="b primary" id="policySave">Save policy</button><span class="muted" id="policyStatus"></span></div>
   </div>
 </div>
 

@@ -129,8 +129,9 @@
           d.passwordlessAdmins + ' admin credential' +
           (d.passwordlessAdmins === 1 ? '' : 's') + ' ha' +
           (d.passwordlessAdmins === 1 ? 's' : 've') + ' no password.</span><br>' +
-          '<span style="font-size:11px">Sign in, then POST /api/v1/admin/set-password ' +
-          'to require one. Until then the fingerprint alone grants full access.</span>';
+          '<span style="font-size:11px">Sign in with the password you want to use ' +
+          '(12 or more characters) and it will be saved. Until then the fingerprint ' +
+          'alone grants full access.</span>';
       }
       if (d.needsSetup) {
         document.getElementById('fpLabel').textContent =
@@ -201,6 +202,44 @@
     this.disabled = false;
   });
 
+  // This fingerprint has no password yet, so the one just typed was not
+  // checked. Store it now; from then on sign-in needs both.
+  async function savePassword(fp, pw) {
+    const status = document.getElementById('fpStatus');
+    const err = document.getElementById('err');
+    if (pw.length < 12) {
+      err.textContent = 'Signed in, but this admin has no password yet. ' +
+        'Enter one of 12 or more characters and click Authenticate again to save it.';
+      err.style.display = 'block';
+      status.textContent = '';
+      return false;
+    }
+    status.textContent = 'Saving your password...';
+    const m = document.cookie.match(/(?:^|;\s*)shroud_csrf=([^;]+)/);
+    try {
+      const r = await fetch('/api/v1/admin/set-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json',
+                   'X-CSRF-Token': m ? decodeURIComponent(m[1]) : '' },
+        body: JSON.stringify({ fingerprint_id: fp, new_password: pw }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        err.textContent = 'Signed in, but the password was not saved: ' +
+          (d.detail || ('HTTP ' + r.status));
+        err.style.display = 'block';
+        status.textContent = '';
+        return false;
+      }
+    } catch (e) {
+      err.textContent = 'Signed in, but the password was not saved: connection error';
+      err.style.display = 'block';
+      status.textContent = '';
+      return false;
+    }
+    return true;
+  }
+
   document.getElementById('fpBtn').addEventListener('click', async function () {
     const fp = getFingerprintValue();
     const pw = pwInput.value;
@@ -216,10 +255,13 @@
       });
       const d = await r.json();
       if (d.ok) {
+        if (d.password_set === false) {
+          if (!(await savePassword(fp, pw))) { this.disabled = false; return; }
+        }
         document.getElementById('fpStatus').textContent = 'Signed in. Redirecting...';
         location = '/admin';
       } else {
-        document.getElementById('err').textContent = d.error || 'Authentication failed';
+        document.getElementById('err').textContent = d.error || d.detail || 'Authentication failed';
         document.getElementById('err').style.display = 'block';
         this.disabled = false;
         document.getElementById('fpStatus').textContent = '';

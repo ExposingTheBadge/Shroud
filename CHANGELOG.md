@@ -5,6 +5,40 @@
 **Upgrade every relay in the federation together.** Relay-to-relay
 calls are now signed, and relays running older code are refused.
 
+**2026-11 overhaul**
+
+- **Critical: device tokens.** A device id was the only credential, and
+  `/contacts/devices` gave any signed-in user anyone's device ids. With
+  one, a stranger could fetch and delete that device's queued mail,
+  replace its ratchet identity key, read its pickup tokens, answer its
+  friend requests and panic-wipe the whole account. Sign-in now returns
+  a `device_token` (the relay stores only its hash); clients send it as
+  `X-Device-Token`. Once a device has used its token the bare id is
+  refused. The admin console can require tokens for every device.
+- `/contacts/devices` lists only friends' devices and your own.
+- Messages pushed over the WebSocket are deleted on delivery (they were
+  marked delivered and kept), and arrive immediately instead of on a
+  2-second poll.
+- Expired anonymous messages are swept (their TTL was ignored), and mail
+  nobody collects is dropped after 30 days (configurable).
+- Envelopes, cover traffic and file uploads have size limits; uploads stop
+  when the relay disk is nearly full and no longer leave partial files.
+- Sign-in handshakes expire after 2 minutes instead of being evicted 100
+  at a time, which let anyone flush sign-ins in progress.
+- Browser clients could not send anonymously: CORS did not allow the
+  `X-Routing-Tag` header.
+- **Windows:** the relay's TLS certificate is pinned on first contact; any
+  certificate was accepted before.
+- **Relay web pages redesigned:** a landing page at `/`, a sidebar admin
+  console with a new palette and light theme, a Relay Policy panel, and a
+  matching sign-in page.
+- **Browser extension** loads again (it imported a file outside its folder,
+  its options page was not a module, and its icons were missing) and asks
+  for access only to the relays you use.
+- **No AWS:** the Nitro and plain-EC2 deploy recipes, the admin app's EC2
+  panel and the SSH presets for the retired relays are gone; the SSH tab
+  targets a host you configure.
+
 **Server / federation**
 
 - **Critical:** `/api/v1/federation/state-event` applied any event
@@ -34,7 +68,30 @@ calls are now signed, and relays running older code are refused.
   half-written transaction for the next request to commit.
 - Bans, backups and federation sync-now now require the CSRF token.
 
+- `/devices/{id}/pubkey` accepts POST as well as GET. Android always
+  POSTed and got 405, so it could never open a static-key message or an
+  image.
+- `/devices` registration no longer prints usernames, password lengths or
+  device ids to the relay's stdout log.
+
 **Crypto / clients**
+
+- **iOS and macOS:** a complete client in place of the placeholder screens
+  (sending did nothing, and nothing could be received). Encrypted sign-in,
+  contacts and requests, Double Ratchet with X3DH, anonymous routing, TLS
+  pinning, safety numbers, disappearing messages, and an XcodeGen project
+  that builds for both iPhone and Mac. See `clients/ios/README.md`.
+- Anonymous messages between Windows and Android/iOS were silently dropped:
+  Windows sealed `{"envelope": …}` and the phones sealed the envelope
+  itself, and each side discarded the other's. All clients now read both.
+- A message landed in whichever conversation its sender-chosen `name` said.
+  Windows, Android and iOS now file it under a contact only when the sending
+  device belongs to that account, and mark anything else "(unverified)".
+  Android also filed every incoming image under the image's file name.
+- Windows sends image and file notices over anonymous routing, like text,
+  and renders images that arrive that way. A very long file name no longer
+  overruns a fixed buffer.
+- Android takes its version from `VERSION` (it still said 2.4.5).
 
 - Double Ratchet (Python, Android, Windows): a replayed or forged
   message no longer breaks the session, because state is committed only

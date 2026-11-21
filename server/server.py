@@ -371,42 +371,65 @@ async def _stats_flusher():
         _stats_history_snapshot()
 
 
+def _sweep_expired_once() -> None:
+    """Purge expired and over-retention messages, link sessions, old
+    diagnostic reports and expired files. Runs every minute."""
+    n_msg = db.execute(
+        "DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
+    ).rowcount
+    # Anonymous disappearing messages were never swept: the TTL was
+    # stored and then ignored, so an unread one lived forever.
+    n_msg += db.execute(
+        "DELETE FROM anon_messages WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
+    ).rowcount
+    # Rows the old WebSocket marked delivered instead of deleting.
+    n_msg += db.execute("DELETE FROM messages WHERE delivered = 1").rowcount
+    # Mail nobody collects is metadata the relay should not hold onto.
+    # Operator-tunable; 0 disables the cap.
+    try:
+        keep_days = int(setting_get("undelivered_retention_days", "30") or 0)
+    except ValueError:
+        keep_days = 30
+    if keep_days > 0:
+        cutoff = f"-{keep_days} days"
+        n_msg += db.execute(
+            "DELETE FROM messages WHERE server_ts < datetime('now', ?)", (cutoff,)).rowcount
+        n_msg += db.execute(
+            "DELETE FROM anon_messages WHERE server_ts < datetime('now', ?)", (cutoff,)).rowcount
+    # Expired device-link sessions (also wipes any payload that never
+    # got picked up — payloads contain identity material).
+    db.execute("DELETE FROM device_link_sessions WHERE expires_at < datetime('now')")
+    # Diagnostic reports older than 7 days.
+    try:
+        db.execute("DELETE FROM diagnostic_reports WHERE server_ts < datetime('now', '-7 days')")
+    except sqlite3.OperationalError:
+        pass  # table not created yet on very old upgrades
+    file_rows = db.execute(
+        "SELECT id, storage_name FROM file_transfers "
+        "WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
+    ).fetchall()
+    for fid, name in file_rows:
+        path = os.path.join(FILE_DIR, name)
+        if os.path.isfile(path):
+            try: os.remove(path)
+            except OSError: pass
+        db.execute("DELETE FROM file_transfers WHERE id=?", (fid,))
+    db.commit()
+    if n_msg or file_rows:
+        print(f"[SHROUD] expiry sweep: removed {n_msg} msgs, {len(file_rows)} files")
+
+
 async def _expiry_sweeper():
     """Periodically purge expired messages and files."""
     while True:
         try:
-            # Disappearing messages
-            n_msg = db.execute("SELECT COUNT(*) FROM messages WHERE expires_at IS NOT NULL AND expires_at < datetime('now')").fetchone()[0]
-            if n_msg:
-                db.execute("DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at < datetime('now')")
-            # Expired device-link sessions (also wipes any payload that never
-            # got picked up — payloads contain identity material).
-            db.execute("DELETE FROM device_link_sessions WHERE expires_at < datetime('now')")
-            # Diagnostic reports older than 7 days. Operator should be
-            # polling and triaging well within that window.
-            try:
-                db.execute(
-                    "DELETE FROM diagnostic_reports "
-                    "WHERE server_ts < datetime('now', '-7 days')"
-                )
-            except Exception:
-                # Table may not exist yet on very-old upgrades.
-                pass
-            # Expired files
-            file_rows = db.execute(
-                "SELECT id, storage_name FROM file_transfers WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
-            ).fetchall()
-            for fid, name in file_rows:
-                path = os.path.join(FILE_DIR, name)
-                if os.path.isfile(path):
-                    try: os.remove(path)
-                    except OSError: pass
-                db.execute("DELETE FROM file_transfers WHERE id=?", (fid,))
-            db.commit()
-            if n_msg or file_rows:
-                print(f"[SHROUD] expiry sweep: removed {n_msg} msgs, {len(file_rows)} files")
+            _sweep_expired_once()
         except Exception as e:
-            print(f"[SHROUD] expiry sweep error: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(f"[SHROUD] expiry sweep error: {type(e).__name__}: {e}")
         await asyncio.sleep(60)
 
 
@@ -469,7 +492,14 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type", "Authorization", "X-Device-ID", "X-Recipient-ID", "X-File-Metadata"],
+    # Every custom header a browser client sends has to be listed, or the
+    # CORS preflight fails: the web client could not send-anon at all
+    # because X-Routing-Tag was missing here.
+    allow_headers=["Content-Type", "Authorization", "X-Device-ID", "X-Device-Token",
+                   "X-Recipient-ID", "X-File-Metadata", "X-Routing-Tag",
+                   "X-Expires-In", "X-Envelope-Version", "X-Content-Type"],
+    expose_headers=["X-File-Id", "X-File-Metadata", "X-File-Size", "Retry-After",
+                    "X-Maintenance"],
 )
 
 # ── Database ─────────────────────────────────────────────────────────
@@ -709,6 +739,9 @@ def init_db():
         "ALTER TABLE devices ADD COLUMN pickup_secret BLOB",
         "ALTER TABLE users ADD COLUMN srp_salt BLOB",
         "ALTER TABLE users ADD COLUMN srp_verifier BLOB",
+        # v2.7: per-device bearer token (see _require_device).
+        "ALTER TABLE devices ADD COLUMN token_hash BLOB",
+        "ALTER TABLE devices ADD COLUMN token_bound INTEGER DEFAULT 0",
     ):
         try: db.execute(ddl); db.commit()
         except: pass
@@ -836,6 +869,11 @@ def pad_bucket_for(plain_len: int) -> int:
             return b
     return ((plain_len + 16777215) // 16777216) * 16777216
 
+# v1 envelopes have no padding rule, so nothing bounded their size: one
+# request could queue gigabytes. Nothing legitimate exceeds the top bucket.
+MAX_ENVELOPE_BYTES = PAD_BUCKETS[-1]
+
+
 def is_valid_padded_size(n: int) -> bool:
     return n in PAD_BUCKETS or (n > PAD_BUCKETS[-1] and n % PAD_BUCKETS[-1] == 0)
 
@@ -890,6 +928,96 @@ try:
 except Exception:
     pass
 db = _PerThreadConn(DB_PATH)
+
+
+# ── Device tokens ────────────────────────────────────────────────────
+# A device id used to be the only thing a client presented, and device
+# ids are handed to friends by /contacts/devices so they can message
+# you. Holding someone's device id was therefore enough to read and
+# delete their queued mail, replace their ratchet identity key, answer
+# their friend requests, and panic-wipe their whole account.
+#
+# Every password-authenticated device registration now returns a random
+# `device_token`. The relay keeps only SHA-256(token). Clients send it
+# as `X-Device-Token` (or `?token=` on the WebSocket). The first request
+# that presents a correct token *binds* the device: from then on every
+# request for that device must carry it. Devices whose client has not
+# been updated keep working unbound, until the operator turns on
+# "require device tokens" in the admin console, after which unbound
+# devices must sign in again.
+import contextvars as _contextvars
+
+_DEVICE_TOKEN_CTX: "_contextvars.ContextVar[str]" = _contextvars.ContextVar(
+    "shroud_device_token", default="")
+
+
+def _token_digest(token: str) -> bytes:
+    return hashlib.sha256(token.encode("utf-8")).digest()
+
+
+def issue_device_token(device_id: str) -> str:
+    """Mint a fresh token for `device_id`, replacing any earlier one.
+    Only call this after the caller has proved the account password."""
+    token = secrets.token_urlsafe(32)
+    db.execute("UPDATE devices SET token_hash=? WHERE id=?",
+               (_token_digest(token), device_id))
+    db.commit()
+    return token
+
+
+def _require_device(device_id: str, *, missing_status: int = 404,
+                    missing_detail: str = "Device not found",
+                    token: Optional[str] = None):
+    """Return (device_id, user_id) once the caller has shown it may act
+    as `device_id`. Raises `missing_status` for an unknown device and
+    401 for a missing or wrong token on a device that needs one."""
+    if not device_id or not isinstance(device_id, str):
+        raise HTTPException(missing_status, missing_detail)
+    row = db.execute(
+        "SELECT id, user_id, token_hash, COALESCE(token_bound, 0) "
+        "FROM devices WHERE id=?", (device_id,)).fetchone()
+    if not row:
+        raise HTTPException(missing_status, missing_detail)
+    presented = token if token is not None else _DEVICE_TOKEN_CTX.get()
+    if presented:
+        if not row[2] or not hmac.compare_digest(_token_digest(presented), bytes(row[2])):
+            raise HTTPException(401, "Invalid device token")
+        if not row[3]:
+            db.execute("UPDATE devices SET token_bound=1 WHERE id=?", (device_id,))
+            db.commit()
+    elif row[3] or setting_get("require_device_tokens", "0") == "1":
+        raise HTTPException(401, "Device token required; sign in again")
+    return row[0], row[1]
+
+
+class DeviceTokenMiddleware:
+    """Pure-ASGI middleware that exposes the caller's device token to
+    _require_device through a context variable. Pure ASGI (rather than
+    BaseHTTPMiddleware) so it covers WebSockets too."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        token = ""
+        for k, v in scope.get("headers") or ():
+            if k == b"x-device-token":
+                token = v.decode("latin-1").strip()
+                break
+        if not token and scope["type"] == "websocket":
+            from urllib.parse import parse_qs
+            qs = parse_qs((scope.get("query_string") or b"").decode("latin-1"))
+            token = (qs.get("token") or [""])[0]
+        reset = _DEVICE_TOKEN_CTX.set(token[:256])
+        try:
+            return await self.app(scope, receive, send)
+        finally:
+            _DEVICE_TOKEN_CTX.reset(reset)
+
+
+app.add_middleware(DeviceTokenMiddleware)
 
 def _auth_pw_shape(password: str) -> str:
     """Non-reversible description of a submitted password, for the audit
@@ -949,7 +1077,10 @@ def decrypt_auth_payload(session_id: str, client_pub_hex: str, nonce_hex: str, c
     """Decrypt client auth payload using ECDH + AES-256-GCM."""
     from crypto.errors import errors, raise_http
     with ecdh_lock:
-        server_priv = ecdh_cache.pop(session_id, None)
+        entry = ecdh_cache.pop(session_id, None)
+    server_priv = None
+    if entry and time.time() - entry["ts"] <= HANDSHAKE_TTL_SEC:
+        server_priv = entry["priv"]
     if not server_priv:
         raise_http(errors.A001_BAD_SESSION)
     try:
@@ -1007,8 +1138,11 @@ class AuthRequest(BaseModel):
 # ── FIPS Self-Test ───────────────────────────────────────────────────
 # (now in lifespan handler above)
 
+_LANDING_PATH = os.path.join(ADMIN_DIR, "landing.html")
+
+
 @app.get("/")
-async def root():
+async def root(request: Request):
     """Pointer page for anything that reaches the relay root.
 
     A bare {"detail":"Not Found"} is what an operator saw when they put
@@ -1017,6 +1151,18 @@ async def root():
     beyond what /health and /api/v1/relay-stats already publish — no
     counts, no identifiers, nothing that could speak to Rules 1-3.
     """
+    # Browsers get a real page; API clients and scripts keep the JSON.
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept and os.path.isfile(_LANDING_PATH):
+        with open(_LANDING_PATH, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read(), headers={
+                "Content-Security-Policy": (
+                    "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                    "script-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                    "connect-src 'self'; object-src 'none'; base-uri 'none'; "
+                    "frame-ancestors 'none'"),
+                "Cache-Control": "no-cache",
+            })
     return {
         "service": "SHROUD relay",
         "version": SERVER_VERSION,
@@ -1101,7 +1247,7 @@ def _read_git_sha() -> str:
 def _read_onion_address() -> str:
     """Pull the local relay's Tor v3 .onion address if tor_setup.sh
     has been run. The tor data dir is mode 700 owned by the tor user,
-    so the relay (running as ec2-user / shroud) can't read the
+    so the relay (running as the shroud service user) can't read the
     hostname directly. tor_setup.sh installs a world-readable copy at
     /opt/shroud/data/onion_hostname.txt — we look there first.
     Empty string when Tor isn't deployed."""
@@ -1197,6 +1343,20 @@ ecdh_cache = {}
 ecdh_lock = threading.Lock()
 pq_cache = {}          # session_id -> {ec_priv, kem_sk, ts}
 pq_lock = threading.Lock()
+# Handshake sessions expire after HANDSHAKE_TTL_SEC. The caches used to
+# hold only 200 entries and evict the oldest half when full, so anyone
+# requesting key exchanges in a loop could knock every real sign-in in
+# progress out of the cache.
+HANDSHAKE_TTL_SEC = 120
+HANDSHAKE_CACHE_MAX = 20_000
+
+
+def _prune_handshakes(cache: dict, now: float) -> None:
+    for k in [k for k, v in cache.items() if now - v["ts"] > HANDSHAKE_TTL_SEC]:
+        del cache[k]
+    if len(cache) > HANDSHAKE_CACHE_MAX:
+        for k in sorted(cache, key=lambda k: cache[k]["ts"])[:len(cache) - HANDSHAKE_CACHE_MAX]:
+            del cache[k]
 
 @app.get("/api/v1/key-exchange")
 async def key_exchange():
@@ -1206,10 +1366,11 @@ async def key_exchange():
     pub_hex = serialize_public_key(pub).hex()
     pub_nums = pub.public_numbers()
     blob = struct.pack("<II", 0x334B4345, 48) + pub_nums.x.to_bytes(48,'big') + pub_nums.y.to_bytes(48,'big')
+    now = time.time()
     with ecdh_lock:
-        ecdh_cache[sid] = priv
-        if len(ecdh_cache) > 200:
-            for k in list(ecdh_cache.keys())[:100]: del ecdh_cache[k]
+        ecdh_cache[sid] = {"priv": priv, "ts": now}
+        if len(ecdh_cache) > 1000 or len(ecdh_cache) % 64 == 0:
+            _prune_handshakes(ecdh_cache, now)
     return {"session_id": sid, "server_public_key": pub_hex, "server_public_key_blob": blob.hex()}
 
 @app.get("/api/v1/key-exchange-v2")
@@ -1221,11 +1382,11 @@ async def key_exchange_v2():
         raise HTTPException(503, "PQ hybrid unavailable")
     state, blob = pq_hybrid.gen_server_keypair()
     sid = uuid.uuid4().hex
+    now = time.time()
     with pq_lock:
-        pq_cache[sid] = {**state, "ts": time.time()}
-        if len(pq_cache) > 200:
-            for k in sorted(pq_cache, key=lambda k: pq_cache[k]["ts"])[:100]:
-                del pq_cache[k]
+        pq_cache[sid] = {**state, "ts": now}
+        if len(pq_cache) > 1000 or len(pq_cache) % 64 == 0:
+            _prune_handshakes(pq_cache, now)
     sig_blob = server_sign_attestation(sid, blob) if SERVER_IDENTITY else b""
     return {
         "session_id": sid,
@@ -1254,8 +1415,9 @@ async def ratchet_publish(request: Request):
     otps = body.get("one_time_prekeys", [])
     if not device_id or not x25519_pub:
         raise HTTPException(400, "Missing required fields")
-    if not db.execute("SELECT id FROM devices WHERE id=?", (device_id,)).fetchone():
-        raise HTTPException(404, "Device not found")
+    # Replacing a device's ratchet identity key is the one thing an
+    # attacker needs to sit in the middle of every new session with it.
+    _require_device(device_id)
     try:
         pub_bytes = bytes.fromhex(x25519_pub)
         sig_bytes = bytes.fromhex(x25519_sig) if x25519_sig else b""
@@ -1528,11 +1690,12 @@ async def panic_wipe(request: Request):
     panic succeeded — useful under coercion."""
     body = await request.json()
     did = (body.get("device_id") or "").strip()
-    row = db.execute("SELECT user_id FROM devices WHERE id=?", (did,)).fetchone()
-    if not row:
+    try:
+        _did, uid = _require_device(did)
+    except HTTPException:
         return {"wiped": False}  # 200 either way
     try:
-        stats = _wipe_user_cascade(row[0], reason="panic")
+        stats = _wipe_user_cascade(uid, reason="panic")
         return {"wiped": True, **stats}
     except Exception:
         return {"wiped": False}
@@ -1559,8 +1722,7 @@ LINK_TTL_SEC = 300
 async def device_link_init(request: Request):
     body = await request.json()
     primary = body.get("device_id", "")
-    if not db.execute("SELECT id FROM devices WHERE id=?", (primary,)).fetchone():
-        raise HTTPException(401, "Invalid device")
+    _require_device(primary, missing_status=401, missing_detail="Invalid device")
     try:
         pub = bytes.fromhex(body.get("primary_pubkey_hex", ""))
         if len(pub) != 32: raise ValueError("must be 32 bytes")
@@ -1839,6 +2001,8 @@ async def encrypted_auth_v2(request: Request):
     sid = body.get("session_id", "")
     with pq_lock:
         state = pq_cache.pop(sid, None)
+    if state and time.time() - state.get("ts", 0) > HANDSHAKE_TTL_SEC:
+        state = None
     if not state:
         raise HTTPException(401, "Invalid or expired session")
     try:
@@ -1909,7 +2073,8 @@ async def encrypted_auth_v2(request: Request):
             raise HTTPException(400, f"Maximum {MAX_DEVICES_PER_USER} devices per user")
 
     device_id = _reuse_or_create_device(user[0], existing_did, device_name, platform, pub_key_bytes)
-    return {"device_id": device_id, "user_id": user[0], "registered": True, "suite": "PQ-HYBRID-v1"}
+    return {"device_id": device_id, "user_id": user[0], "registered": True, "suite": "PQ-HYBRID-v1",
+            "device_token": issue_device_token(device_id)}
 
 # ── Operator manifest ────────────────────────────────────────────────
 #
@@ -2060,15 +2225,16 @@ async def heartbeat(req: GetMessagesRequest):
     Also surfaces server-wide flags clients need to react to (currently
     just maintenance_mode), so the UI can flip into a disabled state
     without waiting for a send to 503."""
-    device = db.execute("SELECT id FROM devices WHERE id = ?", (req.device_id,)).fetchone()
-    if device:
-        db.execute("UPDATE devices SET last_seen = datetime('now') WHERE id = ?", (req.device_id,))
-        db.commit()
-        return {
-            "beat": "ok",
-            "maintenance_mode": setting_get("maintenance_mode", "0") == "1",
-        }
-    raise HTTPException(404, "Device not found")
+    _require_device(req.device_id)
+    db.execute("UPDATE devices SET last_seen = datetime('now') WHERE id = ?", (req.device_id,))
+    db.commit()
+    return {
+        "beat": "ok",
+        "maintenance_mode": setting_get("maintenance_mode", "0") == "1",
+        "registration_enabled": setting_get("registration_enabled", "1") == "1",
+        "server_time": int(time.time()),
+        "version": SERVER_VERSION,
+    }
 
 class ChangePasswordRequest(BaseModel):
     username: str
@@ -2235,7 +2401,8 @@ async def encrypted_auth(request: Request):
 
     _server_priv, server_pub = generate_keypair()
     return {"device_id": device_id, "server_public_key": serialize_public_key(server_pub).hex(),
-            "user_id": user[0], "registered": True}
+            "user_id": user[0], "registered": True,
+            "device_token": issue_device_token(device_id)}
 
 # ── User Registration (legacy) ──────────────────────────────────────
 @app.post("/api/v1/register")
@@ -2271,7 +2438,6 @@ async def register_device(req: RegisterDeviceRequest):
     """Register a new device. Returns device ID, server's public key for ECDH."""
     # Auth user
     norm = norm_user(req.username)
-    print(f"[DEVICE REG] username={norm} platform={req.platform} pw_len={len(req.password)} hwid={req.hwid[:16] if req.hwid else 'none'}")
     # v2.6.0: ban enforcement BEFORE password check so a banned user can't
     # even probe whether their old password is still valid. The ban's
     # `reason` field is surfaced to the user when the admin sets one;
@@ -2282,13 +2448,11 @@ async def register_device(req: RegisterDeviceRequest):
         (norm,)
     ).fetchone()
     if not user:
-        print(f"[DEVICE REG] FAIL: username '{norm}' not found")
         _raise_bad_credentials(norm, "no such user")
 
     # Verify password
     derived, _ = derive_key(req.password, user[2])
     if not hmac.compare_digest(derived.hex(), user[1]):
-        print(f"[DEVICE REG] FAIL: password mismatch for '{req.username}' (pw_len={len(req.password)})")
         _raise_bad_credentials(norm, "password mismatch", _auth_pw_shape(req.password))
 
     # Check platform
@@ -2327,8 +2491,7 @@ async def register_device(req: RegisterDeviceRequest):
             pub_key_bytes = bytes.fromhex(req.public_key)
             deserialize_public_key(pub_key_bytes)
         except Exception as e:                               # noqa: BLE001
-            print(f"[DEVICE REG] FAIL: key format error on re-register "
-                  f"for '{req.username}': {e}")
+            print(f"[DEVICE REG] FAIL: key format error on re-register: {type(e).__name__}")
             raise HTTPException(400, "Invalid public key format")
 
         db.execute(
@@ -2342,7 +2505,7 @@ async def register_device(req: RegisterDeviceRequest):
             pub_key_bytes = bytes.fromhex(req.public_key)
             deserialize_public_key(pub_key_bytes)
         except Exception as e:
-            print(f"[DEVICE REG] FAIL: key format error for '{req.username}': {e}")
+            print(f"[DEVICE REG] FAIL: key format error: {type(e).__name__}")
             raise HTTPException(400, "Invalid public key format")
 
         db.execute(
@@ -2358,7 +2521,6 @@ async def register_device(req: RegisterDeviceRequest):
             "hwid":           req.hwid or "",
         })
     db.commit()
-    print(f"[DEVICE REG] SUCCESS: {req.username} device={device_id} platform={req.platform}")
 
     # Generate server-side ephemeral keypair for this device's ECDH
     _server_priv, server_pub = generate_keypair()
@@ -2368,7 +2530,8 @@ async def register_device(req: RegisterDeviceRequest):
         "device_id": device_id,
         "server_public_key": server_pub_hex,
         "user_id": user[0],
-        "registered": True
+        "registered": True,
+        "device_token": issue_device_token(device_id),
     }
 
 # ── Maintenance-mode gate ─────────────────────────────────────────
@@ -2410,9 +2573,8 @@ async def send_message(request: Request):
     expires_in = request.headers.get("X-Expires-In", "")
     env_ver_hdr = request.headers.get("X-Envelope-Version", "1")
 
-    sender = db.execute("SELECT id FROM devices WHERE id=?", (sender_id,)).fetchone()
-    recipient = db.execute("SELECT id FROM devices WHERE id=?", (recipient_id,)).fetchone()
-    if not sender or not recipient:
+    _require_device(sender_id)
+    if not db.execute("SELECT id FROM devices WHERE id=?", (recipient_id,)).fetchone():
         raise HTTPException(404, "Device not found")
 
     try:
@@ -2454,6 +2616,7 @@ async def send_message(request: Request):
     )
     db.execute("UPDATE devices SET last_seen=datetime('now') WHERE id=?", (sender_id,))
     db.commit()
+    _notify_device(recipient_id)
     # Legacy unsealed path leaks the sender_device_id to the server, which
     # violates Rule 1 of the SHROUD threat model. Newer clients should call
     # /api/v1/messages/send-sealed instead. We attach deprecation headers
@@ -2503,20 +2666,46 @@ def _ensure_pickup_secret(device_id: str) -> bytes:
     secret = fips_random(32)
     db.execute("UPDATE devices SET pickup_secret=? WHERE id=?", (secret, device_id))
     db.commit()
+    if _PICKUP_CACHE.get("epoch") is not None:
+        e = _PICKUP_CACHE["epoch"]
+        for x in (e, e - 1, e + 1):
+            _PICKUP_CACHE["map"][_device_pickup_token(secret, x)] = device_id
     return secret
 
 def _device_for_token(token: str) -> str | None:
     """Look up which device a given pickup token currently belongs to.
     Checks the current, previous, and next epoch to handle clock skew."""
-    if not token: return None
+    if not token or not isinstance(token, str):
+        return None
     epoch = _epoch_hour()
-    cands = [epoch, epoch - 1, epoch + 1]
+    # This used to compute 3 HMACs for every device on every poll. Build
+    # the token -> device map once per epoch and patch it as secrets are
+    # created; a miss falls back to one rebuild (new device, other worker).
+    cache = _PICKUP_CACHE
+    if cache.get("epoch") != epoch:
+        _rebuild_pickup_cache(epoch)
+    did = cache["map"].get(token)
+    if did is None and time.time() - cache.get("built", 0) > 5:
+        _rebuild_pickup_cache(epoch)
+        did = cache["map"].get(token)
+    if did is None:
+        return None
+    # The device may have been deleted since the map was built.
+    if not db.execute("SELECT 1 FROM devices WHERE id=?", (did,)).fetchone():
+        return None
+    return did
+
+
+_PICKUP_CACHE: dict = {"epoch": None, "map": {}, "built": 0.0}
+
+
+def _rebuild_pickup_cache(epoch: int) -> None:
+    m: dict[str, str] = {}
     rows = db.execute("SELECT id, pickup_secret FROM devices WHERE pickup_secret IS NOT NULL").fetchall()
     for did, secret in rows:
-        for e in cands:
-            if _device_pickup_token(secret, e) == token:
-                return did
-    return None
+        for e in (epoch, epoch - 1, epoch + 1):
+            m[_device_pickup_token(secret, e)] = did
+    _PICKUP_CACHE.update(epoch=epoch, map=m, built=time.time())
 
 
 @app.get("/api/v1/devices/{device_id}/pickup-token")
@@ -2525,8 +2714,9 @@ async def get_pickup_token(device_id: str):
     epoch's (so senders mid-rotation hit the right mailbox). The token is
     derived from a server-stored secret per device; observers without
     that secret cannot link tokens to a device."""
-    row = db.execute("SELECT id FROM devices WHERE id=?", (device_id,)).fetchone()
-    if not row: raise HTTPException(404, "Device not found")
+    # Anyone could read any device's tokens here, which made the rotating
+    # token exactly as linkable as the device id it was meant to hide.
+    _require_device(device_id)
     secret = _ensure_pickup_secret(device_id)
     e = _epoch_hour()
     return {
@@ -2553,7 +2743,7 @@ async def fetch_by_token(request: Request):
     if not device_id:
         raise HTTPException(401, "Invalid or expired pickup token")
     rebuilt = GetMessagesRequest(device_id=device_id, since=body.get("since"))
-    return await fetch_messages(rebuilt)
+    return await fetch_messages(rebuilt, _from_pickup_token=True)
 
 
 @app.post("/api/v1/messages/cover")
@@ -2564,6 +2754,8 @@ async def cover_traffic(request: Request):
     dropped — it is never written to disk or queued for delivery."""
     global COVER_COUNT, COVER_BYTES
     body = await request.body()
+    if len(body) > MAX_ENVELOPE_BYTES:
+        raise HTTPException(413, "Envelope too large")
     COVER_COUNT += 1
     COVER_BYTES += len(body)
     return {"ok": True}
@@ -2593,6 +2785,8 @@ async def send_sealed_message(request: Request):
     sealed_blob = await request.body()
     if not sealed_blob:
         raise HTTPException(400, "Empty payload")
+    if len(sealed_blob) > MAX_ENVELOPE_BYTES:
+        raise HTTPException(413, "Envelope too large")
 
     padded_size = len(sealed_blob)
     if env_ver >= 2 and not is_valid_padded_size(padded_size):
@@ -2613,6 +2807,7 @@ async def send_sealed_message(request: Request):
         (msg_id, recipient_id, recipient_id, sealed_blob.hex(), env_ver, padded_size, expires_at),
     )
     db.commit()
+    _notify_device(recipient_id)
     return {"message_id": msg_id, "sealed": True, "v": env_ver, "expires_at": expires_at}
 
 
@@ -2680,6 +2875,8 @@ async def send_anon_message(request: Request):
     sealed = await request.body()
     if not sealed:
         raise HTTPException(400, "Empty sealed envelope")
+    if len(sealed) > MAX_ENVELOPE_BYTES:
+        raise HTTPException(413, "Envelope too large")
 
     env_ver = _envelope_version(request)
     if env_ver >= 2 and not is_valid_padded_size(len(sealed)):
@@ -3727,14 +3924,13 @@ async def fetch_diagnostic_reports(req: FetchReportsRequest):
 
 # ── Fetch Messages ───────────────────────────────────────────────────
 @app.post("/api/v1/messages/fetch")
-async def fetch_messages(req: GetMessagesRequest):
+async def fetch_messages(req: GetMessagesRequest, _from_pickup_token: bool = False):
     """Fetch undelivered messages for a device.
 
     Sealed messages (sealed=1) carry their envelope as a raw hex blob rather
     than parsed JSON — the sender's identity lives inside that blob."""
-    device = db.execute("SELECT id FROM devices WHERE id = ?", (req.device_id,)).fetchone()
-    if not device:
-        raise HTTPException(404, "Device not found")
+    if not _from_pickup_token:
+        _require_device(req.device_id)
 
     query = ("SELECT id, sender_device_id, envelope, server_ts, sealed, envelope_version, expires_at "
              "FROM messages WHERE recipient_device_id = ? AND delivered = 0")
@@ -3757,31 +3953,15 @@ async def fetch_messages(req: GetMessagesRequest):
     db.execute("UPDATE devices SET last_seen = datetime('now') WHERE id = ?", (req.device_id,))
     db.commit()
 
-    out = []
-    for m in messages:
-        sealed = bool(m[4] or 0)
-        ver = m[5] or 1
-        item = {"id": m[0], "server_ts": m[3], "v": ver, "sealed": sealed, "expires_at": m[6]}
-        if sealed:
-            item["sealed_envelope"] = m[2]
-            item["sender_device_id"] = None
-        else:
-            item["sender_device_id"] = m[1]
-            try:
-                item["envelope"] = json.loads(m[2])
-            except Exception:
-                item["envelope"] = m[2]
-        out.append(item)
-    return {"messages": out}
+    return {"messages": [_queued_message_json(m) for m in messages]}
 
 # ── Contact Discovery ────────────────────────────────────────────────
 class ContactSearchRequest(BaseModel):
     username: str; password: str; query: str = Field(min_length=2, max_length=64)
 
 def auth_by_device(device_id: str):
-    dev = db.execute("SELECT user_id FROM devices WHERE id=?", (device_id,)).fetchone()
-    if not dev: raise HTTPException(401, "Invalid device")
-    user = db.execute("SELECT id, username FROM users WHERE id=?", (dev[0],)).fetchone()
+    _did, uid = _require_device(device_id, missing_status=401, missing_detail="Invalid device")
+    user = db.execute("SELECT id, username FROM users WHERE id=?", (uid,)).fetchone()
     if not user: raise HTTPException(401, "Invalid user")
     return user
 
@@ -3813,9 +3993,13 @@ class ContactDevRequest(BaseModel):
 
 @app.post("/api/v1/contacts/devices")
 async def get_contact_devices(req: ContactDevRequest):
-    auth_by_device(req.device_id)
+    me = auth_by_device(req.device_id)
     contact = db.execute("SELECT id FROM users WHERE username=?", (norm_user(req.contact_username),)).fetchone()
-    if not contact: raise HTTPException(404, "User not found")
+    # Device ids are what a stranger needs to target an account, so only
+    # friends (and the account itself) may list them. Not-a-friend and
+    # no-such-user give the same answer so this can't enumerate users.
+    if not contact or (contact[0] != me[0] and not _is_friends(me[0], contact[0])):
+        raise HTTPException(404, "User not found")
     # Most recently active device first. The Windows client sends to
     # devices[0]; without an ORDER BY that was whichever row SQLite
     # returned first -- usually the oldest -- so after a reinstall or a
@@ -3967,6 +4151,8 @@ async def send_group_message(request: Request):
         db.execute("INSERT INTO messages (id, sender_device_id, recipient_device_id, envelope) VALUES (?,?,?,?)",
                    (uuid.uuid4().hex, sender, m[0], env))
     db.commit()
+    for m in members:
+        _notify_device(m[0])
     return {"delivered_to": len(members)}
 
 @app.post("/api/v1/groups/add")
@@ -4072,6 +4258,34 @@ async def group_invites_respond(request: Request):
     return {"status": new_status}
 
 # ── WebSocket (Real-time Push) ───────────────────────────────────────
+# device_id -> events of its open sockets. A send sets them so the
+# message goes out at once instead of on the next 2-second DB poll.
+_WS_WAITERS: dict[str, set] = {}
+WS_POLL_FALLBACK_SEC = 10.0
+
+
+def _notify_device(device_id: str) -> None:
+    for ev in tuple(_WS_WAITERS.get(device_id, ())):
+        ev.set()
+
+
+def _queued_message_json(m) -> dict:
+    """One `messages` row in the shape /fetch and the WebSocket return."""
+    sealed = bool(m[4] or 0)
+    item = {"id": m[0], "server_ts": m[3], "v": m[5] or 1, "sealed": sealed,
+            "expires_at": m[6]}
+    if sealed:
+        item["sealed_envelope"] = m[2]
+        item["sender_device_id"] = None
+    else:
+        item["sender_device_id"] = m[1]
+        try:
+            item["envelope"] = json.loads(m[2])
+        except Exception:
+            item["envelope"] = m[2]
+    return item
+
+
 @app.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
     """Real-time message delivery via WebSocket."""
@@ -4079,17 +4293,21 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
     if device_id == "admin":
         await _admin_ws_handler(websocket)
         return
-    device = db.execute("SELECT id FROM devices WHERE id = ?", (device_id,)).fetchone()
-    if not device:
-        await websocket.close(code=4004)
+    try:
+        _require_device(device_id)
+    except HTTPException as he:
+        await websocket.close(code=4004 if he.status_code == 404 else 4001)
         return
 
     await websocket.accept()
     db.execute("UPDATE devices SET last_seen = datetime('now') WHERE id = ?", (device_id,))
     db.commit()
 
+    wake = asyncio.Event()
+    _WS_WAITERS.setdefault(device_id, set()).add(wake)
     try:
         while True:
+            wake.clear()
             messages = db.execute(
                 "SELECT id, sender_device_id, envelope, server_ts, sealed, envelope_version, expires_at "
                 "FROM messages WHERE recipient_device_id = ? AND delivered = 0 "
@@ -4098,26 +4316,41 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
             ).fetchall()
 
             for msg in messages:
-                sealed = bool(msg[4] or 0)
-                ver = msg[5] or 1
-                payload = {"id": msg[0], "server_ts": msg[3], "v": ver, "sealed": sealed, "expires_at": msg[6]}
-                if sealed:
-                    payload["sealed_envelope"] = msg[2]
-                    payload["sender_device_id"] = None
-                else:
-                    payload["sender_device_id"] = msg[1]
-                    try:
-                        payload["envelope"] = json.loads(msg[2])
-                    except Exception:
-                        payload["envelope"] = msg[2]
-                await websocket.send_json(payload)
-                db.execute("UPDATE messages SET delivered = 1 WHERE id = ?", (msg[0],))
-            db.commit()
-            await asyncio.sleep(2)
-    except WebSocketDisconnect:
+                await websocket.send_json(_queued_message_json(msg))
+                # Rule 2: destroyed on delivery, exactly like /messages/fetch.
+                # This used to set delivered=1 and keep the row (sender,
+                # recipient and timestamp included) forever.
+                db.execute("DELETE FROM messages WHERE id = ?", (msg[0],))
+            if messages:
+                db.commit()
+            # Sends wake us immediately; the timeout is a fallback for rows
+            # written by another worker or a federation peer.
+            try:
+                await asyncio.wait_for(wake.wait(), timeout=WS_POLL_FALLBACK_SEC)
+            except asyncio.TimeoutError:
+                pass
+    except (WebSocketDisconnect, RuntimeError):
         pass
+    finally:
+        waiters = _WS_WAITERS.get(device_id)
+        if waiters is not None:
+            waiters.discard(wake)
+            if not waiters:
+                _WS_WAITERS.pop(device_id, None)
+
 
 # ── Encrypted File Transfer ─────────────────────────────────────────
+UPLOAD_MIN_FREE_BYTES = 512 * 1024 * 1024   # keep 512 MB free for the DB
+
+
+def _max_upload_bytes() -> int:
+    """Per-file upload cap in bytes (admin setting `max_upload_mb`)."""
+    try:
+        mb = int(setting_get("max_upload_mb", "100") or 100)
+    except ValueError:
+        mb = 100
+    return max(1, min(mb, 4096)) * 1024 * 1024
+
 @app.post("/api/v1/files/upload")
 async def upload_file(request: Request):
     """Streaming upload — server stores encrypted blob, never sees plaintext."""
@@ -4131,8 +4364,7 @@ async def upload_file(request: Request):
         raise HTTPException(400, "Missing device or recipient ID")
 
     # Validate devices exist
-    if not db.execute("SELECT id FROM devices WHERE id=?", (sender_id,)).fetchone():
-        raise HTTPException(404, "Sender device not found")
+    _require_device(sender_id, missing_detail="Sender device not found")
     if not db.execute("SELECT id FROM devices WHERE id=?", (recipient_id,)).fetchone():
         raise HTTPException(400, "Recipient device not found — sending a file notification message first registers the device")
 
@@ -4140,11 +4372,36 @@ async def upload_file(request: Request):
     storage_name = f"{file_id}.enc"
     storage_path = os.path.join(FILE_DIR, storage_name)
 
+    max_bytes = _max_upload_bytes()
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > max_bytes:
+        raise HTTPException(413, f"File too large (limit {max_bytes // (1024 * 1024)} MB)")
+    try:
+        free = shutil.disk_usage(FILE_DIR).free
+    except OSError:
+        free = None
+    if free is not None and free < UPLOAD_MIN_FREE_BYTES:
+        raise HTTPException(507, "Relay storage is full; try again later")
+
     total_size = 0
-    with open(storage_path, "wb") as f:
-        async for chunk in request.stream():
-            f.write(chunk)
-            total_size += len(chunk)
+    try:
+        with open(storage_path, "wb") as f:
+            async for chunk in request.stream():
+                total_size += len(chunk)
+                if total_size > max_bytes:
+                    raise HTTPException(413, f"File too large (limit {max_bytes // (1024 * 1024)} MB)")
+                f.write(chunk)
+    except BaseException:
+        # A rejected or dropped upload used to leave its partial blob on
+        # disk with no row pointing at it, so nothing ever removed it.
+        try:
+            os.remove(storage_path)
+        except OSError:
+            pass
+        raise
+    if total_size == 0:
+        os.remove(storage_path)
+        raise HTTPException(400, "Empty upload")
 
     # Parse metadata to get original size
     try:
@@ -4178,6 +4435,7 @@ async def download_file(file_id: str, device_id: str = Header(default="", alias=
     # a file id could download the blob. Every client sends X-Device-ID.
     if not device_id or device_id not in (row[1], row[2]):
         raise HTTPException(403, "Not authorized for this file")
+    _require_device(device_id, missing_status=403, missing_detail="Not authorized for this file")
 
     storage_path = os.path.join(FILE_DIR, row[0])
     if not os.path.isfile(storage_path):
@@ -4212,6 +4470,7 @@ async def delete_file(file_id: str, device_id: str = Header(default="", alias="X
         raise HTTPException(404, "File not found")
     if device_id not in (row[1], row[2]):
         raise HTTPException(403, "Only sender or recipient may delete")
+    _require_device(device_id, missing_status=403, missing_detail="Only sender or recipient may delete")
     storage_path = os.path.join(FILE_DIR, row[0])
     if os.path.isfile(storage_path):
         try:
@@ -4222,11 +4481,14 @@ async def delete_file(file_id: str, device_id: str = Header(default="", alias="X
     db.commit()
     return {"deleted": True, "file_id": file_id}
 
-@app.get("/api/v1/devices/{device_id}/pubkey")
+@app.api_route("/api/v1/devices/{device_id}/pubkey", methods=["GET", "POST"])
 async def device_pubkey(device_id: str):
     """Return a device's public key blob (hex). Public information used by
     the recipient to derive the symmetric key matching the sender's, so
-    image/file payloads can be decrypted cross-device."""
+    image/file payloads can be decrypted cross-device.
+
+    POST is accepted too: the Android app has always POSTed here, got 405,
+    and so could never open a static-key message or an image."""
     row = db.execute("SELECT public_key FROM devices WHERE id=?", (device_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Device not found")
@@ -4244,6 +4506,7 @@ async def file_info(file_id: str, device_id: str = Header(default="", alias="X-D
         raise HTTPException(404, "File not found")
     if not device_id or device_id not in (row[1], row[2]):
         raise HTTPException(403, "Not authorized for this file")
+    _require_device(device_id, missing_status=403, missing_detail="Not authorized for this file")
     return {
         "file_id": row[0],
         "sender_device_id": row[1],
@@ -4571,7 +4834,7 @@ def audit_log(ip: str, event: str, detail: str = ""):
 
     A full disk or a bad mode on audit.log used to swallow every entry
     with a bare `except: pass`, so destructive operator actions (bans,
-    backup restores, EC2 stop/start) would leave no trace at all and
+    backup restores) would leave no trace at all and
     nothing would say so. Now the first failure is reported on stderr;
     subsequent ones are suppressed so a broken log can't flood output.
     """
@@ -4617,6 +4880,12 @@ def require_admin(sid: str = Cookie(None, alias="shroud_sid")):
     if not session:
         raise HTTPException(401, "Not authenticated")
     return session
+
+
+def _admin_page_session(sid: str = Cookie(None, alias="shroud_sid")):
+    """require_admin for the HTML pages. A browser that isn't signed in
+    should land on the login form, not a bare JSON 401."""
+    return get_admin_session(sid)
 
 
 def _admin_session_ip(session) -> str:
@@ -4791,7 +5060,11 @@ async def admin_fingerprint_login(request: Request):
     db.execute("INSERT INTO admin_sessions (id, ip, user_agent) VALUES (?,?,?)", (sid, ar_enc(ip), ar_enc(ua)))
     db.commit()
 
-    resp = JSONResponse({"ok": True, "session_id": sid})
+    # password_set=false tells login.js to store the password just typed,
+    # so a passwordless fingerprint gets one on its next sign-in instead
+    # of the operator having to hand-craft a POST to set-password.
+    resp = JSONResponse({"ok": True, "session_id": sid,
+                         "password_set": bool(row[1])})
     resp.set_cookie(key="shroud_sid", value=sid, httponly=True, samesite="lax", max_age=SESSION_TIMEOUT_SEC, path="/")
     # Double-submit CSRF: the cookie MUST be readable by JS so admin.js
     # can echo it as X-CSRF-Token on writes. Same-origin policy keeps
@@ -5983,7 +6256,9 @@ async def admin_stats_legacy(session=Depends(require_admin)):
 
 # ─── Per-user drill-down ────────────────────────────────────────────
 @app.get("/admin/user/{user_id}")
-async def admin_user_page(user_id: str, session=Depends(require_admin)):
+async def admin_user_page(user_id: str, session=Depends(_admin_page_session)):
+    if not session:
+        return RedirectResponse("/admin/login", status_code=303)
     return _serve_admin_html("user.html")
 
 
@@ -6080,7 +6355,9 @@ async def admin_user_details(user_id: str, session=Depends(require_admin)):
 
 # ─── Per-device drill-down ──────────────────────────────────────────
 @app.get("/admin/device/{device_id}")
-async def admin_device_page(device_id: str, session=Depends(require_admin)):
+async def admin_device_page(device_id: str, session=Depends(_admin_page_session)):
+    if not session:
+        return RedirectResponse("/admin/login", status_code=303)
     return _serve_admin_html("device.html")
 
 
@@ -6404,6 +6681,57 @@ async def admin_toggle_maintenance(request: Request, session=Depends(require_adm
     audit_admin(session[0][:8], "toggle_maintenance", "", f"enabled={enabled}")
     return {"maintenance_mode": enabled}
 
+# ── Relay policy (v2.7) ───────────────────────────────────────────
+_POLICY_INTS = {
+    # key: (default, min, max)
+    "undelivered_retention_days": (30, 0, 365),
+    "max_upload_mb": (100, 1, 4096),
+}
+
+
+def _policy_snapshot() -> dict:
+    bound, total = db.execute(
+        "SELECT COALESCE(SUM(COALESCE(token_bound,0)),0), COUNT(*) FROM devices").fetchone()
+    out = {"require_device_tokens": setting_get("require_device_tokens", "0") == "1",
+           "devices_with_token": int(bound or 0), "devices_total": int(total or 0)}
+    for k, (d, _lo, _hi) in _POLICY_INTS.items():
+        try:
+            out[k] = int(setting_get(k, str(d)) or d)
+        except ValueError:
+            out[k] = d
+    return out
+
+
+@app.get("/api/v1/admin/control/policy")
+async def admin_get_policy(session=Depends(require_admin)):
+    """Relay policy knobs plus how many devices already use a token, so
+    the operator can tell when it is safe to require one."""
+    return _policy_snapshot()
+
+
+@app.post("/api/v1/admin/control/policy")
+async def admin_set_policy(request: Request, session=Depends(require_admin_csrf)):
+    body = await _json_object(request)
+    changed = []
+    if "require_device_tokens" in body:
+        v = "1" if bool(body["require_device_tokens"]) else "0"
+        setting_set("require_device_tokens", v)
+        changed.append(f"require_device_tokens={v}")
+    for k, (_d, lo, hi) in _POLICY_INTS.items():
+        if k in body:
+            try:
+                v = int(body[k])
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{k} must be a whole number")
+            if not lo <= v <= hi:
+                raise HTTPException(400, f"{k} must be between {lo} and {hi}")
+            setting_set(k, str(v))
+            changed.append(f"{k}={v}")
+    if changed:
+        audit_admin(session[0][:8], "set_policy", "", " ".join(changed))
+    return _policy_snapshot()
+
+
 @app.post("/api/v1/admin/control/onion-only")
 async def admin_toggle_onion_only(request: Request, session=Depends(require_admin_csrf)):
     """Reject any connection not arriving over a Tor onion service.
@@ -6470,7 +6798,9 @@ async def admin_kill_session(target_sid: str, session=Depends(require_admin_csrf
 
 # ── Admin Dashboard HTML ───────────────────────────────────────────
 @app.get("/admin")
-async def admin_dashboard(session=Depends(require_admin)):
+async def admin_dashboard(session=Depends(_admin_page_session)):
+    if not session:
+        return RedirectResponse("/admin/login", status_code=303)
     return _serve_admin_html("index.html")
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ SHROUD federated multi-relay protocol.
 Why federate
 ------------
 The Rule 0 commitment is that the project never goes dark. A single
-relay (even an AWS Nitro Enclave one) is a single point of compulsion:
+relay (even one in a hardware enclave) is a single point of compulsion:
 seize the hosting account, kill the network. Federation distributes
 the network across multiple independent operators so that:
 

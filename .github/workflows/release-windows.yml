@@ -79,6 +79,13 @@ jobs:
           $cmake = $cmake -replace 'project\(SHROUD VERSION \d+\.\d+\.\d+', "project(SHROUD VERSION $ver"
           Set-Content clients/windows/CMakeLists.txt -Value $cmake -NoNewline
 
+          # ...and the Apple project (Android reads VERSION directly).
+          $code = [int]$major * 10000 + [int]$minor * 100 + [int]$patch
+          $yml = Get-Content clients/ios/project.yml -Raw
+          $yml = $yml -replace 'MARKETING_VERSION: "\d+\.\d+\.\d+"', "MARKETING_VERSION: `"$ver`""
+          $yml = $yml -replace 'CURRENT_PROJECT_VERSION: "\d+"', "CURRENT_PROJECT_VERSION: `"$code`""
+          Set-Content clients/ios/project.yml -Value $yml -NoNewline
+
           "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "tag=v$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
@@ -225,7 +232,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add VERSION clients/windows/CMakeLists.txt
+          git add VERSION clients/windows/CMakeLists.txt clients/ios/project.yml
           git commit -m "v${{ steps.bump.outputs.version }} - signed Windows release"
           git tag "${{ steps.bump.outputs.tag }}"
           git push origin HEAD:${{ github.ref_name }}

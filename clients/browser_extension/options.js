@@ -6,7 +6,7 @@
  * chrome.storage.local and never leaves the browser profile.
  */
 
-import { Hex } from '../web/anon_routing.js';
+import { Hex } from './lib/anon_routing.js';
 
 const RELAY_URL_KEY = 'shroud_relay_url';
 const IDENTITY_KEY = 'shroud_identity';
@@ -71,6 +71,24 @@ saveButton.addEventListener('click', async () => {
         }
     } catch (e) {
         setStatus(`bad contacts JSON: ${e.message}`, 'err');
+        return;
+    }
+    let origin;
+    try {
+        const u = new URL(relay);
+        if (u.protocol !== 'https:' && !['127.0.0.1', 'localhost'].includes(u.hostname)) {
+            throw new Error('use https://');
+        }
+        origin = `${u.protocol}//${u.host}/*`;
+    } catch (e) {
+        setStatus(`bad relay URL: ${e.message}`, 'err');
+        return;
+    }
+    // Only the default relay is granted at install; ask for any other.
+    const granted = await chrome.permissions.contains({ origins: [origin] })
+        || await chrome.permissions.request({ origins: [origin] });
+    if (!granted) {
+        setStatus('the browser did not allow reaching that relay', 'err');
         return;
     }
     await chrome.storage.local.set({

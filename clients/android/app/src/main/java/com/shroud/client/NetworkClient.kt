@@ -67,9 +67,16 @@ object NetworkClient {
         }
     }
 
+    /** Secret the relay issued to this device at sign-in. Sent on every
+     *  request so that knowing our device id alone (friends learn it)
+     *  is not enough to act as this device. Empty until signed in. */
+    @Volatile var deviceToken: String = ""
+
     /** Open a connection with the TLS policy above applied. */
     fun open(url: URL): HttpURLConnection {
         val conn = url.openConnection() as HttpURLConnection
+        val tok = deviceToken
+        if (tok.isNotEmpty()) conn.setRequestProperty("X-Device-Token", tok)
         if (conn is javax.net.ssl.HttpsURLConnection) {
             val hostPort = url.host + ":" + (if (url.port > 0) url.port else url.defaultPort)
             val tm = PinningTrustManager(hostPort)

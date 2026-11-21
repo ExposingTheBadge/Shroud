@@ -1,114 +1,66 @@
 # SHROUD session notes (handoff before context compaction)
 
-> **2026-09-28: the AWS infrastructure described below is retired.** The
-> four EC2 relays and the federation between them are gone. SHROUD now runs
-> as a single relay at `173.245.244.180:58443` on the operator's own
-> machine, with federation off. The AWS sections are kept only as history.
+> SHROUD runs as a single relay at `173.245.244.180:58443` on the
+> operator's own machine, with federation off. **No cloud provider is
+> used** (the 2026 AWS relays were retired on 2026-09-28 and every AWS
+> deploy recipe was removed on 2026-11-21).
 
-## Where things stand
+## Current status (2026-11-21)
 
-The SHROUD project (renamed from GHOSTLINK earlier this session) now
-runs a **4-region federated AWS deploy**, full protocol stack across
-8 platforms, anonymous error reporting with operator-side decryption,
-and 21+ self-tested crypto modules. All work pushed to
-`https://github.com/ExposingTheBadge/Shroud` on `master`.
+Full-project pass on branch `claude/project-thread-azdzka`, stacked on
+PRs #4 (admin sign-in) and #5 (iOS + cross-platform fixes).
 
-This file is the snapshot you need to resume work after context
-compaction.
+- **Device tokens.** A device id used to be the only credential, and
+  friends learn it from `/contacts/devices`. Every password sign-in now
+  returns `device_token`; clients send `X-Device-Token` (WebSocket:
+  `?token=`). The first correct token binds the device; after that the
+  bare id is refused. Unbound (old-app) devices keep working until the
+  admin console's *Relay Policy > Require device tokens* is turned on.
+  Watch the "N / M devices use a token" pill before turning it on.
+- `/contacts/devices` is friends-only (and self).
+- WebSocket deletes on delivery and is woken instantly by sends.
+- Retention: undelivered mail is dropped after `undelivered_retention_days`
+  (default 30); upload cap `max_upload_mb` (default 100). Both are in the
+  admin Relay Policy panel.
+- Windows pins the relay TLS certificate (`%APPDATA%\SHROUD\tls_pin.txt`,
+  delete it after deliberately replacing the relay certificate).
+- The relay root `/` serves a landing page to browsers; the admin console
+  and sign-in were redesigned (sidebar, violet/teal palette, light theme).
+- Browser extension now actually loads (vendored `lib/anon_routing.js`,
+  icons, module options page). `tests/repo_consistency.py` keeps the copy
+  in sync.
 
----
+## Earlier status (2026-11-07)
 
-## Live infrastructure
+Everything below this section is history from September. What is true now:
 
-### Production relays (all healthy, all federated 4-way)
-
-| Region | Public IP | Instance ID | SSH key file | Operator Ed25519 pubkey |
-|---|---|---|---|---|
-| us-east-1 (Virginia) | `100.30.51.8` | `i-017e9f45b02f31d04` | `Documents\AWS-Keys\shroud-relay.pem` | `3e82643a345451f867b2d336c97f12def70c59afb4fd95e7714f8a72920ef374` |
-| us-east-2 (Ohio) | `18.222.72.227` | `i-09802917ea14f357a` | `Documents\AWS-Keys\shroud-relay-useast2.pem` | `958f11b92f4ae1b8f3b03cfbf020efd67d89afb8a65a51674f146145f8262d93` |
-| us-west-2 (Oregon) | `52.38.93.230` | `i-0dc3f833728c551df` | `Documents\AWS-Keys\shroud-relay-uswest2.pem` | `2cf90ad74ca6ac49de311dd481994735e47a61ad148234621c19edd498ba40f2` |
-| eu-west-1 (Ireland) | `52.50.29.221` | `i-032f9c65978e3a7a5` | `Documents\AWS-Keys\shroud-relay-euwest1.pem` | `79f49802d116f91ba70f4079b967e0c89532d0b3dbce65f1b6d8436699eb0417` |
-
-Each relay has:
-- t3.micro (1 vCPU, 1 GiB RAM, 8 GB gp3 EBS)
-- Python 3.11 venv at `/opt/shroud/venv`
-- Source tree pulled from `master` at `/opt/shroud/src`
-- Self-signed TLS at port 58443
-- `SHROUD_FEDERATION=1` in `/etc/systemd/system/shroud-relay.service.d/federation.conf`
-- Operator Ed25519 keypair at `/opt/shroud/data/operator_ed25519.json` (chmod 600)
-- 3 peer pubkeys pre-approved in `federation_peers` table
-- Active 3-peer roster verified via `/api/v1/federation/peers`
-
-### us-east-2 SG fix worth remembering
-The default subnet in us-east-2 was missing the IGW route in its custom route
-table. Manually added: `aws ec2 create-route --region us-east-2
---route-table-id rtb-0369c2dbabadba03b --destination-cidr-block 0.0.0.0/0
---gateway-id igw-09a8298a9fbc7e535`. If you create more relays in this
-region, watch for this.
-
-### Costs
-- Each t3.micro: free tier covers first 12 months; ~$8.50/mo each after
-- 4 relays = ~$34/mo after free tier expires
-- 8 GB EBS each: minimal cost
-- Data transfer: free for inbound, $0.09/GB outbound after the free tier
-
-To tear down a relay:
-```pwsh
-aws ec2 terminate-instances --region <region> --instance-ids <id>
-```
-
----
-
-## Outstanding user asks (unfinished)
-
-1. **Advanced Installer 19.9 integration for Windows MSI builds.** User
-   mentioned they installed it. Not yet wired into the Windows build
-   pipeline. Suggested next: create `clients/windows/installer/` with
-   an Advanced Installer `.aip` project that consumes the existing
-   Authenticode-signed `shroud.exe` from `.github/workflows/release-
-   windows.yml` and produces an MSI. The signed exe lives in the GitHub
-   Release artifacts.
-
-2. **Real diagnostics keypair publication.** The Android / iOS / Windows
-   error reporters are wired and compile but their `OPERATOR_DIAG_
-   PUBKEY_HEX` is all zeros (placeholder). To activate:
-   - Run `python -m tools.diagnostics_inbox keygen --keyfile ~/.config/
-     shroud/diag.keypair.json` to mint a real operator diagnostics
-     keypair
-   - Replace the all-zero constant in:
-     - `clients/android/.../MainActivity.kt` `OPERATOR_DIAG_PUBKEY_HEX`
-     - `clients/ios/ShroudApp.swift` `OPERATOR_DIAG_PUBKEY_HEX`
-     - `clients/windows/main.cpp` `g_operator_diag_pubkey` array
-   - Ship a release containing the new constants
-   - Run `python -m tools.diagnostics_inbox poll --keyfile ~/.config/
-     shroud/diag.keypair.json` whenever you want to drain reports
-
-3. **Windows main.cpp anon endpoint wireup** — patch doc exists at
-   `clients/windows/main_anon_patch.md`. Android version is **already
-   committed** (NetworkClient.kt + MainActivity.kt) and compiles green
-   on the connected device (`R5CTA2BWYCH`). Windows still uses the
-   patch doc approach because we can't compile here without Visual
-   Studio + Qt6 SDK.
-
-4. **iOS UI integration** — `ErrorReporter.swift` and
-   `AnonRouting.swift` are committed; `ShroudApp.swift` wires
-   `ErrorReporter.install`. The legacy send/fetch path in iOS still
-   uses `/messages/send` though — patch doc at
-   `clients/ios/main_anon_patch.md` lays out the swap.
-
-5. **Real federation gossip e2e** — local in-process test passes
-   (`python -m tests.federation_e2e`). On the live 4-relay federation,
-   gossip should work but **hasn't been smoke-tested yet** since the
-   federation roster only just got verified. Next: post a sealed
-   message to us-east-1's `/send-anon`, poll the same tag at the other
-   3 relays, confirm it gossiped.
-
----
+- One relay at `173.245.244.180:58443`, federation off.
+- The "outstanding user asks" further down are all closed:
+  1. MSI: done (`clients/windows/installer/`, uploaded by `tools/make-msi-release.ps1`).
+  2. Diagnostics key: real key `7191a786…fd54` is in Android, iOS and Windows.
+  3. Windows anon routing: text, images and file notices all go sealed.
+  4. iOS: now a complete client (sign-in, contacts, Double Ratchet, anon
+     routing, TLS pinning), shared with macOS. See `clients/ios/README.md`.
+  5. Federation gossip on live relays: moot while federation is off; the
+     two-relay test (`tests.federation_e2e`) covers it.
+- Anonymous payload shape differs by sender: Windows seals
+  `{"envelope": env, "ts"}`, Android and iOS seal `env` itself. Every
+  receiver accepts both. Keep it that way, or pick one and change all three.
+- A message's `name` field is sender-chosen. Clients file a message under a
+  contact only if the sending device belongs to that account
+  (`/contacts/devices`); otherwise it shows as "(unverified)".
+- Static-key fallback envelopes are not interoperable across platforms
+  (Android HMAC-SHA256(label, ecdh), Python HKDF, Windows SHA-256(ecdh)).
+  It only matters when a peer never published a ratchet bundle, which every
+  current client does on sign-in.
+- Not built or run here: the Swift, Kotlin and C++ changes. CI covers the
+  Python relay; the clients need a build on a machine with Xcode, the
+  Android SDK, and Qt6/MSVC.
 
 ## Hard rules (saved in memory, must NOT be violated)
 
-- **Rule 0:** project never shuts down for any reason (federation
-  + multi-region + non-AWS mirrors)
+- **Rule 0:** project never shuts down for any reason (federation,
+  Tor, self-hosted mirrors)
 - **Rule 1:** server cannot identify sender (sealed envelopes)
 - **Rule 2:** server cannot identify receiver (per-pair routing tags,
   delete-on-delivery)
@@ -180,15 +132,13 @@ re-load them.
 - `tools/shroud_cli.py` — interactive REPL
 
 ### Deploy options
-- AWS Nitro Enclave (`deploy/aws-nitro/` Terraform + Dockerfile +
-  attestation verifier)
-- AWS plain user-data (`deploy/aws-simple/user-data.sh`) — what the 4
-  live relays use
 - Docker Compose (`deploy/docker-compose/`) for self-hosters
+- Plain Python on the operator's machine (`server/server.py`)
 
 ### Tests + CI
 - `tests/run_all.py` — runs every module self-test (21+ green in
   <1s)
+- `tests/repo_consistency.py` — extension library copy, icons, no retired relays
 - `tests/e2e_anon_protocol.py` — 7/7 against live relay (anon send/
   fetch + Rule 2 delete + tag rotation + federation 403 + federation
   dedup + diagnostics roundtrip)
@@ -202,77 +152,8 @@ re-load them.
 - `docs/anon-routing-protocol.md` — wire format spec
 - `docs/security-faq.md` — 15-question threat model walkthrough
 - `docs/protocol-modules.md` — single-source index
-- `docs/aws-nitro.md`, `docs/multisig-releases.md`, `docs/tor.md`
+- `docs/multisig-releases.md`, `docs/tor.md`
 - `CONTRIBUTING.md`, `SECURITY.md`, GitHub issue/PR templates
 - `CHANGELOG.md` updated with full v2.5.x summary
 
 ---
-
-## Suggested next concrete actions when context resumes
-
-1. **Smoke-test the live 4-relay federation gossip.** Post a sealed
-   envelope to us-east-1, poll the same tag at us-east-2/us-west-2/
-   eu-west-1, verify it arrives. Should take <30s end-to-end.
-
-2. **Wire Advanced Installer for Windows MSI.** Create
-   `clients/windows/installer/shroud.aip` and update the Windows
-   release workflow to produce an MSI alongside the .zip.
-
-3. **Apply the Windows anon patch doc** from
-   `clients/windows/main_anon_patch.md` to `clients/windows/main.cpp`
-   so the production Windows client sends Rule 1+2 compliantly.
-
-4. **Mint and publish the real operator diagnostics keypair** (see
-   "Outstanding user asks" above).
-
-5. **Document the live federation deployment** in `docs/federation-
-   deploy.md` — operator handles, pubkey rotation procedure, the
-   us-east-2 IGW gotcha, etc.
-
----
-
-## Quick reference commands
-
-### SSH to any relay
-```pwsh
-$key = "$env:USERPROFILE\Documents\AWS-Keys\shroud-relay-<region>.pem"
-ssh -o StrictHostKeyChecking=no -i $key ec2-user@<IP>
-```
-
-### Restart a relay
-```bash
-# On the box:
-sudo systemctl restart shroud-relay.service
-```
-
-### Update a relay to latest master
-```bash
-# On the box:
-cd /opt/shroud/src && sudo git pull origin master && sudo systemctl restart shroud-relay.service
-```
-
-### Federate a NEW operator
-```pwsh
-python -m tools.federation_join `
-  --my-endpoint https://<new-relay>:58443 `
-  --existing-relay-url https://100.30.51.8:58443 `
-  --keyfile ~/.config/shroud/operator.ed25519.json
-```
-
-### Drain anonymous error reports
-```pwsh
-python -m tools.diagnostics_inbox poll `
-  --keyfile ~/.config/shroud/diag.keypair.json
-```
-
-### Tear everything down (NUCLEAR)
-```pwsh
-foreach ($i in @(
-  @{Region="us-east-1"; Id="i-017e9f45b02f31d04"}
-  @{Region="us-east-2"; Id="i-09802917ea14f357a"}
-  @{Region="us-west-2"; Id="i-0dc3f833728c551df"}
-  @{Region="eu-west-1"; Id="i-032f9c65978e3a7a5"}
-)) {
-    aws ec2 terminate-instances --region $i.Region --instance-ids $i.Id
-}
-```

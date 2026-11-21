@@ -8,7 +8,7 @@ will be built on top of Python + PyGObject for two reasons:
      root, sharing one implementation between the server-side
      reference, Linux client, and ad-hoc testing.
   2. The Python implementation has already round-tripped against the
-     deployed AWS relay end-to-end, so we have wire-format confidence
+     deployed relay end-to-end, so we have wire-format confidence
      before a single Linux line of UI code is written.
 
 This module is a thin wrapper that exists primarily so the Linux

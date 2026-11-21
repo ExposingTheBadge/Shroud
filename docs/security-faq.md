@@ -230,12 +230,9 @@ Code: `crypto/pq_hybrid.py` and `crypto/pq_double_ratchet.py`.
   and refuse to talk to a relay claiming the same hostname but a
   different key.
 
-For Nitro-enclave-hosted relays (`deploy/aws-nitro/`), there's a
-third layer: the client requests a Nitro attestation document from
-the relay before sending any traffic, verifies that the document is
-signed by AWS's hardware root, and refuses to connect if the
-attested PCR0 doesn't match the value published in the signed
-release manifest. See `deploy/aws-nitro/attestation_verifier.py`.
+- Device tokens: every request that acts for a device carries a
+  random per-device token issued at sign-in, so knowing a friend's
+  device id is not enough to read or delete their mail.
 
 ---
 
