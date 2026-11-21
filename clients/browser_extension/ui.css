@@ -1,0 +1,44 @@
+/* SHROUD Share — shared styles for the popup and options page. */
+:root {
+  color-scheme: light dark;
+  --bg:#0b0d12; --bg2:#12151d; --bg3:#171b25; --border:#232938;
+  --text:#e4e7ee; --dim:#8a92a6;
+  --accent:#8b7cff; --accent-2:#2dd4bf; --accent-soft:rgba(139,124,255,.16);
+  --ok:#34d399; --danger:#f87171;
+  --mono:'Cascadia Mono','JetBrains Mono',Consolas,Menlo,monospace;
+  --sans:'Segoe UI Variable Text','Segoe UI',Inter,system-ui,-apple-system,sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg:#f5f6fa; --bg2:#ffffff; --bg3:#f8f9fc; --border:#e2e5ee; --text:#161a23; --dim:#5f6778;
+          --accent:#5b4bdb; --accent-2:#0f9488; --accent-soft:rgba(91,75,219,.12); --ok:#059669; --danger:#dc2626; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: var(--sans); background: var(--bg); color: var(--text); font-size: 13.5px; line-height: 1.45; }
+.head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.head img { width: 28px; height: 28px; }
+h1 { font-size: 16px; margin: 0; letter-spacing: -.1px; }
+h2 { font-size: 13.5px; margin: 22px 0 6px; }
+label { display: block; font-size: 12.5px; color: var(--dim); margin: 10px 0 5px; font-weight: 500; }
+input, textarea, select {
+  width: 100%; background: var(--bg3); color: var(--text); border: 1px solid var(--border);
+  border-radius: 9px; padding: 9px 11px; font: inherit; outline: none;
+}
+textarea { resize: vertical; }
+textarea.code { font-family: var(--mono); font-size: 12px; min-height: 130px; }
+input:focus, textarea:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+button {
+  margin-top: 12px; padding: 9px 14px; border-radius: 9px; border: 1px solid var(--border);
+  background: var(--bg2); color: var(--text); font: inherit; font-weight: 600; cursor: pointer;
+}
+button.primary { background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 70%, var(--accent-2))); color: #fff; border-color: transparent; width: 100%; }
+button.danger { color: var(--danger); }
+button:hover { filter: brightness(1.06); }
+.row { display: flex; gap: 8px; }
+.row > button { flex: 1; }
+.status { margin-top: 10px; font-size: 12.5px; min-height: 18px; color: var(--dim); }
+.status.ok { color: var(--ok); }
+.status.err { color: var(--danger); }
+.pubkey { font-family: var(--mono); font-size: 12px; word-break: break-all; padding: 9px 11px; background: var(--bg3); border: 1px solid var(--border); border-radius: 9px; }
+.help { font-size: 12.5px; color: var(--dim); margin: 4px 0; }
+code { font-family: var(--mono); font-size: 11.5px; }
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }

@@ -68,7 +68,7 @@ is a two-step manual ceremony:
    ```pwsh
    python -m tools.federation_join `
        --my-endpoint https://<new-relay>:58443 `
-       --existing-relay-url https://100.30.51.8:58443 `
+       --existing-relay-url https://173.245.244.180:58443 `
        --keyfile ~/.config/shroud/operator.ed25519.json
    ```
 
