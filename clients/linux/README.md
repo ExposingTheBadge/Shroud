@@ -15,7 +15,7 @@ should be considered placeholders.
 |------|---------|
 | `main.c` | Stale GTK3 client (do not build) |
 | `Makefile` | Builds the stale client (skip) |
-| `shroud_anon_routing.py` | **Active.** Thin Python re-export of `crypto.anon_routing` so the upcoming GTK4 client can use it as a discrete module without reaching into `crypto/`. Already round-tripped against the live AWS relay. |
+| `shroud_anon_routing.py` | **Active.** Thin Python re-export of `crypto.anon_routing` so the upcoming GTK4 client can use it as a discrete module without reaching into `crypto/`. Already round-tripped against the live relay. |
 | `README.md` | This file |
 
 ## Building the GTK4 client (when it exists)

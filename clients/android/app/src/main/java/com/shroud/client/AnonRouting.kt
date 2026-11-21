@@ -4,7 +4,7 @@
  * Kotlin counterpart of crypto/anon_routing.py and
  * clients/windows/anon_routing.c. All three produce byte-identical
  * routing tags and sealed envelopes against the same shared inputs, so
- * the live AWS relay's /api/v1/messages/{send,fetch}-anon endpoints
+ * the live relay's /api/v1/messages/{send,fetch}-anon endpoints
  * interoperate without protocol translation.
  *
  * Rule 1: sender identity lives inside an AES-256-GCM ciphertext keyed

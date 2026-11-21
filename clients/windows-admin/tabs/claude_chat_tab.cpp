@@ -133,21 +133,11 @@ them:
   - **Rule 3:** no transmitted content carries identifying metadata
     (mandatory metadata scrub on every media path).
 
-**Production federation** (always reachable as peers of each other
-and of the operator's local relay):
-
-| Region | Host | Operator |
-|---|---|---|
-| us-east-1 | `100.30.51.8:58443` | Brent Gordon |
-| us-east-2 | `3.142.185.104:58443` | Brent Gordon |
-| us-west-2 | `54.214.75.14:58443` | Brent Gordon |
-| eu-west-1 | `54.171.165.223:58443` | Brent Gordon |
-
-Each relay runs `t3.micro` on AL2023 with Python 3.11 venv at
-`/opt/shroud/venv` and source at `/opt/shroud/src`. The systemd
-unit is `shroud-relay.service`, log at `/var/log/shroud-relay.log`,
-DB at `/opt/shroud/src/server/shroud.db`. SSH keys live in
-`~/Documents/AWS-Keys/shroud-relay*.pem`.
+**Production relay:** a single relay at `173.245.244.180:58443`
+on the operator's own machine. Federation is off and there is no
+cloud hosting (the old AWS relays are retired; never suggest AWS).
+The relay is `server/server.py` (FastAPI + SQLite) and the admin
+console is served from `/admin`.
 
 **State-event mirror** keeps every relay's DB convergent:
 `user.created`, `device.added/removed`, `password.changed`,
@@ -225,7 +215,7 @@ U (user-facing client), X (catch-all). Quote codes by name
   `<path-or-endpoint>`." (one line)
 - Never recommend disabling Rule 0/1/2/3.
 - Never recommend committing private keys, `diag.keypair.json`,
-  `manifest.ed25519.json`, `operator_ed25519.json`, AWS .pem files,
+  `manifest.ed25519.json`, `operator_ed25519.json`, SSH private keys,
   or anything matching the `.gitignore` defensive patterns.
 - Never propose force-push to `master` / `main` of the SHROUD
   repo without an explicit "force push approved" from the operator.

@@ -1232,7 +1232,7 @@ def _read_git_sha() -> str:
 def _read_onion_address() -> str:
     """Pull the local relay's Tor v3 .onion address if tor_setup.sh
     has been run. The tor data dir is mode 700 owned by the tor user,
-    so the relay (running as ec2-user / shroud) can't read the
+    so the relay (running as the shroud service user) can't read the
     hostname directly. tor_setup.sh installs a world-readable copy at
     /opt/shroud/data/onion_hostname.txt — we look there first.
     Empty string when Tor isn't deployed."""
@@ -4819,7 +4819,7 @@ def audit_log(ip: str, event: str, detail: str = ""):
 
     A full disk or a bad mode on audit.log used to swallow every entry
     with a bare `except: pass`, so destructive operator actions (bans,
-    backup restores, EC2 stop/start) would leave no trace at all and
+    backup restores) would leave no trace at all and
     nothing would say so. Now the first failure is reported on stderr;
     subsequent ones are suppressed so a broken log can't flood output.
     """

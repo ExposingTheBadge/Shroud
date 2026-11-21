@@ -1,7 +1,7 @@
 # SHROUD docker-compose deployment
 
 Self-host the full SHROUD stack on a single Linux box with Docker.
-No AWS, no Terraform, no Kubernetes. The relay + SFU run as two
+No cloud provider, no Terraform, no Kubernetes. The relay + SFU run as two
 containers on a shared bridge network; storage persists to a named
 Docker volume.
 
@@ -82,8 +82,7 @@ http {
 
 - ~$5/mo VPS (Hetzner CX22, Vultr regular, OVH eco) is plenty for a
   small relay
-- No AWS lock-in, no Terraform state, no Cloud Act risk
+- No cloud lock-in, no Terraform state, no Cloud Act risk
 
-This is the recommended setup for users who don't want AWS-specific
-attestation but want full Rule 0 (non-US legal exposure, multi-
+This is the recommended setup for anyone who wants full Rule 0 (non-US legal exposure, multi-
 operator federation).
